@@ -1,0 +1,13 @@
+[Unit]
+Description=DGX Spark AI Stack — Idle Manager Watchdog Timer
+Documentation=file:///home/xxfactionsxx/dgx-ai-stack/scripts/idle_manager.py
+
+[Timer]
+# Ensure the service is running; restart it if it has exited.
+# The service itself loops internally, so this timer acts as a watchdog.
+OnBootSec=2min
+OnUnitActiveSec=5min
+Unit=ai-idle-manager.service
+
+[Install]
+WantedBy=timers.target

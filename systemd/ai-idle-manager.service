@@ -1,0 +1,30 @@
+[Unit]
+Description=DGX Spark AI Stack — Idle Service Manager
+Documentation=file:///home/xxfactionsxx/dgx-ai-stack/scripts/idle_manager.py
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=xxfactionsxx
+Group=docker
+WorkingDirectory=/home/xxfactionsxx/dgx-ai-stack
+Environment=COMPOSE_DIR=/home/xxfactionsxx/dgx-ai-stack
+Environment=REDIS_HOST=localhost
+Environment=REDIS_PORT=6379
+Environment=LOG_LEVEL=INFO
+ExecStart=/usr/bin/python3 /home/xxfactionsxx/dgx-ai-stack/scripts/idle_manager.py --interval 60
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ai-idle-manager
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/xxfactionsxx/dgx-ai-stack /srv/ai
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

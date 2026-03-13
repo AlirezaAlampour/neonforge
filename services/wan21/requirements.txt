@@ -1,0 +1,18 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+pydantic==2.10.4
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.5.1
+torchvision==0.20.1
+# Wan 2.1 — install from source or pip if available
+# The model weights are downloaded separately to /models/wan21/
+diffusers==0.32.2
+transformers==4.47.1
+accelerate==1.2.1
+safetensors==0.4.5
+imageio==2.36.1
+imageio-ffmpeg==0.5.1
+opencv-python-headless==4.10.0.84
+numpy==1.26.4
+einops==0.8.0

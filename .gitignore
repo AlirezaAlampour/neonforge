@@ -1,0 +1,43 @@
+# Environment
+.env
+*.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Node.js / Frontend
+node_modules/
+.next/
+frontend/certs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+*.tar
+*.tar.gz
+
+# Models and outputs (bind-mounted, not committed)
+/models/
+/outputs/
+/cache/
+/logs/
+
+# Temporary files
+*.tmp
+*.bak

@@ -1,0 +1,269 @@
+# =============================================================================
+# DGX Spark AI Stack — Docker Compose v2
+# Target: NVIDIA DGX Spark (GB10, 128 GB UMA, ARM64, CUDA 13.0)
+# =============================================================================
+# Usage:
+#   cp .env.example .env   # edit values
+#   docker compose up -d redis supervisor gateway whisper frontend  # always-on tier
+#   docker compose up -d f5tts liveportrait lipsync                 # warm tier
+#   # wan21 is started on-demand by the supervisor sidecar
+# =============================================================================
+
+name: dgx-ai-stack
+
+x-common-gpu: &common-gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu, compute, utility]
+
+x-common-env: &common-env
+  NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+  HF_HOME: /cache/hf
+  TRANSFORMERS_CACHE: /cache/hf
+  TORCH_HOME: /models/torch
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+x-common-volumes: &common-volumes
+  - ${MODELS_DIR:-/srv/ai/models}:/models:rw
+  - ${HF_CACHE_DIR:-/srv/ai/cache/hf}:/cache/hf:rw
+  - ${OUTPUTS_DIR:-/srv/ai/outputs}:/outputs:rw
+  - ${LOGS_DIR:-/srv/ai/logs}:/logs:rw
+
+x-healthcheck-defaults: &healthcheck-defaults
+  interval: 30s
+  timeout: 10s
+  retries: 3
+  start_period: 60s
+
+services:
+  # ===========================================================================
+  # ALWAYS-ON TIER
+  # ===========================================================================
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: ai-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      <<: *healthcheck-defaults
+      start_period: 5s
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --save 60 100
+    networks:
+      - ai-net
+
+  # Supervisor sidecar — holds Docker socket, starts/stops lazy containers.
+  # NOT exposed to external network. Only gateway calls it internally.
+  supervisor:
+    build:
+      context: ./supervisor
+      dockerfile: Dockerfile
+    container_name: ai-supervisor
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      COMPOSE_DIR: /project
+      WAN21_URL: http://wan21:8000
+      F5TTS_URL: http://f5tts:8000
+      LIVEPORTRAIT_URL: http://liveportrait:8000
+      LIPSYNC_URL: http://lipsync:8000
+      WHISPER_URL: http://whisper:8000
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - .:/project:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      <<: *healthcheck-defaults
+      start_period: 10s
+    networks:
+      - ai-net
+
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    container_name: ai-gateway
+    restart: unless-stopped
+    ports:
+      - "${GATEWAY_PORT:-8080}:8000"
+    environment:
+      <<: *common-env
+      REDIS_URL: redis://redis:6379/0
+      SUPERVISOR_URL: http://supervisor:8000
+      WHISPER_URL: http://whisper:8000
+      F5TTS_URL: http://f5tts:8000
+      LIVEPORTRAIT_URL: http://liveportrait:8000
+      LIPSYNC_URL: http://lipsync:8000
+      WAN21_URL: http://wan21:8000
+      MEMORY_WARN_THRESHOLD: ${MEMORY_WARN_THRESHOLD:-70}
+      MEMORY_HARD_LIMIT: ${MEMORY_HARD_LIMIT:-80}
+      MEM_RESERVE_HEAVY_GB: ${MEM_RESERVE_HEAVY_GB:-40}
+      MEM_RESERVE_MEDIUM_GB: ${MEM_RESERVE_MEDIUM_GB:-10}
+      MEM_RESERVE_LIGHT_GB: ${MEM_RESERVE_LIGHT_GB:-2}
+    volumes:
+      - ${OUTPUTS_DIR:-/srv/ai/outputs}:/outputs:rw
+      - ${LOGS_DIR:-/srv/ai/logs}:/logs:rw
+      # NOTE: No docker.sock — orchestration delegated to supervisor
+    depends_on:
+      redis:
+        condition: service_healthy
+      supervisor:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      <<: *healthcheck-defaults
+      start_period: 10s
+    networks:
+      - ai-net
+
+  # Director's Console — NeonForge web UI
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: ai-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    environment:
+      GATEWAY_INTERNAL_URL: http://gateway:8000
+    depends_on:
+      gateway:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000"]
+      <<: *healthcheck-defaults
+      start_period: 30s
+    networks:
+      - ai-net
+
+  whisper:
+    build:
+      context: ./services/whisper
+      dockerfile: Dockerfile
+    container_name: ai-whisper
+    restart: unless-stopped
+    <<: *common-gpu
+    environment:
+      <<: *common-env
+      WHISPER_MODEL_SIZE: ${WHISPER_MODEL_SIZE:-medium}
+      WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-float16}
+      WHISPER_BEAM_SIZE: ${WHISPER_BEAM_SIZE:-5}
+    volumes: *common-volumes
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      <<: *healthcheck-defaults
+      start_period: 120s
+    networks:
+      - ai-net
+
+  # ===========================================================================
+  # WARM TIER — containers run, models load on first request, destroyed on idle
+  # ===========================================================================
+
+  f5tts:
+    build:
+      context: ./services/f5tts
+      dockerfile: Dockerfile
+    container_name: ai-f5tts
+    restart: unless-stopped
+    <<: *common-gpu
+    environment:
+      <<: *common-env
+      F5TTS_IDLE_TIMEOUT: ${F5TTS_IDLE_TIMEOUT:-1800}
+      F5TTS_SAMPLE_RATE: ${F5TTS_SAMPLE_RATE:-24000}
+    volumes: *common-volumes
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      <<: *healthcheck-defaults
+      start_period: 120s
+    networks:
+      - ai-net
+
+  liveportrait:
+    build:
+      context: ./services/liveportrait
+      dockerfile: Dockerfile
+    container_name: ai-liveportrait
+    restart: unless-stopped
+    <<: *common-gpu
+    environment:
+      <<: *common-env
+      LIVEPORTRAIT_IDLE_TIMEOUT: ${LIVEPORTRAIT_IDLE_TIMEOUT:-1800}
+    volumes: *common-volumes
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      <<: *healthcheck-defaults
+      start_period: 120s
+    networks:
+      - ai-net
+
+  lipsync:
+    build:
+      context: ./services/lipsync
+      dockerfile: Dockerfile
+    container_name: ai-lipsync
+    restart: unless-stopped
+    <<: *common-gpu
+    environment:
+      <<: *common-env
+      LIPSYNC_IDLE_TIMEOUT: ${LIPSYNC_IDLE_TIMEOUT:-1800}
+      LIPSYNC_BACKEND: ${LIPSYNC_BACKEND:-video-retalking}
+    volumes: *common-volumes
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      <<: *healthcheck-defaults
+      start_period: 120s
+    networks:
+      - ai-net
+
+  # ===========================================================================
+  # LAZY-START TIER — started on demand by supervisor, stopped after idle
+  # ===========================================================================
+
+  wan21:
+    build:
+      context: ./services/wan21
+      dockerfile: Dockerfile
+    container_name: ai-wan21
+    # No restart — managed by supervisor + idle_manager
+    restart: "no"
+    <<: *common-gpu
+    environment:
+      <<: *common-env
+      WAN21_MODEL_VARIANT: ${WAN21_MODEL_VARIANT:-1.3B}
+      WAN21_MAX_CONCURRENT: ${WAN21_MAX_CONCURRENT:-1}
+      WAN21_IDLE_TIMEOUT: ${WAN21_IDLE_TIMEOUT:-300}
+      WAN21_MAX_VIDEO_LENGTH: ${WAN21_MAX_VIDEO_LENGTH:-10}
+      WAN21_MAX_RESOLUTION: ${WAN21_MAX_RESOLUTION:-512}
+    volumes: *common-volumes
+    profiles:
+      - wan21
+      - full
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      <<: *healthcheck-defaults
+      start_period: 180s
+    networks:
+      - ai-net
+
+volumes:
+  redis-data:
+    driver: local
+
+networks:
+  ai-net:
+    driver: bridge
+    name: ai-net
