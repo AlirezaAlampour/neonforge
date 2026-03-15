@@ -2,12 +2,6 @@ fastapi==0.115.6
 uvicorn[standard]==0.34.0
 python-multipart==0.0.20
 pydantic==2.10.4
-# PyTorch — install from NVIDIA index for ARM64/Blackwell support.
-# Adjust the index URL if the NGC-hosted wheel path changes.
---extra-index-url https://download.pytorch.org/whl/cu124
-torch==2.5.1
-torchaudio==2.5.1
-# F5-TTS core
 f5-tts==0.3.4
 soundfile==0.13.1
 librosa==0.10.2.post1

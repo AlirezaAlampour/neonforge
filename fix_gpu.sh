@@ -1,4 +1,7 @@
-FROM nvcr.io/nvidia/pytorch:24.10-py3 AS base
+#!/bin/bash
+for SERVICE in f5tts liveportrait lipsync wan21; do
+  cat << 'INNER_EOF' > services/${SERVICE}/Dockerfile
+FROM nvcr.io/nvidia/pytorch:24.03-py3 AS base
 
 LABEL maintainer="ai-infra"
 LABEL component="${SERVICE}"
@@ -23,3 +26,5 @@ COPY app.py .
 EXPOSE 8000
 ENTRYPOINT ["tini", "--"]
 CMD ["python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+INNER_EOF
+done

@@ -8,7 +8,7 @@ LABEL maintainer="ai-infra"
 LABEL component="supervisor"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl docker.io tini \
+        curl docker.io docker-compose-v2 tini \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
