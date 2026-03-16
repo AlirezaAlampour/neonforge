@@ -192,6 +192,29 @@ services:
     networks:
       - ai-net
 
+  comfyui:
+    build:
+      context: .
+      dockerfile: comfyUI/Dockerfile
+    container_name: ai-comfyui
+    restart: unless-stopped
+    <<: *common-gpu
+    environment:
+      <<: *common-env
+      COMFYUI_PORT: ${COMFYUI_PORT:-8188}
+    volumes: *common-volumes
+    ports:
+      - "${COMFYUI_PORT:-8188}:8188"
+    profiles:
+      - comfyui
+      - full
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8188/')"]
+      <<: *healthcheck-defaults
+      start_period: 120s
+    networks:
+      - ai-net
+
   liveportrait:
     build:
       context: ./services/liveportrait
