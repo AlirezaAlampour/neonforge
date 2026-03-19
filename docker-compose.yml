@@ -31,6 +31,7 @@ x-common-volumes: &common-volumes
   - ${MODELS_DIR:-/srv/ai/models}:/models:rw
   - ${HF_CACHE_DIR:-/srv/ai/cache/hf}:/cache/hf:rw
   - ${OUTPUTS_DIR:-/srv/ai/outputs}:/outputs:rw
+  - ${ASSETS_DIR:-/srv/ai/assets}:/app/data/assets:rw
   - ${LOGS_DIR:-/srv/ai/logs}:/logs:rw
 
 x-healthcheck-defaults: &healthcheck-defaults
@@ -107,6 +108,7 @@ services:
       LIVEPORTRAIT_URL: http://liveportrait:8000
       LIPSYNC_URL: http://lipsync:8000
       WAN21_URL: http://wan21:8000
+      COMFYUI_URL: http://comfyui:8188
       MEMORY_WARN_THRESHOLD: ${MEMORY_WARN_THRESHOLD:-70}
       MEMORY_HARD_LIMIT: ${MEMORY_HARD_LIMIT:-80}
       MEM_RESERVE_HEAVY_GB: ${MEM_RESERVE_HEAVY_GB:-40}
@@ -114,6 +116,7 @@ services:
       MEM_RESERVE_LIGHT_GB: ${MEM_RESERVE_LIGHT_GB:-2}
     volumes:
       - ${OUTPUTS_DIR:-/srv/ai/outputs}:/outputs:rw
+      - ${ASSETS_DIR:-/srv/ai/assets}:/app/data/assets:rw
       - ${LOGS_DIR:-/srv/ai/logs}:/logs:rw
       # NOTE: No docker.sock — orchestration delegated to supervisor
     depends_on:
@@ -143,7 +146,7 @@ services:
       gateway:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000"]
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000"]
       <<: *healthcheck-defaults
       start_period: 30s
     networks:
@@ -202,7 +205,7 @@ services:
     environment:
       <<: *common-env
       COMFYUI_PORT: ${COMFYUI_PORT:-8188}
-    volumes: *common-volumes
+    volumes: *common-volumes 
     ports:
       - "${COMFYUI_PORT:-8188}:8188"
     profiles:
@@ -230,6 +233,26 @@ services:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
       <<: *healthcheck-defaults
       start_period: 120s
+    networks:
+      - ai-net
+
+  wan-ui:
+    build:
+      context: ./Wan2.2-Animate
+      dockerfile: Dockerfile
+      additional_contexts:
+        comfyui_resolver: ./comfyUI
+    container_name: ai-wan-ui
+    restart: unless-stopped
+    <<: *common-gpu
+    volumes:
+      - /srv/ai/models/comfyui:/models/comfyui:ro
+      - ${HF_CACHE_DIR:-/srv/ai/cache/hf}:/cache/hf:rw
+    environment:
+      HF_HOME: /cache/hf
+      GRADIO_SERVER_NAME: "0.0.0.0"
+    ports:
+      - "7860:7860"
     networks:
       - ai-net
 

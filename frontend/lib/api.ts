@@ -1,4 +1,14 @@
-import type { MemoryStatus, ServicesStatus, JobRecord } from './types'
+import type {
+  AssetResponse,
+  HistoryResponse,
+  JobRecord,
+  MemoryStatus,
+  PresetListResponse,
+  PresetProfile,
+  ReactorResult,
+  ServicesStatus,
+  StudioTool,
+} from './types'
 
 class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -28,10 +38,86 @@ export async function fetchJob(jobId: string): Promise<JobRecord> {
   return request(`/jobs/${jobId}`)
 }
 
+export async function fetchHistory(params?: {
+  service?: string
+  limit?: number
+}): Promise<HistoryResponse> {
+  const query = new URLSearchParams()
+  if (params?.service) query.set('service', params.service)
+  if (params?.limit) query.set('limit', String(params.limit))
+  const suffix = query.toString() ? `?${query.toString()}` : ''
+  return request(`/api/v1/history${suffix}`)
+}
+
+export async function deleteHistoryItem(id: string): Promise<{ deleted: boolean; file_deleted: boolean }> {
+  return request(`/api/v1/history/${id}`, { method: 'DELETE' })
+}
+
+export async function fetchVoiceAssets(): Promise<AssetResponse> {
+  return request('/api/v1/assets/voices')
+}
+
+export async function fetchLoraAssets(): Promise<AssetResponse> {
+  return request('/api/v1/assets/loras')
+}
+
+export async function fetchPresets(tool?: StudioTool): Promise<PresetListResponse> {
+  const suffix = tool ? `?tool=${encodeURIComponent(tool)}` : ''
+  return request(`/api/v1/presets${suffix}`)
+}
+
+export async function savePreset(payload: {
+  name: string
+  tool: StudioTool
+  state: Record<string, unknown>
+}): Promise<PresetProfile> {
+  return request('/api/v1/presets', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function deletePreset(id: string): Promise<{ deleted: boolean }> {
+  return request(`/api/v1/presets/${id}`, { method: 'DELETE' })
+}
+
 export async function submitTTS(formData: FormData): Promise<{ job_id: string }> {
   const res = await fetch('/api/v1/tts/synthesize-with-audio', {
     method: 'POST',
     body: formData,
+  })
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new ApiError(res.status, body || `HTTP ${res.status}`)
+  }
+  return res.json()
+}
+
+export async function submitLivePortrait(formData: FormData): Promise<{ job_id: string }> {
+  const res = await fetch('/api/v1/liveportrait/animate', {
+    method: 'POST',
+    body: formData,
+  })
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new ApiError(res.status, body || `HTTP ${res.status}`)
+  }
+  return res.json()
+}
+
+export async function submitReactor(params: {
+  prompt: string
+  negative_prompt?: string
+  lora_path?: string
+  lora_strength?: number
+  workflow?: Record<string, unknown>
+  parameters?: Record<string, unknown>
+}): Promise<ReactorResult> {
+  const res = await fetch('/api/v1/reactor/generate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
   })
   if (!res.ok) {
     const body = await res.text().catch(() => '')
@@ -76,4 +162,8 @@ export async function submitLipSync(formData: FormData): Promise<{ job_id: strin
 
 export function outputUrl(path: string): string {
   return `/api/v1/outputs/${path}`
+}
+
+export function historyDownloadUrl(historyId: string): string {
+  return `/api/v1/history/${historyId}/download`
 }

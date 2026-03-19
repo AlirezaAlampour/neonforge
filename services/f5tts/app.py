@@ -15,6 +15,7 @@ Model lifecycle:
 
 import asyncio
 import gc
+import io
 import logging
 import os
 import time
@@ -23,7 +24,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import torch
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -193,14 +194,49 @@ class SynthesizeRequest(BaseModel):
     speed: float = 1.0
 
 
+async def _parse_synthesize_request(request: Request) -> tuple[str, str, float, str | io.BytesIO]:
+    content_type = request.headers.get("content-type", "")
+
+    if "multipart/form-data" in content_type or "application/x-www-form-urlencoded" in content_type:
+        form = await request.form()
+        text = str(form.get("text") or "")
+        ref_text = str(form.get("ref_text") or "")
+
+        try:
+            speed = float(form.get("speed", 1.0))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, "Invalid speed value") from exc
+
+        ref_audio = form.get("ref_audio")
+        ref_file: str | io.BytesIO = ""
+        if hasattr(ref_audio, "read"):
+            audio_bytes = await ref_audio.read()
+            if audio_bytes:
+                ref_buffer = io.BytesIO(audio_bytes)
+                ref_buffer.name = getattr(ref_audio, "filename", "") or "reference.wav"
+                ref_buffer.seek(0)
+                ref_file = ref_buffer
+
+        return text, ref_text, speed, ref_file
+
+    try:
+        req = SynthesizeRequest.model_validate(await request.json())
+    except Exception as exc:
+        raise HTTPException(400, f"Invalid synthesize request: {exc}") from exc
+
+    return req.text, req.ref_text or "", req.speed, req.ref_audio_path or ""
+
+
 @app.post("/synthesize")
-async def synthesize(req: SynthesizeRequest):
+async def synthesize(request: Request):
     global _last_activity
     _last_activity = time.time()
 
     await _ensure_model()
 
-    if not req.text or len(req.text.strip()) == 0:
+    text, ref_text, speed, ref_file = await _parse_synthesize_request(request)
+
+    if not text or len(text.strip()) == 0:
         raise HTTPException(400, "Empty text")
 
     t0 = time.time()
@@ -209,15 +245,15 @@ async def synthesize(req: SynthesizeRequest):
 
     try:
         wav, sr, _ = _model.infer(
-            ref_file=req.ref_audio_path or "",
-            ref_text=req.ref_text or "",
-            gen_text=req.text,
-            speed=req.speed,
+            ref_file=ref_file,
+            ref_text=ref_text,
+            gen_text=text,
+            speed=speed,
         )
         import soundfile as sf
         sf.write(str(out_path), wav, sr)
         elapsed = time.time() - t0
-        log.info("Synthesized %d chars in %.1fs -> %s", len(req.text), elapsed, out_path.name)
+        log.info("Synthesized %d chars in %.1fs -> %s", len(text), elapsed, out_path.name)
 
         return {
             "output_path": f"tts/{out_id}.wav",

@@ -2,13 +2,14 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { Activity, Mic, Video, Clapperboard, Zap, ChevronLeft, ChevronRight } from 'lucide-react'
+import { Activity, Mic, Video, Clapperboard, Zap, ChevronLeft, ChevronRight, LayoutGrid } from 'lucide-react'
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
 import { MemoryGauge } from './memory-gauge'
 
 const navItems = [
   { href: '/status', label: 'System Status', icon: Activity },
+  { href: '/studio', label: 'Creative Studio', icon: LayoutGrid },
   { href: '/voice', label: 'Voice Studio', icon: Mic },
   { href: '/broll', label: 'B-Roll Studio', icon: Video },
   { href: '/lipsync', label: 'Lip Sync Studio', icon: Clapperboard },

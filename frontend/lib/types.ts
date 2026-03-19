@@ -60,3 +60,54 @@ export interface LipSyncResult {
   backend: string
   job_id: string
 }
+
+export interface GenerationHistoryItem {
+  id: string
+  job_id: string | null
+  service: string
+  model_used: string | null
+  prompt: string | null
+  parameters: Record<string, unknown>
+  timestamp: string
+  output_path: string
+  download_url: string
+  preview_url: string
+}
+
+export interface HistoryResponse {
+  items: GenerationHistoryItem[]
+}
+
+export interface AssetItem {
+  name: string
+  path: string
+  relative_path: string
+  size_bytes: number
+  modified_at: string
+}
+
+export interface AssetResponse {
+  root: string
+  items: AssetItem[]
+}
+
+export type StudioTool = 'f5tts' | 'liveportrait' | 'reactor'
+
+export interface PresetProfile {
+  id: string
+  name: string
+  tool: StudioTool
+  state: Record<string, unknown>
+  created_at: string
+  updated_at: string
+}
+
+export interface PresetListResponse {
+  items: PresetProfile[]
+}
+
+export interface ReactorResult {
+  job_id: string
+  output_path?: string | null
+  queue_response: unknown
+}
