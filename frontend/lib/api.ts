@@ -221,8 +221,9 @@ export async function submitLipSync(formData: FormData): Promise<{ job_id: strin
   return res.json()
 }
 
-export function outputUrl(path: string): string {
-  return `/api/v1/outputs/${path}`
+export function outputUrl(path: string, cacheBust?: string): string {
+  const suffix = cacheBust ? `?v=${encodeURIComponent(cacheBust)}` : ''
+  return `/api/v1/outputs/${path}${suffix}`
 }
 
 export function historyDownloadUrl(historyId: string): string {

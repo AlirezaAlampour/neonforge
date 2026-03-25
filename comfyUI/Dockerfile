@@ -182,3 +182,4 @@ EXPOSE 8188
 
 ENTRYPOINT ["tini", "--"]
 CMD ["python", "main.py", "--listen", "0.0.0.0", "--port", "8188", "--input-directory", "/outputs/comfyui/input", "--output-directory", "/outputs/comfyui/output", "--user-directory", "/outputs/comfyui/user", "--enable-manager"]
+ 

@@ -51,6 +51,9 @@ export function JobTracker({ jobs, onDismiss }: JobTrackerProps) {
         const Icon = config.icon
         const isMedia = job.result_path?.match(/\.(mp4|wav|webm|mp3)$/)
         const isAudio = job.result_path?.match(/\.(wav|mp3|webm)$/)
+        const resultUrl = job.result_path
+          ? outputUrl(job.result_path, job.completed_at ?? job.started_at ?? job.job_id)
+          : null
 
         return (
           <div
@@ -106,6 +109,29 @@ export function JobTracker({ jobs, onDismiss }: JobTrackerProps) {
               </p>
             )}
 
+            {job.debug_artifacts && job.debug_artifacts.length > 0 && (
+              <div className="mt-2 space-y-1">
+                <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Debug Artifacts</p>
+                <div className="flex flex-wrap gap-2">
+                  {job.debug_artifacts.map((artifact) => (
+                    <a
+                      key={`${job.job_id}-${artifact.id}-${artifact.relative_path}`}
+                      href={outputUrl(
+                        artifact.relative_path,
+                        `${job.job_id}-${artifact.id}-${artifact.filename}`,
+                      )}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 text-xs text-primary hover:text-primary/80 transition-colors"
+                    >
+                      <Play className="h-3 w-3" />
+                      {artifact.label}
+                    </a>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {job.status === 'failed' && job.error && (
               <p className="mt-2 text-xs text-red-400/80 truncate">{job.error}</p>
             )}
@@ -114,19 +140,19 @@ export function JobTracker({ jobs, onDismiss }: JobTrackerProps) {
               <div className="mt-3 space-y-2">
                 {isAudio && (
                   <audio controls className="w-full h-8 [&::-webkit-media-controls-panel]:bg-secondary rounded">
-                    <source src={outputUrl(job.result_path)} />
+                    <source src={resultUrl ?? undefined} />
                   </audio>
                 )}
                 {isMedia && !isAudio && (
                   <video
                     controls
                     className="w-full rounded-lg border border-border/30 max-h-48 bg-black"
-                    src={outputUrl(job.result_path)}
+                    src={resultUrl ?? undefined}
                   />
                 )}
                 <div className="flex gap-2">
                   <a
-                    href={outputUrl(job.result_path)}
+                    href={resultUrl ?? undefined}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="inline-flex items-center gap-1.5 text-xs text-primary hover:text-primary/80 transition-colors"
@@ -134,7 +160,7 @@ export function JobTracker({ jobs, onDismiss }: JobTrackerProps) {
                     <Play className="h-3 w-3" /> Open
                   </a>
                   <a
-                    href={outputUrl(job.result_path)}
+                    href={resultUrl ?? undefined}
                     download
                     className="inline-flex items-center gap-1.5 text-xs text-primary hover:text-primary/80 transition-colors"
                   >

@@ -13,6 +13,8 @@ Design:
 """
 
 import asyncio
+import difflib
+import hashlib
 import json
 import logging
 import mimetypes
@@ -229,6 +231,7 @@ class ComfyUIJobRecordDB(Base):
     inputs_json: Mapped[str] = mapped_column(Text, default="{}")
     params_json: Mapped[str] = mapped_column(Text, default="{}")
     validation_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    artifacts_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     output_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     output_node_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     history_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
@@ -244,6 +247,34 @@ HISTORY_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 _db_url = f"sqlite:///{HISTORY_DB_PATH}"
 db_engine = create_engine(_db_url, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(bind=db_engine, autoflush=False, autocommit=False, expire_on_commit=False)
+
+
+def _sqlite_table_columns(table_name: str) -> set[str]:
+    with db_engine.begin() as conn:
+        try:
+            rows = conn.exec_driver_sql(f"PRAGMA table_info({table_name})").mappings().all()
+        except Exception:
+            return set()
+    return {str(row.get("name")) for row in rows if row.get("name")}
+
+
+def run_sqlite_schema_migrations():
+    required_columns = {
+        "comfyui_jobs": {
+            "artifacts_json": "TEXT",
+        },
+    }
+    for table_name, columns in required_columns.items():
+        existing = _sqlite_table_columns(table_name)
+        if not existing:
+            continue
+        for column_name, column_type in columns.items():
+            if column_name in existing:
+                continue
+            with db_engine.begin() as conn:
+                conn.exec_driver_sql(
+                    f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -367,6 +398,58 @@ def _safe_json_loads(value: Optional[str], fallback: Any) -> Any:
 
 
 COMFYUI_INTERNAL_DEBUG_PARAM = "_neonforge_debug_dump"
+WAN_CHARACTER_SWAP_POSITIVE_POINTS_PARAM = "subject_points_json"
+WAN_CHARACTER_SWAP_NEGATIVE_POINTS_PARAM = "negative_points_json"
+WAN_CHARACTER_SWAP_DEBUG_OUTPUTS = [
+    {
+        "id": "preview_collage",
+        "label": "Preview Collage",
+        "node_id": "172",
+        "media_keys": ["gifs", "videos", "images", "files"],
+        "filename_prefix": "neonforge/{job_id}/debug-preview-collage",
+    },
+    {
+        "id": "pose_video",
+        "label": "Pose Preview",
+        "node_id": "173",
+        "media_keys": ["gifs", "videos", "images", "files"],
+        "filename_prefix": "neonforge/{job_id}/debug-pose",
+    },
+    {
+        "id": "raw_segmentation_video",
+        "label": "Raw Segmentation Overlay",
+        "node_id": "175",
+        "media_keys": ["gifs", "videos", "images", "files"],
+        "filename_prefix": "neonforge/{job_id}/debug-raw-segmentation",
+    },
+    {
+        "id": "decoded_frames_video",
+        "label": "Decoded Frames",
+        "node_id": "176",
+        "media_keys": ["gifs", "videos", "images", "files"],
+        "filename_prefix": "neonforge/{job_id}/debug-decoded",
+    },
+    {
+        "id": "face_crop_video",
+        "label": "Face Crop Preview",
+        "node_id": "112",
+        "media_keys": ["gifs", "videos", "images", "files"],
+        "filename_prefix": "neonforge/{job_id}/debug-face-crop",
+    },
+    {
+        "id": "blockified_mask_video",
+        "label": "Blockified Mask Overlay",
+        "node_id": "75",
+        "media_keys": ["gifs", "videos", "images", "files"],
+        "filename_prefix": "neonforge/{job_id}/debug-blockified-mask",
+    },
+]
+WAN_CHARACTER_SWAP_MANUAL_POSITIVE_POINTS = [
+    {"x": 575.8604020500962, "y": 461.00299638143633},
+    {"x": 589.0269647654002, "y": 105.50580306822965},
+]
+WAN_CHARACTER_SWAP_MANUAL_NEGATIVE_POINTS = [{"x": 0.0, "y": 0.0}]
+WAN_CHARACTER_SWAP_DIFF_NODE_IDS = ("27", "30", "62", "63", "96", "104", "107", "108", "120")
 
 
 def _comfyui_error_detail(error: str, **context: Any) -> dict[str, Any]:
@@ -387,6 +470,121 @@ def _http_error_text(detail: Any) -> str:
         except TypeError:
             return str(detail)
     return str(detail)
+
+
+def _parse_points_json(value: Any, *, field_name: str) -> list[dict[str, float]]:
+    raw_value = value
+    if isinstance(raw_value, str):
+        try:
+            raw_value = json.loads(raw_value)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(
+                400,
+                _comfyui_error_detail(
+                    f"Invalid JSON for {field_name}.",
+                    field_name=field_name,
+                ),
+            ) from exc
+    if not isinstance(raw_value, list):
+        raise HTTPException(
+            400,
+            _comfyui_error_detail(
+                f"{field_name} must be a JSON array of point objects.",
+                field_name=field_name,
+            ),
+        )
+
+    points: list[dict[str, float]] = []
+    for index, item in enumerate(raw_value):
+        if not isinstance(item, dict):
+            raise HTTPException(
+                400,
+                _comfyui_error_detail(
+                    f"{field_name}[{index}] must be an object with x/y coordinates.",
+                    field_name=field_name,
+                    point_index=index,
+                ),
+            )
+        try:
+            x = float(item["x"])
+            y = float(item["y"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(
+                400,
+                _comfyui_error_detail(
+                    f"{field_name}[{index}] must include numeric x and y values.",
+                    field_name=field_name,
+                    point_index=index,
+                ),
+            ) from exc
+        points.append({"x": x, "y": y})
+    return points
+
+
+def _load_points_editor_points(node_inputs: dict[str, Any], key: str, *, field_name: str) -> list[dict[str, float]]:
+    raw = node_inputs.get(key)
+    if raw is None:
+        return []
+    return _parse_points_json(raw, field_name=field_name)
+
+
+def _set_points_editor_inputs(
+    node_inputs: dict[str, Any],
+    *,
+    positive_points: list[dict[str, float]],
+    negative_points: list[dict[str, float]],
+):
+    node_inputs["coordinates"] = json.dumps(positive_points, ensure_ascii=False, separators=(",", ":"))
+    node_inputs["neg_coordinates"] = json.dumps(negative_points, ensure_ascii=False, separators=(",", ":"))
+    node_inputs["points_store"] = json.dumps(
+        {
+            "positive": positive_points,
+            "negative": negative_points,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _extract_history_media_items(
+    history_entry: dict[str, Any],
+    *,
+    node_id: str,
+    media_keys: list[str],
+) -> list[dict[str, Any]]:
+    outputs = history_entry.get("outputs") or {}
+    payload = outputs.get(str(node_id))
+    if not isinstance(payload, dict):
+        return []
+
+    items: list[dict[str, Any]] = []
+    for media_key in media_keys:
+        media_items = payload.get(media_key)
+        if not isinstance(media_items, list):
+            continue
+        for item in media_items:
+            if not isinstance(item, dict):
+                continue
+            filename = item.get("filename")
+            if not filename:
+                continue
+            subfolder = _normalize_rel_path(item.get("subfolder", ""))
+            media_type = item.get("type", "output")
+            relative = Path("comfyui") / media_type
+            if subfolder:
+                relative = relative / subfolder
+            relative = relative / filename
+            items.append(
+                {
+                    "node_id": str(node_id),
+                    "media_key": media_key,
+                    "relative_path": str(relative),
+                    "filename": filename,
+                    "type": media_type,
+                    "subfolder": subfolder,
+                }
+            )
+    return items
 
 
 def _public_comfyui_params(params: dict[str, Any]) -> dict[str, Any]:
@@ -528,6 +726,7 @@ class JobRecord(BaseModel):
     completed_at: Optional[str] = None
     result_path: Optional[str] = None
     debug_dump_path: Optional[str] = None
+    debug_artifacts: list[dict[str, Any]] = Field(default_factory=list)
     message: Optional[str] = None
     error: Optional[str] = None
 
@@ -711,6 +910,7 @@ def serialize_comfyui_job_record(record: ComfyUIJobRecordDB) -> dict[str, Any]:
         "completed_at": record.completed_at.isoformat() if record.completed_at else None,
         "result_path": record.output_path,
         "debug_dump_path": _serialize_comfyui_debug_dump_path(record.id, params),
+        "debug_artifacts": _safe_json_loads(record.artifacts_json, []),
         "history_id": record.history_id,
         "error": record.error,
         "inputs": _safe_json_loads(record.inputs_json, {}),
@@ -775,6 +975,139 @@ def workflow_is_api_format(workflow: dict[str, Any]) -> bool:
     return all(
         isinstance(key, str) and isinstance(value, dict) and "class_type" in value
         for key, value in workflow.items()
+    )
+
+
+def _serialize_prompt_graph_for_submission(prompt_graph: dict[str, Any]) -> str:
+    return json.dumps(prompt_graph, ensure_ascii=False, separators=(",", ":"))
+
+
+def _build_comfyui_prompt_request_body(
+    *,
+    client_id: str,
+    prompt_json: str,
+    job_id: str,
+    manifest: "ComfyUITemplateManifest",
+) -> str:
+    extra_data_json = json.dumps(
+        {
+            "neonforge": {
+                "job_id": job_id,
+                "template_id": manifest.id,
+                "template_name": manifest.name,
+            }
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return (
+        "{"
+        f'"client_id":{json.dumps(client_id, ensure_ascii=False)},'
+        f'"prompt":{prompt_json},'
+        f'"extra_data":{extra_data_json}'
+        "}"
+    )
+
+
+def _workflow_node_subset(prompt_graph: dict[str, Any], node_ids: tuple[str, ...]) -> dict[str, Any]:
+    subset: dict[str, Any] = {}
+    for node_id in node_ids:
+        node = prompt_graph.get(str(node_id))
+        if node is not None:
+            subset[str(node_id)] = node
+    return subset
+
+
+def _workflow_node_input_value(prompt_graph: dict[str, Any], node_id: str, input_name: str) -> Any:
+    node = prompt_graph.get(str(node_id))
+    if not isinstance(node, dict):
+        return None
+    node_inputs = node.get("inputs")
+    if not isinstance(node_inputs, dict):
+        return None
+    return node_inputs.get(input_name)
+
+
+def _build_wan_character_swap_manual_reference_subset(base_prompt_graph: dict[str, Any]) -> dict[str, Any]:
+    reference = json.loads(json.dumps(base_prompt_graph))
+
+    node27 = reference.get("27")
+    if isinstance(node27, dict):
+        node27_inputs = node27.setdefault("inputs", {})
+        if isinstance(node27_inputs, dict):
+            node27_inputs["steps"] = 4
+
+    node30 = reference.get("30")
+    if isinstance(node30, dict):
+        node30_inputs = node30.setdefault("inputs", {})
+        if isinstance(node30_inputs, dict):
+            node30_inputs["images"] = ["42", 0]
+
+    node107 = reference.get("107")
+    if isinstance(node107, dict):
+        node107_inputs = node107.setdefault("inputs", {})
+        if isinstance(node107_inputs, dict):
+            _set_points_editor_inputs(
+                node107_inputs,
+                positive_points=WAN_CHARACTER_SWAP_MANUAL_POSITIVE_POINTS,
+                negative_points=WAN_CHARACTER_SWAP_MANUAL_NEGATIVE_POINTS,
+            )
+
+    node120 = reference.get("120")
+    if isinstance(node120, dict):
+        node120_inputs = node120.setdefault("inputs", {})
+        if isinstance(node120_inputs, dict):
+            node120_inputs["person_index"] = 0
+
+    return _workflow_node_subset(reference, WAN_CHARACTER_SWAP_DIFF_NODE_IDS)
+
+
+def _diff_workflow_node_subsets(reference_subset: dict[str, Any], runtime_subset: dict[str, Any]) -> str:
+    reference_json = json.dumps(reference_subset, ensure_ascii=False, indent=2, sort_keys=True)
+    runtime_json = json.dumps(runtime_subset, ensure_ascii=False, indent=2, sort_keys=True)
+    diff_lines = list(
+        difflib.unified_diff(
+            reference_json.splitlines(),
+            runtime_json.splitlines(),
+            fromfile="manual-working-reference",
+            tofile="runtime-submitted",
+            lineterm="",
+        )
+    )
+    return "\n".join(diff_lines) if diff_lines else "(no diff)"
+
+
+def _log_wan_character_swap_prompt_diagnostics(
+    patched_prompt: dict[str, Any],
+    *,
+    base_prompt_graph: dict[str, Any],
+    job_id: str,
+    prompt_sha256: str,
+    debug_dump_path: Optional[str],
+):
+    final_values = {
+        "node_27.steps": _workflow_node_input_value(patched_prompt, "27", "steps"),
+        "node_27.denoise_strength": _workflow_node_input_value(patched_prompt, "27", "denoise_strength"),
+        "node_107.points_store": _workflow_node_input_value(patched_prompt, "107", "points_store"),
+        "node_120.person_index": _workflow_node_input_value(patched_prompt, "120", "person_index"),
+        "node_30.images": _workflow_node_input_value(patched_prompt, "30", "images"),
+    }
+    log.info(
+        "Wan character swap final patched values job_id=%s prompt_sha256=%s debug_dump_path=%s values=%s",
+        job_id,
+        prompt_sha256,
+        debug_dump_path or "",
+        json.dumps(final_values, ensure_ascii=False),
+    )
+
+    reference_subset = _build_wan_character_swap_manual_reference_subset(base_prompt_graph)
+    runtime_subset = _workflow_node_subset(patched_prompt, WAN_CHARACTER_SWAP_DIFF_NODE_IDS)
+    log.info(
+        "Wan character swap limited diff job_id=%s reference_source=%s nodes=%s\n%s",
+        job_id,
+        "template-plus-manual-overrides",
+        ",".join(WAN_CHARACTER_SWAP_DIFF_NODE_IDS),
+        _diff_workflow_node_subsets(reference_subset, runtime_subset),
     )
 
 
@@ -1080,12 +1413,149 @@ def _coerce_param_value(value: Any, spec: Optional[ComfyUITemplateParamSpec]) ->
     return value
 
 
+def _configure_wan_character_swap_debug_outputs(
+    prompt_graph: dict[str, Any],
+    *,
+    debug_enabled: bool,
+    job_id: Optional[str],
+):
+    for spec in WAN_CHARACTER_SWAP_DEBUG_OUTPUTS:
+        node = prompt_graph.get(spec["node_id"])
+        if not node or node.get("class_type") != "VHS_VideoCombine":
+            raise HTTPException(
+                500,
+                f"Wan Character Swap debug output node {spec['node_id']} is missing or invalid.",
+            )
+        node_inputs = node.setdefault("inputs", {})
+        node_inputs["save_output"] = debug_enabled
+        if job_id:
+            node_inputs["filename_prefix"] = spec["filename_prefix"].format(job_id=job_id)
+
+
+def _apply_wan_character_swap_targeting_overrides(
+    prompt_graph: dict[str, Any],
+    params: dict[str, Any],
+):
+    if (
+        WAN_CHARACTER_SWAP_POSITIVE_POINTS_PARAM not in params
+        and WAN_CHARACTER_SWAP_NEGATIVE_POINTS_PARAM not in params
+    ):
+        return
+
+    node = prompt_graph.get("107")
+    if not node or "inputs" not in node:
+        raise HTTPException(500, "Wan Character Swap node 107 is missing for point overrides.")
+
+    node_inputs = node["inputs"]
+    positive_points = _load_points_editor_points(
+        node_inputs,
+        "coordinates",
+        field_name=WAN_CHARACTER_SWAP_POSITIVE_POINTS_PARAM,
+    )
+    negative_points = _load_points_editor_points(
+        node_inputs,
+        "neg_coordinates",
+        field_name=WAN_CHARACTER_SWAP_NEGATIVE_POINTS_PARAM,
+    )
+
+    if WAN_CHARACTER_SWAP_POSITIVE_POINTS_PARAM in params:
+        positive_points = _parse_points_json(
+            params.get(WAN_CHARACTER_SWAP_POSITIVE_POINTS_PARAM),
+            field_name=WAN_CHARACTER_SWAP_POSITIVE_POINTS_PARAM,
+        )
+    if WAN_CHARACTER_SWAP_NEGATIVE_POINTS_PARAM in params:
+        negative_points = _parse_points_json(
+            params.get(WAN_CHARACTER_SWAP_NEGATIVE_POINTS_PARAM),
+            field_name=WAN_CHARACTER_SWAP_NEGATIVE_POINTS_PARAM,
+        )
+
+    _set_points_editor_inputs(
+        node_inputs,
+        positive_points=positive_points,
+        negative_points=negative_points,
+    )
+
+
+def _enforce_production_video_output(
+    prompt_graph: dict[str, Any],
+    manifest: ComfyUITemplateManifest,
+    *,
+    debug_enabled: bool,
+):
+    if manifest.id != "wan-character-swap":
+        return
+
+    output_node_id = str(manifest.output.node_id or "")
+    output_node = prompt_graph.get(output_node_id)
+    if not output_node or output_node.get("class_type") != "VHS_VideoCombine":
+        raise HTTPException(500, "Wan Character Swap output node 30 is missing or invalid.")
+
+    output_inputs = output_node.setdefault("inputs", {})
+    output_inputs["images"] = ["28", 0]
+
+    if debug_enabled:
+        return
+
+    image_source = output_inputs.get("images")
+    source_node = None
+    if isinstance(image_source, list) and image_source:
+        source_node = prompt_graph.get(str(image_source[0]))
+    if source_node and source_node.get("class_type") == "ImageConcatMulti":
+        raise HTTPException(
+            500,
+            "Production Character Swap export cannot point VHS_VideoCombine.images at an ImageConcatMulti node.",
+        )
+
+
+def _apply_managed_template_patches(
+    prompt_graph: dict[str, Any],
+    manifest: ComfyUITemplateManifest,
+    *,
+    params: dict[str, Any],
+    job_id: Optional[str],
+):
+    debug_enabled = _comfyui_debug_dump_enabled(params)
+    if manifest.id == "wan-character-swap":
+        _apply_wan_character_swap_targeting_overrides(prompt_graph, params)
+        _configure_wan_character_swap_debug_outputs(
+            prompt_graph,
+            debug_enabled=debug_enabled,
+            job_id=job_id,
+        )
+        _enforce_production_video_output(
+            prompt_graph,
+            manifest,
+            debug_enabled=debug_enabled,
+        )
+
+
+def validate_managed_template_params(
+    manifest: ComfyUITemplateManifest,
+    params: dict[str, Any],
+):
+    if manifest.id != "wan-character-swap":
+        return
+    positive_points = params.get(WAN_CHARACTER_SWAP_POSITIVE_POINTS_PARAM)
+    negative_points = params.get(WAN_CHARACTER_SWAP_NEGATIVE_POINTS_PARAM)
+    if WAN_CHARACTER_SWAP_POSITIVE_POINTS_PARAM in params and positive_points is not None and positive_points != "":
+        _parse_points_json(
+            positive_points,
+            field_name=WAN_CHARACTER_SWAP_POSITIVE_POINTS_PARAM,
+        )
+    if WAN_CHARACTER_SWAP_NEGATIVE_POINTS_PARAM in params and negative_points is not None and negative_points != "":
+        _parse_points_json(
+            negative_points,
+            field_name=WAN_CHARACTER_SWAP_NEGATIVE_POINTS_PARAM,
+        )
+
+
 def patch_api_workflow(
     prompt_graph: dict[str, Any],
     manifest: ComfyUITemplateManifest,
     *,
     input_values: dict[str, Any],
     params: dict[str, Any],
+    job_id: Optional[str] = None,
 ) -> dict[str, Any]:
     patched = json.loads(json.dumps(prompt_graph))
     param_specs = {spec.id: spec for spec in manifest.optional_params}
@@ -1109,7 +1579,38 @@ def patch_api_workflow(
             continue
         node["inputs"][mapping.input_name] = value
 
+    _apply_managed_template_patches(
+        patched,
+        manifest,
+        params=params,
+        job_id=job_id,
+    )
+
     return patched
+
+
+def extract_debug_artifacts_from_history(
+    history_entry: dict[str, Any],
+    manifest: ComfyUITemplateManifest,
+) -> list[dict[str, Any]]:
+    if manifest.id != "wan-character-swap":
+        return []
+
+    artifacts: list[dict[str, Any]] = []
+    for spec in WAN_CHARACTER_SWAP_DEBUG_OUTPUTS:
+        for item in _extract_history_media_items(
+            history_entry,
+            node_id=spec["node_id"],
+            media_keys=spec["media_keys"],
+        ):
+            artifacts.append(
+                {
+                    "id": spec["id"],
+                    "label": spec["label"],
+                    **item,
+                }
+            )
+    return artifacts
 
 
 def extract_output_from_history(
@@ -1132,33 +1633,13 @@ def extract_output_from_history(
         if node_id in seen:
             continue
         seen.add(node_id)
-        payload = outputs.get(str(node_id))
-        if not isinstance(payload, dict):
-            continue
-        for media_key in manifest.output.media_keys:
-            media_items = payload.get(media_key)
-            if not isinstance(media_items, list):
-                continue
-            for item in media_items:
-                if not isinstance(item, dict):
-                    continue
-                filename = item.get("filename")
-                if not filename:
-                    continue
-                subfolder = _normalize_rel_path(item.get("subfolder", ""))
-                media_type = item.get("type", "output")
-                relative = Path("comfyui") / media_type
-                if subfolder:
-                    relative = relative / subfolder
-                relative = relative / filename
-                return {
-                    "node_id": str(node_id),
-                    "media_key": media_key,
-                    "relative_path": str(relative),
-                    "filename": filename,
-                    "type": media_type,
-                    "subfolder": subfolder,
-                }
+        media_items = _extract_history_media_items(
+            history_entry,
+            node_id=str(node_id),
+            media_keys=manifest.output.media_keys,
+        )
+        if media_items:
+            return media_items[-1]
     return None
 
 
@@ -1202,6 +1683,7 @@ async def get_job(job_id: str) -> Optional[JobRecord]:
             completed_at=row.completed_at.isoformat() if row.completed_at else None,
             result_path=row.output_path,
             debug_dump_path=_serialize_comfyui_debug_dump_path(row.id, params),
+            debug_artifacts=_safe_json_loads(row.artifacts_json, []),
             message=row.status_message,
             error=row.error,
         )
@@ -1233,6 +1715,7 @@ async def sync_comfyui_job_to_store(record: ComfyUIJobRecordDB):
             completed_at=record.completed_at.isoformat() if record.completed_at else None,
             result_path=record.output_path,
             debug_dump_path=_serialize_comfyui_debug_dump_path(record.id, params),
+            debug_artifacts=_safe_json_loads(record.artifacts_json, []),
             message=record.status_message,
             error=record.error,
         )
@@ -1558,17 +2041,28 @@ async def run_comfyui_job(job_id: str):
             manifest,
             input_values=prepared_inputs,
             params=params,
+            job_id=job_id,
         )
+        prompt_json = _serialize_prompt_graph_for_submission(patched_prompt)
+        prompt_sha256 = hashlib.sha256(prompt_json.encode("utf-8")).hexdigest()
+        debug_dump_path: Optional[str] = None
         if _comfyui_debug_dump_enabled(params):
             dump_path = _comfyui_debug_dump_path(job_id)
             try:
                 dump_path.parent.mkdir(parents=True, exist_ok=True)
-                dump_path.write_text(
-                    json.dumps(patched_prompt, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
+                dump_path.write_text(prompt_json, encoding="utf-8")
+                debug_dump_path = str(dump_path)
             except OSError as exc:
                 raise HTTPException(500, f"Failed to write ComfyUI debug dump: {exc}") from exc
+
+        if manifest.id == "wan-character-swap":
+            _log_wan_character_swap_prompt_diagnostics(
+                patched_prompt,
+                base_prompt_graph=api_prompt,
+                job_id=job_id,
+                prompt_sha256=prompt_sha256,
+                debug_dump_path=debug_dump_path,
+            )
 
         client_id = current_job.client_id or str(uuid.uuid4())
         current_job = await update_comfyui_job(
@@ -1578,20 +2072,17 @@ async def run_comfyui_job(job_id: str):
             status_message="Submitting to ComfyUI",
         )
         await record_service_activity("comfyui")
+        submission_body = _build_comfyui_prompt_request_body(
+            client_id=client_id,
+            prompt_json=prompt_json,
+            job_id=job_id,
+            manifest=manifest,
+        )
 
         response = await http_client.post(
             f"{COMFYUI_URL.rstrip('/')}/prompt",
-            json={
-                "client_id": client_id,
-                "prompt": patched_prompt,
-                "extra_data": {
-                    "neonforge": {
-                        "job_id": job_id,
-                        "template_id": manifest.id,
-                        "template_name": manifest.name,
-                    }
-                },
-            },
+            content=submission_body.encode("utf-8"),
+            headers={"Content-Type": "application/json"},
             timeout=httpx.Timeout(120.0, connect=10.0),
         )
         response.raise_for_status()
@@ -1621,6 +2112,7 @@ async def run_comfyui_job(job_id: str):
             if history_entry:
                 output = extract_output_from_history(patched_prompt, history_entry, manifest)
                 if output:
+                    debug_artifacts = extract_debug_artifacts_from_history(history_entry, manifest)
                     history_payload = {
                         "template_id": manifest.id,
                         "template_name": manifest.name,
@@ -1641,6 +2133,7 @@ async def run_comfyui_job(job_id: str):
                         output_path=output["relative_path"],
                         output_node_id=output["node_id"],
                         history_id=history_id,
+                        artifacts_json=json.dumps(debug_artifacts, ensure_ascii=False),
                         completed_at=_now_utc(),
                         status_message="Completed",
                         error=None,
@@ -1770,6 +2263,7 @@ async def lifespan(app: FastAPI):
     COMFYUI_INPUT_DIR.mkdir(parents=True, exist_ok=True)
     COMFYUI_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(bind=db_engine)
+    run_sqlite_schema_migrations()
 
     rdb = aioredis.from_url(REDIS_URL, decode_responses=True)
     http_client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0))
@@ -2282,6 +2776,7 @@ async def create_comfyui_job(payload: ComfyUIJobCreateRequest):
         )
 
     resolve_comfyui_input_assets(manifest, payload.inputs)
+    validate_managed_template_params(manifest, payload.params)
 
     stored_params = dict(payload.params)
     if payload.debug_dump:
@@ -2298,6 +2793,7 @@ async def create_comfyui_job(payload: ComfyUIJobCreateRequest):
         inputs_json=json.dumps(payload.inputs, ensure_ascii=False),
         params_json=json.dumps(stored_params, ensure_ascii=False),
         validation_json=json.dumps(validation, ensure_ascii=False),
+        artifacts_json=None,
         output_path=None,
         output_node_id=None,
         history_id=None,
@@ -2336,7 +2832,13 @@ async def get_output(filepath: str):
     full = resolve_output_path(filepath)
     if not full.exists() or not full.is_file():
         raise HTTPException(404, "File not found")
-    return FileResponse(full)
+    return FileResponse(
+        full,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -85,7 +85,7 @@
       "pingpong": false,
       "save_output": true,
       "images": [
-        "66",
+        "28",
         0
       ],
       "audio": [
@@ -524,8 +524,8 @@
   },
   "107": {
     "inputs": {
-      "points_store": "{\"positive\":[{\"x\":381.21190175127964,\"y\":356.03653739792486},{\"x\":400.329750813901,\"y\":91.57295869833005}],\"negative\":[{\"x\":0,\"y\":0}]}",
-      "coordinates": "[{\"x\":381.21190175127964,\"y\":356.03653739792486},{\"x\":400.329750813901,\"y\":91.57295869833005}]",
+      "points_store": "{\"positive\":[{\"x\":575.8604020500962,\"y\":461.00299638143633},{\"x\":589.0269647654002,\"y\":105.50580306822965}],\"negative\":[{\"x\":0,\"y\":0}]}",
+      "coordinates": "[{\"x\":575.8604020500962,\"y\":461.00299638143633},{\"x\":589.0269647654002,\"y\":105.50580306822965}]",
       "neg_coordinates": "[{\"x\":0,\"y\":0}]",
       "bbox_store": "[{}]",
       "bboxes": "[{}]",
@@ -665,6 +665,120 @@
     "class_type": "WanVideoLoraSelectMulti",
     "_meta": {
       "title": "WanVideo Lora Select Multi"
+    }
+  },
+  "172": {
+    "inputs": {
+      "frame_rate": 16,
+      "loop_count": 0,
+      "filename_prefix": "neonforge/debug-preview-collage",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 19,
+      "save_metadata": true,
+      "trim_to_audio": false,
+      "pingpong": false,
+      "save_output": false,
+      "images": [
+        "66",
+        0
+      ],
+      "audio": [
+        "63",
+        2
+      ]
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "Debug Preview Collage"
+    }
+  },
+  "173": {
+    "inputs": {
+      "frame_rate": 16,
+      "loop_count": 0,
+      "filename_prefix": "neonforge/debug-pose",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 19,
+      "save_metadata": true,
+      "trim_to_audio": false,
+      "pingpong": false,
+      "save_output": false,
+      "images": [
+        "73",
+        0
+      ]
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "Debug Pose Video"
+    }
+  },
+  "174": {
+    "inputs": {
+      "color": "0, 0, 0",
+      "device": "cpu",
+      "image": [
+        "63",
+        0
+      ],
+      "mask": [
+        "104",
+        0
+      ]
+    },
+    "class_type": "DrawMaskOnImage",
+    "_meta": {
+      "title": "Debug Raw Segmentation Overlay"
+    }
+  },
+  "175": {
+    "inputs": {
+      "frame_rate": 16,
+      "loop_count": 0,
+      "filename_prefix": "neonforge/debug-raw-segmentation",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 19,
+      "save_metadata": true,
+      "trim_to_audio": false,
+      "pingpong": false,
+      "save_output": false,
+      "images": [
+        "174",
+        0
+      ]
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "Debug Raw Segmentation Video"
+    }
+  },
+  "176": {
+    "inputs": {
+      "frame_rate": 16,
+      "loop_count": 0,
+      "filename_prefix": "neonforge/debug-decoded",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 19,
+      "save_metadata": true,
+      "trim_to_audio": false,
+      "pingpong": false,
+      "save_output": false,
+      "images": [
+        "28",
+        0
+      ],
+      "audio": [
+        "63",
+        2
+      ]
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "Debug Decoded Frames Video"
     }
   }
 }

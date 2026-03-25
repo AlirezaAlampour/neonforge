@@ -416,9 +416,16 @@ export default function StudioPage() {
         cfg: characterSwap.cfg,
         denoise_strength: characterSwap.denoiseStrength,
         frame_rate: characterSwap.frameRate,
+        person_index: characterSwap.personIndex,
       }
       if (characterSwap.seed.trim()) {
         params.seed = Number(characterSwap.seed)
+      }
+      if (characterSwap.subjectPointsJson.trim()) {
+        params.subject_points_json = characterSwap.subjectPointsJson.trim()
+      }
+      if (characterSwap.negativePointsJson.trim()) {
+        params.negative_points_json = characterSwap.negativePointsJson.trim()
       }
 
       const result = await submitComfyUIJob({
@@ -811,6 +818,43 @@ export default function StudioPage() {
                           onChange={(e) => updateCharacterSwap({ frameRate: Number(e.target.value || 0) })}
                         />
                       </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="swap-person-index">Pose Person Index</Label>
+                        <Input
+                          id="swap-person-index"
+                          type="number"
+                          min={0}
+                          value={characterSwap.personIndex}
+                          onChange={(e) => updateCharacterSwap({ personIndex: Number(e.target.value || 0) })}
+                        />
+                      </div>
+                      <div className="space-y-2 sm:col-span-2">
+                        <Label htmlFor="swap-subject-points">SAM Positive Points JSON</Label>
+                        <Textarea
+                          id="swap-subject-points"
+                          value={characterSwap.subjectPointsJson}
+                          onChange={(e) => updateCharacterSwap({ subjectPointsJson: e.target.value })}
+                          rows={4}
+                          placeholder='[{"x":575.8604020500962,"y":461.00299638143633},{"x":589.0269647654002,"y":105.50580306822965}]'
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Positive target points in driving-video pixel space. Update these when the subject face/head
+                          is not near the workflow&apos;s baked-in 1280x720 sample coordinates.
+                        </p>
+                      </div>
+                      <div className="space-y-2 sm:col-span-2">
+                        <Label htmlFor="swap-negative-points">SAM Negative Points JSON</Label>
+                        <Textarea
+                          id="swap-negative-points"
+                          value={characterSwap.negativePointsJson}
+                          onChange={(e) => updateCharacterSwap({ negativePointsJson: e.target.value })}
+                          rows={3}
+                          placeholder='[{"x":0,"y":0}]'
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Optional negative points for excluding background or the wrong person from the SAM2 mask.
+                        </p>
+                      </div>
                       <label className="flex items-start gap-3 rounded-lg border border-border/50 bg-background/60 p-3 sm:col-span-2">
                         <input
                           type="checkbox"
@@ -819,10 +863,11 @@ export default function StudioPage() {
                           className="mt-0.5 h-4 w-4 rounded border-input bg-background"
                         />
                         <div>
-                          <p className="text-sm font-medium">Write patched workflow debug dump</p>
+                          <p className="text-sm font-medium">Write patched workflow dump and save debug artifacts</p>
                           <p className="text-xs text-muted-foreground">
                             For the next submitted Character Swap job only, save the exact patched ComfyUI prompt JSON
-                            to `/tmp/neonforge-comfyui-debug/&lt;job-id&gt;.patched.json`.
+                            to `/tmp/neonforge-comfyui-debug/&lt;job-id&gt;.patched.json` and enable debug pose,
+                            mask, face-crop, decoded-frame, and preview artifact outputs.
                           </p>
                         </div>
                       </label>

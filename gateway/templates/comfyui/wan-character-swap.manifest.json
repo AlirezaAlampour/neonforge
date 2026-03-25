@@ -50,7 +50,7 @@
       "label": "Steps",
       "type": "integer",
       "description": "Sampling steps.",
-      "default": 6,
+      "default": 4,
       "min": 1,
       "max": 60,
       "step": 1
@@ -70,7 +70,7 @@
       "label": "Denoise Strength",
       "type": "number",
       "description": "Sampler denoise strength.",
-      "default": 5,
+      "default": 0.9,
       "min": 0,
       "max": 10,
       "step": 0.1
@@ -84,6 +84,30 @@
       "min": 1,
       "max": 60,
       "step": 1
+    },
+    {
+      "id": "person_index",
+      "label": "Pose Person Index",
+      "type": "integer",
+      "description": "Which detected person to use for the face-mask crop when the driving clip contains multiple people.",
+      "default": 0,
+      "min": 0,
+      "max": 8,
+      "step": 1
+    },
+    {
+      "id": "subject_points_json",
+      "label": "SAM Positive Points JSON",
+      "type": "string",
+      "description": "JSON array of positive SAM points in driving-video pixel coordinates (1280x720 frame space by default).",
+      "default": "[{\"x\":575.8604020500962,\"y\":461.00299638143633},{\"x\":589.0269647654002,\"y\":105.50580306822965}]"
+    },
+    {
+      "id": "negative_points_json",
+      "label": "SAM Negative Points JSON",
+      "type": "string",
+      "description": "JSON array of negative SAM points in driving-video pixel coordinates.",
+      "default": "[{\"x\":0,\"y\":0}]"
     }
   ],
   "runtime_mappings": [
@@ -133,6 +157,12 @@
       "input_id": "frame_rate",
       "node_id": "30",
       "input_name": "frame_rate",
+      "value_source": "param"
+    },
+    {
+      "input_id": "person_index",
+      "node_id": "120",
+      "input_name": "person_index",
       "value_source": "param"
     }
   ],

@@ -26,6 +26,17 @@ export type ServicesStatus = Record<string, ServiceStatus>
 
 export type JobState = 'queued' | 'running' | 'completed' | 'failed'
 
+export interface ComfyUIDebugArtifact {
+  id: string
+  label: string
+  node_id: string
+  media_key: string
+  relative_path: string
+  filename: string
+  type: string
+  subfolder: string
+}
+
 export interface JobRecord {
   job_id: string
   service: string
@@ -35,6 +46,7 @@ export interface JobRecord {
   completed_at?: string | null
   result_path?: string | null
   debug_dump_path?: string | null
+  debug_artifacts?: ComfyUIDebugArtifact[]
   message?: string | null
   error?: string | null
 }
@@ -236,6 +248,7 @@ export interface ComfyUIJobDetail {
   completed_at?: string | null
   result_path?: string | null
   debug_dump_path?: string | null
+  debug_artifacts?: ComfyUIDebugArtifact[]
   history_id?: string | null
   error?: string | null
   inputs: Record<string, string>

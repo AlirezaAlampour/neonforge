@@ -1,3 +1,4 @@
+import json as jsonlib
 import sys
 import time
 import uuid
@@ -28,7 +29,21 @@ class _FakeComfyResponse:
 
 
 class _FakeComfyClient:
-    async def post(self, url: str, json: dict, timeout=None):
+    def __init__(self):
+        self.last_post_url = None
+        self.last_post_json = None
+        self.last_post_body = None
+        self.last_post_headers = None
+
+    async def post(self, url: str, json: dict | None = None, content=None, headers=None, timeout=None):
+        self.last_post_url = url
+        self.last_post_headers = headers
+        if content is not None:
+            self.last_post_body = content.decode("utf-8") if isinstance(content, (bytes, bytearray)) else str(content)
+            self.last_post_json = jsonlib.loads(self.last_post_body)
+        else:
+            self.last_post_body = None
+            self.last_post_json = json
         return _FakeComfyResponse({"prompt_id": "prompt-test-1", "node_errors": None})
 
 
@@ -105,6 +120,7 @@ def test_create_comfyui_job_with_valid_asset_ids(tmp_path, monkeypatch):
     session_local = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
     gateway_app.Base.metadata.create_all(bind=engine)
 
+    fake_client = _FakeComfyClient()
     monkeypatch.setattr(gateway_app, "OUTPUTS_ROOT", outputs_root)
     monkeypatch.setattr(gateway_app, "ASSETS_ROOT", assets_root)
     monkeypatch.setattr(gateway_app, "COMFYUI_UPLOADS_DIR", uploads_root)
@@ -114,7 +130,7 @@ def test_create_comfyui_job_with_valid_asset_ids(tmp_path, monkeypatch):
     monkeypatch.setattr(gateway_app, "db_engine", engine)
     monkeypatch.setattr(gateway_app, "SessionLocal", session_local)
     monkeypatch.setattr(gateway_app, "rdb", None)
-    monkeypatch.setattr(gateway_app, "http_client", _FakeComfyClient())
+    monkeypatch.setattr(gateway_app, "http_client", fake_client)
     monkeypatch.setattr(gateway_app, "_template_manifest_cache", None)
     monkeypatch.setattr(gateway_app, "_template_manifest_cache_key", None)
     monkeypatch.setattr(gateway_app, "validate_template_models", lambda manifest: _build_validation_payload())
@@ -149,7 +165,7 @@ def test_create_comfyui_job_with_valid_asset_ids(tmp_path, monkeypatch):
         debug_root.mkdir(parents=True, exist_ok=True)
         gateway_app.Base.metadata.create_all(bind=gateway_app.db_engine)
         gateway_app.rdb = None
-        gateway_app.http_client = _FakeComfyClient()
+        gateway_app.http_client = fake_client
         yield
         gateway_app.active_comfyui_tasks.clear()
 
@@ -184,11 +200,15 @@ def test_create_comfyui_job_with_valid_asset_ids(tmp_path, monkeypatch):
                 },
                 "params": {
                     "seed": 7,
-                    "steps": 6,
+                    "steps": 4,
                     "cfg": 1,
-                    "denoise_strength": 5,
+                    "denoise_strength": 0.9,
                     "frame_rate": 16,
+                    "person_index": 1,
+                    "subject_points_json": '[{"x":575.8604020500962,"y":461.00299638143633},{"x":589.0269647654002,"y":105.50580306822965}]',
+                    "negative_points_json": '[{"x":0,"y":0}]',
                 },
+                "debug_dump": True,
             },
         )
 
@@ -196,11 +216,33 @@ def test_create_comfyui_job_with_valid_asset_ids(tmp_path, monkeypatch):
         created = create_response.json()
         assert created["status"] == gateway_app.JobStatus.QUEUED.value
         assert created["template_id"] == "wan-character-swap"
+        assert created["debug_dump_path"] == str(debug_root / f"{created['job_id']}.patched.json")
 
         job_payload = _wait_for_job_completion(client, created["job_id"])
         assert job_payload["status"] == gateway_app.JobStatus.COMPLETED.value
         assert job_payload["history_id"]
         assert job_payload["result_path"] == "comfyui/test-output.mp4"
+        assert job_payload["debug_dump_path"] == str(debug_root / f"{created['job_id']}.patched.json")
+
+    assert fake_client.last_post_url == f"{gateway_app.COMFYUI_URL.rstrip('/')}/prompt"
+    assert fake_client.last_post_headers == {"Content-Type": "application/json"}
+    assert fake_client.last_post_json is not None
+    assert fake_client.last_post_json["prompt"]["27"]["inputs"]["steps"] == 4
+    assert fake_client.last_post_json["prompt"]["27"]["inputs"]["denoise_strength"] == 0.9
+    assert fake_client.last_post_json["prompt"]["30"]["inputs"]["images"] == ["28", 0]
+    assert fake_client.last_post_json["prompt"]["120"]["inputs"]["person_index"] == 1
+    assert (
+        fake_client.last_post_json["prompt"]["107"]["inputs"]["points_store"]
+        == '{"positive":[{"x":575.8604020500962,"y":461.00299638143633},{"x":589.0269647654002,"y":105.50580306822965}],"negative":[{"x":0.0,"y":0.0}]}'
+    )
+    dump_path = debug_root / f"{created['job_id']}.patched.json"
+    dump_text = dump_path.read_text(encoding="utf-8")
+    assert dump_text == jsonlib.dumps(
+        fake_client.last_post_json["prompt"],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    assert f'"prompt":{dump_text}' in (fake_client.last_post_body or "")
 
     with session_local() as db:
         job_row = db.get(gateway_app.ComfyUIJobRecordDB, created["job_id"])
@@ -293,3 +335,96 @@ def test_create_comfyui_job_with_stale_asset_id_returns_404(tmp_path, monkeypatc
     assert jobs == []
 
     engine.dispose()
+
+
+def test_patch_api_workflow_rewires_character_swap_output_and_applies_targeting_overrides():
+    manifest = gateway_app.get_comfyui_template("wan-character-swap")
+    prompt_graph = gateway_app.load_template_workflow(manifest)
+
+    patched = gateway_app.patch_api_workflow(
+        prompt_graph,
+        manifest,
+        input_values={
+            "reference_image": "reference.png",
+            "driving_video": "driving.mp4",
+        },
+        params={
+            "seed": 7,
+            "steps": 4,
+            "cfg": 1,
+            "denoise_strength": 0.9,
+            "frame_rate": 16,
+            "person_index": 2,
+            "subject_points_json": '[{"x":512,"y":288},{"x":540,"y":120}]',
+            "negative_points_json": '[{"x":40,"y":40}]',
+        },
+        job_id="job-debug-1",
+    )
+
+    assert patched["30"]["inputs"]["images"] == ["28", 0]
+    assert patched["28"]["class_type"] == "WanVideoDecode"
+    assert patched[patched["30"]["inputs"]["images"][0]]["class_type"] != "ImageConcatMulti"
+    assert patched["120"]["inputs"]["person_index"] == 2
+    assert patched["107"]["inputs"]["coordinates"] == '[{"x":512.0,"y":288.0},{"x":540.0,"y":120.0}]'
+    assert patched["107"]["inputs"]["neg_coordinates"] == '[{"x":40.0,"y":40.0}]'
+    assert (
+        patched["107"]["inputs"]["points_store"]
+        == '{"positive":[{"x":512.0,"y":288.0},{"x":540.0,"y":120.0}],"negative":[{"x":40.0,"y":40.0}]}'
+    )
+    assert patched["172"]["inputs"]["save_output"] is False
+
+    debug_patched = gateway_app.patch_api_workflow(
+        prompt_graph,
+        manifest,
+        input_values={
+            "reference_image": "reference.png",
+            "driving_video": "driving.mp4",
+        },
+        params={
+            gateway_app.COMFYUI_INTERNAL_DEBUG_PARAM: True,
+        },
+        job_id="job-debug-2",
+    )
+
+    assert debug_patched["30"]["inputs"]["images"] == ["28", 0]
+    assert debug_patched["172"]["inputs"]["save_output"] is True
+    assert debug_patched["173"]["inputs"]["save_output"] is True
+    assert debug_patched["175"]["inputs"]["save_output"] is True
+    assert debug_patched["176"]["inputs"]["save_output"] is True
+
+
+def test_extract_output_from_history_uses_latest_artifact_for_current_job():
+    manifest = gateway_app.get_comfyui_template("wan-character-swap")
+    prompt_graph = gateway_app.load_template_workflow(manifest)
+
+    output = gateway_app.extract_output_from_history(
+        prompt_graph,
+        {
+            "outputs": {
+                "30": {
+                    "videos": [
+                        {
+                            "filename": "older.mp4",
+                            "subfolder": "neonforge/job-1",
+                            "type": "output",
+                        },
+                        {
+                            "filename": "newer.mp4",
+                            "subfolder": "neonforge/job-1",
+                            "type": "output",
+                        },
+                    ]
+                }
+            }
+        },
+        manifest,
+    )
+
+    assert output == {
+        "node_id": "30",
+        "media_key": "videos",
+        "relative_path": "comfyui/output/neonforge/job-1/newer.mp4",
+        "filename": "newer.mp4",
+        "type": "output",
+        "subfolder": "neonforge/job-1",
+    }
