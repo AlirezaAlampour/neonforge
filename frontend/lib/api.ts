@@ -1,5 +1,12 @@
 import type {
   AssetResponse,
+  ComfyUIAsset,
+  ComfyUIAssetResponse,
+  ComfyUIJobDetail,
+  ComfyUIJobSubmitResult,
+  ComfyUIModelsResponse,
+  ComfyUITemplate,
+  ComfyUITemplateListResponse,
   HistoryResponse,
   JobRecord,
   MemoryStatus,
@@ -80,6 +87,60 @@ export async function savePreset(payload: {
 
 export async function deletePreset(id: string): Promise<{ deleted: boolean }> {
   return request(`/api/v1/presets/${id}`, { method: 'DELETE' })
+}
+
+export async function fetchComfyUITemplates(): Promise<ComfyUITemplateListResponse> {
+  return request('/api/v1/comfyui/templates')
+}
+
+export async function fetchComfyUITemplate(templateId: string): Promise<ComfyUITemplate> {
+  return request(`/api/v1/comfyui/templates/${templateId}`)
+}
+
+export async function fetchComfyUIModels(): Promise<ComfyUIModelsResponse> {
+  return request('/api/v1/comfyui/models')
+}
+
+export async function fetchComfyUIAssets(kind?: 'image' | 'video'): Promise<ComfyUIAssetResponse> {
+  const suffix = kind ? `?kind=${encodeURIComponent(kind)}` : ''
+  return request(`/api/v1/comfyui/assets${suffix}`)
+}
+
+export async function uploadComfyUIAsset(file: File, kind: 'image' | 'video'): Promise<ComfyUIAsset> {
+  const formData = new FormData()
+  formData.append('file', file)
+  formData.append('kind', kind)
+
+  const res = await fetch('/api/v1/comfyui/assets/upload', {
+    method: 'POST',
+    body: formData,
+  })
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new ApiError(res.status, body || `HTTP ${res.status}`)
+  }
+  return res.json()
+}
+
+export async function deleteComfyUIAsset(assetId: string): Promise<{ deleted: boolean; file_deleted: boolean }> {
+  return request(`/api/v1/comfyui/assets/${assetId}`, { method: 'DELETE' })
+}
+
+export async function submitComfyUIJob(payload: {
+  template_id: string
+  inputs: Record<string, string>
+  params: Record<string, unknown>
+  debug_dump?: boolean
+}): Promise<ComfyUIJobSubmitResult> {
+  return request('/api/v1/comfyui/jobs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function fetchComfyUIJob(jobId: string): Promise<ComfyUIJobDetail> {
+  return request(`/api/v1/comfyui/jobs/${jobId}`)
 }
 
 export async function submitTTS(formData: FormData): Promise<{ job_id: string }> {

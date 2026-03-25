@@ -109,12 +109,14 @@ services:
       LIPSYNC_URL: http://lipsync:8000
       WAN21_URL: http://wan21:8000
       COMFYUI_URL: http://comfyui:8188
+      COMFYUI_MODEL_ROOTS: ${COMFYUI_MODEL_ROOTS:-/models/comfyui,/opt/ComfyUI/custom_nodes/comfyui_controlnet_aux/ckpts}
       MEMORY_WARN_THRESHOLD: ${MEMORY_WARN_THRESHOLD:-70}
       MEMORY_HARD_LIMIT: ${MEMORY_HARD_LIMIT:-80}
       MEM_RESERVE_HEAVY_GB: ${MEM_RESERVE_HEAVY_GB:-40}
       MEM_RESERVE_MEDIUM_GB: ${MEM_RESERVE_MEDIUM_GB:-10}
       MEM_RESERVE_LIGHT_GB: ${MEM_RESERVE_LIGHT_GB:-2}
     volumes:
+      - ${MODELS_DIR:-/srv/ai/models}:/models:ro
       - ${OUTPUTS_DIR:-/srv/ai/outputs}:/outputs:rw
       - ${ASSETS_DIR:-/srv/ai/assets}:/app/data/assets:rw
       - ${LOGS_DIR:-/srv/ai/logs}:/logs:rw
@@ -208,6 +210,14 @@ services:
     volumes: *common-volumes 
     ports:
       - "${COMFYUI_PORT:-8188}:8188"
+    command: >
+      python main.py
+      --listen 0.0.0.0
+      --port 8188
+      --input-directory /outputs/comfyui/input
+      --output-directory /outputs/comfyui/output
+      --user-directory /outputs/comfyui/user
+      --enable-manager
     profiles:
       - comfyui
       - full

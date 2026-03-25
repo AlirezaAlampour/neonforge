@@ -13,6 +13,7 @@ Endpoints:
 """
 
 import asyncio
+import json
 import logging
 import os
 import subprocess
@@ -23,6 +24,7 @@ from fastapi import FastAPI, HTTPException
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 COMPOSE_DIR = os.getenv("COMPOSE_DIR", "/project")
 READYZ_TIMEOUT = int(os.getenv("READYZ_TIMEOUT", "300"))
+COMFYUI_CONTAINER_NAME = os.getenv("COMFYUI_CONTAINER_NAME", "ai-comfyui")
 
 # Map service names to their internal Docker network URLs
 SERVICE_URLS = {
@@ -35,6 +37,7 @@ SERVICE_URLS = {
 
 # Only these services can be started/stopped via supervisor
 MANAGED_SERVICES = {"wan21", "f5tts", "liveportrait", "lipsync"}
+SCAN_TARGETS = {"comfyui": COMFYUI_CONTAINER_NAME}
 
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s [supervisor] %(message)s")
 log = logging.getLogger("supervisor")
@@ -50,6 +53,62 @@ def _validate_service(service: str):
             f"Service '{service}' is not managed by supervisor. "
             f"Allowed: {sorted(MANAGED_SERVICES)}",
         )
+
+
+def _container_for_scan_target(target: str) -> str:
+    container = SCAN_TARGETS.get(target)
+    if not container:
+        raise HTTPException(404, f"Unknown scan target: {target}")
+    return container
+
+
+CONTAINER_FILE_SCAN_SCRIPT = r"""
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+root = Path(sys.argv[1])
+extensions = {value.lower() for value in sys.argv[2:] if value}
+
+payload = {
+    "path": str(root),
+    "resolved_path": str(root.resolve(strict=False)),
+    "exists": root.exists(),
+    "is_dir": root.is_dir(),
+    "item_count": 0,
+    "error": None,
+    "items": [],
+}
+
+if not payload["exists"]:
+    print(json.dumps(payload))
+    raise SystemExit(0)
+
+if not payload["is_dir"]:
+    payload["error"] = "Path exists but is not a directory."
+    print(json.dumps(payload))
+    raise SystemExit(0)
+
+for path in sorted(root.rglob("*")):
+    if not path.is_file():
+        continue
+    if extensions and path.suffix.lower() not in extensions:
+        continue
+    stat = path.stat()
+    payload["items"].append(
+        {
+            "filename": path.name,
+            "path": str(path),
+            "relative_path": str(path.relative_to(root)),
+            "size_bytes": stat.st_size,
+            "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+        }
+    )
+
+payload["item_count"] = len(payload["items"])
+print(json.dumps(payload))
+"""
 
 
 @app.get("/healthz")
@@ -72,6 +131,59 @@ async def status(service: str):
         return {"service": service, "container": container, "status": state}
     except Exception as e:
         raise HTTPException(500, f"Docker inspect failed: {e}")
+
+
+@app.get("/container-files/{target}")
+async def container_files(target: str, root: str):
+    container = _container_for_scan_target(target)
+
+    inspect = subprocess.run(
+        ["docker", "inspect", "-f", "{{.State.Status}}", container],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if inspect.returncode != 0:
+        raise HTTPException(404, f"Container not found: {container}")
+
+    state = inspect.stdout.strip()
+    if state != "running":
+        raise HTTPException(503, f"Container {container} is not running (state={state})")
+
+    proc = await asyncio.create_subprocess_exec(
+        "docker",
+        "exec",
+        container,
+        "python",
+        "-c",
+        CONTAINER_FILE_SCAN_SCRIPT,
+        root,
+        ".pt",
+        ".pth",
+        ".bin",
+        ".ckpt",
+        ".safetensors",
+        ".onnx",
+        ".gguf",
+        ".pickle",
+        ".pkl",
+        ".json",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise HTTPException(502, f"docker exec scan failed: {stderr.decode()[:300]}")
+
+    try:
+        payload = json.loads(stdout.decode())
+    except json.JSONDecodeError as exc:
+        raise HTTPException(502, f"Invalid scan response from {container}: {exc}") from exc
+
+    payload["target"] = target
+    payload["container"] = container
+    payload["source"] = "comfyui_container"
+    return payload
 
 
 @app.post("/start/{service}")

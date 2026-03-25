@@ -96,6 +96,16 @@ export function JobTracker({ jobs, onDismiss }: JobTrackerProps) {
               </div>
             )}
 
+            {job.message && job.status !== 'failed' && (
+              <p className="mt-2 text-xs text-muted-foreground">{job.message}</p>
+            )}
+
+            {job.debug_dump_path && (
+              <p className="mt-2 break-all font-mono text-[11px] text-muted-foreground">
+                Debug payload: {job.debug_dump_path}
+              </p>
+            )}
+
             {job.status === 'failed' && job.error && (
               <p className="mt-2 text-xs text-red-400/80 truncate">{job.error}</p>
             )}

@@ -7,8 +7,22 @@ FROM python:3.11-slim-bookworm AS base
 LABEL maintainer="ai-infra"
 LABEL component="supervisor"
 
+ARG TARGETARCH
+ARG COMPOSE_VERSION=v2.35.1
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl docker.io docker-compose-v2 tini \
+        ca-certificates curl docker.io tini \
+    && case "${TARGETARCH}" in \
+        amd64) compose_arch="x86_64" ;; \
+        arm64) compose_arch="aarch64" ;; \
+        *) echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && mkdir -p /usr/local/lib/docker/cli-plugins \
+    && curl -fsSL "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-${compose_arch}" \
+        -o /usr/local/lib/docker/cli-plugins/docker-compose \
+    && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
+    && docker compose version \
+    && apt-get purge -y --auto-remove curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

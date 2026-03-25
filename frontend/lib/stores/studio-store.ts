@@ -25,15 +25,29 @@ export interface ReactorFormState {
   loraStrength: number
 }
 
+export interface CharacterSwapFormState {
+  templateId: string
+  referenceImageAssetId: string
+  drivingVideoAssetId: string
+  seed: string
+  steps: number
+  cfg: number
+  denoiseStrength: number
+  frameRate: number
+  debugDump: boolean
+}
+
 interface StudioState {
   activeTab: StudioTool
   f5tts: F5TTSFormState
   liveportrait: LivePortraitFormState
   reactor: ReactorFormState
+  characterSwap: CharacterSwapFormState
   setActiveTab: (tab: StudioTool) => void
   updateF5TTS: (patch: Partial<F5TTSFormState>) => void
   updateLivePortrait: (patch: Partial<LivePortraitFormState>) => void
   updateReactor: (patch: Partial<ReactorFormState>) => void
+  updateCharacterSwap: (patch: Partial<CharacterSwapFormState>) => void
   getPresetState: (tool: StudioTool) => Record<string, unknown>
   applyPresetState: (tool: StudioTool, state: Record<string, unknown>) => void
 }
@@ -57,6 +71,18 @@ const initialReactor: ReactorFormState = {
   negativePrompt: '',
   savedLoraPath: '',
   loraStrength: 0.75,
+}
+
+const initialCharacterSwap: CharacterSwapFormState = {
+  templateId: '',
+  referenceImageAssetId: '',
+  drivingVideoAssetId: '',
+  seed: '42',
+  steps: 6,
+  cfg: 1,
+  denoiseStrength: 5,
+  frameRate: 16,
+  debugDump: false,
 }
 
 function toRecord(value: unknown): Record<string, unknown> {
@@ -89,6 +115,7 @@ export const useStudioStore = create<StudioState>()(
       f5tts: initialF5TTS,
       liveportrait: initialLivePortrait,
       reactor: initialReactor,
+      characterSwap: initialCharacterSwap,
       setActiveTab: (tab) => set({ activeTab: tab }),
       updateF5TTS: (patch) =>
         set((state) => ({
@@ -111,11 +138,19 @@ export const useStudioStore = create<StudioState>()(
             ...patch,
           },
         })),
+      updateCharacterSwap: (patch) =>
+        set((state) => ({
+          characterSwap: {
+            ...state.characterSwap,
+            ...patch,
+          },
+        })),
       getPresetState: (tool) => {
         const state = get()
         if (tool === 'f5tts') return { ...state.f5tts }
         if (tool === 'liveportrait') return { ...state.liveportrait }
-        return { ...state.reactor }
+        if (tool === 'reactor') return { ...state.reactor }
+        return { ...state.characterSwap }
       },
       applyPresetState: (tool, state) =>
         set((current) => {
@@ -142,13 +177,29 @@ export const useStudioStore = create<StudioState>()(
               },
             }
           }
+          if (tool === 'reactor') {
+            return {
+              reactor: {
+                ...current.reactor,
+                prompt: toStringOrEmpty(payload.prompt),
+                negativePrompt: toStringOrEmpty(payload.negativePrompt),
+                savedLoraPath: toStringOrEmpty(payload.savedLoraPath),
+                loraStrength: toNumberOr(payload.loraStrength, 0.75),
+              },
+            }
+          }
           return {
-            reactor: {
-              ...current.reactor,
-              prompt: toStringOrEmpty(payload.prompt),
-              negativePrompt: toStringOrEmpty(payload.negativePrompt),
-              savedLoraPath: toStringOrEmpty(payload.savedLoraPath),
-              loraStrength: toNumberOr(payload.loraStrength, 0.75),
+            characterSwap: {
+              ...current.characterSwap,
+              templateId: toStringOrEmpty(payload.templateId),
+              referenceImageAssetId: toStringOrEmpty(payload.referenceImageAssetId),
+              drivingVideoAssetId: toStringOrEmpty(payload.drivingVideoAssetId),
+              seed: toStringOrEmpty(payload.seed),
+              steps: toNumberOr(payload.steps, 6),
+              cfg: toNumberOr(payload.cfg, 1),
+              denoiseStrength: toNumberOr(payload.denoiseStrength, 5),
+              frameRate: toNumberOr(payload.frameRate, 16),
+              debugDump: Boolean(payload.debugDump),
             },
           }
         }),
@@ -161,6 +212,7 @@ export const useStudioStore = create<StudioState>()(
         f5tts: state.f5tts,
         liveportrait: state.liveportrait,
         reactor: state.reactor,
+        characterSwap: state.characterSwap,
       }),
     },
   ),

@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useState, type DragEvent } from 'react'
-import { Upload, X, FileAudio, FileVideo } from 'lucide-react'
+import { Upload, X, FileAudio, FileImage, FileVideo } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { formatBytes } from '@/lib/utils'
 import { Button } from './ui/button'
@@ -13,7 +13,7 @@ interface FileDropzoneProps {
   file: File | null
   onFileChange: (file: File | null) => void
   maxSizeMB?: number
-  icon?: 'audio' | 'video'
+  icon?: 'audio' | 'image' | 'video'
 }
 
 export function FileDropzone({
@@ -57,7 +57,7 @@ export function FileDropzone({
 
   const handleDragLeave = useCallback(() => setDragOver(false), [])
 
-  const Icon = icon === 'video' ? FileVideo : FileAudio
+  const Icon = icon === 'video' ? FileVideo : icon === 'image' ? FileImage : FileAudio
 
   if (file) {
     return (

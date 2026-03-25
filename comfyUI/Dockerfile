@@ -13,6 +13,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 ARG COMFYUI_REF=0904cc3fe5a551e3716851f12a568e481badd301
 ARG WANVIDEO_REF=df8f3e49daaad117cf3090cc916c83f3d001494c
 ARG F5TTS_NODE_REF=6478664f834bb43b0d63e85f8fd0bb46eea62ca1
+ARG WORKFLOW_CONVERTER_REF=bc8538278f82053b3ca10a44d62d02596f8e1a37
 ARG TORCHAUDIO_VERSION=2.10.0
 ARG OPENCV_HEADLESS_VERSION=4.13.0.92
 
@@ -40,7 +41,13 @@ RUN git clone https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI \
     && git -C /opt/ComfyUI/custom_nodes/ComfyUI-WanVideoWrapper checkout "${WANVIDEO_REF}" \
     && git clone https://github.com/niknah/ComfyUI-F5-TTS.git /opt/ComfyUI/custom_nodes/ComfyUI-F5-TTS \
     && git -C /opt/ComfyUI/custom_nodes/ComfyUI-F5-TTS checkout "${F5TTS_NODE_REF}" \
-    && git -C /opt/ComfyUI/custom_nodes/ComfyUI-F5-TTS submodule update --init --recursive
+    && git clone https://github.com/SethRobinson/comfyui-workflow-to-api-converter-endpoint.git /opt/ComfyUI/custom_nodes/comfyui-workflow-to-api-converter-endpoint \
+    && git -C /opt/ComfyUI/custom_nodes/comfyui-workflow-to-api-converter-endpoint checkout "${WORKFLOW_CONVERTER_REF}" \
+    && git -C /opt/ComfyUI/custom_nodes/ComfyUI-F5-TTS submodule update --init --recursive \
+    && git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /opt/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite \
+    && git clone https://github.com/kijai/ComfyUI-KJNodes.git /opt/ComfyUI/custom_nodes/ComfyUI-KJNodes \
+    && git clone https://github.com/Fannovel16/comfyui_controlnet_aux.git /opt/ComfyUI/custom_nodes/comfyui_controlnet_aux \
+    && git clone https://github.com/kijai/ComfyUI-segment-anything-2.git /opt/ComfyUI/custom_nodes/ComfyUI-segment-anything-2
 
 COPY comfyUI/resolve_deps.py /opt/dgx-auto-resolver/resolve_deps.py
 
@@ -168,7 +175,10 @@ RUN mkdir -p \
     && rm -rf /opt/ComfyUI/models \
     && ln -s /models/comfyui /opt/ComfyUI/models
 
+RUN pip install -U --pre comfyui-manager \
+    && pip install -r /opt/ComfyUI/custom_nodes/comfyui_controlnet_aux/requirements.txt
+
 EXPOSE 8188
 
 ENTRYPOINT ["tini", "--"]
-CMD ["python", "main.py", "--listen", "0.0.0.0", "--port", "8188", "--input-directory", "/outputs/comfyui/input", "--output-directory", "/outputs/comfyui/output", "--user-directory", "/outputs/comfyui/user"]
+CMD ["python", "main.py", "--listen", "0.0.0.0", "--port", "8188", "--input-directory", "/outputs/comfyui/input", "--output-directory", "/outputs/comfyui/output", "--user-directory", "/outputs/comfyui/user", "--enable-manager"]

@@ -129,12 +129,61 @@ All requests go through `http://localhost:8080`.
 | POST | `/api/v1/liveportrait/animate` | LivePortrait | Medium |
 | POST | `/api/v1/lipsync/sync` | Lip-sync | Medium |
 | POST | `/api/v1/wan21/generate` | Wan 2.1 | Heavy |
+| GET | `/api/v1/comfyui/templates` | Managed ComfyUI templates | Heavy |
+| GET | `/api/v1/comfyui/templates/{template_id}` | Template detail + validation | Heavy |
+| GET | `/api/v1/comfyui/models` | Read-only ComfyUI model inventory | -- |
+| GET | `/api/v1/comfyui/assets` | Uploaded Character Swap assets | -- |
+| POST | `/api/v1/comfyui/assets/upload` | Upload Character Swap asset | -- |
+| DELETE | `/api/v1/comfyui/assets/{asset_id}` | Delete uploaded Character Swap asset | -- |
+| POST | `/api/v1/comfyui/jobs` | Queue template-driven ComfyUI job | Heavy |
+| GET | `/api/v1/comfyui/jobs/{job_id}` | Template-driven ComfyUI job detail | Heavy |
 | GET | `/api/v1/outputs/{path}` | File retrieval | -- |
 | GET | `/healthz` | Gateway health | -- |
 | GET | `/readyz` | Gateway + Redis readiness | -- |
 | GET | `/memory` | UMA memory status + thresholds | -- |
 | GET | `/services/status` | All service health | -- |
 | GET | `/jobs/{job_id}` | Job status lookup | -- |
+
+## ComfyUI Templates
+
+NeonForge now includes a managed Character Swap flow in the Studio UI that runs ComfyUI workflows through the gateway instead of treating ComfyUI as an untracked sidecar.
+
+### Where files live
+
+- Template manifests and workflow source files live in `gateway/templates/comfyui/`.
+- Uploaded Character Swap assets live under `${ASSETS_DIR}/comfyui/uploads/` and are mounted in the gateway at `/app/data/assets/comfyui/uploads/`.
+- Before submission, selected uploaded assets are staged into the ComfyUI input directory at `/outputs/comfyui/input/`.
+- Final videos are written by ComfyUI to `/outputs/comfyui/output/` and are exposed through the existing history/download APIs.
+
+### Template Workflow JSON vs Runtime Payload
+
+- The template workflow JSON is the source-of-truth graph stored in the repo.
+- The runtime payload sent to ComfyUI is always an API prompt graph under `payload.prompt`.
+- For full exported workflows, NeonForge converts the stored workflow to API format through ComfyUI's `/workflow/convert` endpoint at submission time, then patches only the manifest-defined runtime inputs.
+- The first managed template patches:
+  - `reference_image -> node 57 -> inputs.image`
+  - `driving_video -> node 63 -> inputs.video`
+  - `seed -> node 27 -> inputs.seed`
+  - `steps -> node 27 -> inputs.steps`
+  - `cfg -> node 27 -> inputs.cfg`
+  - `denoise_strength -> node 27 -> inputs.denoise_strength`
+
+### Model Validation
+
+- NeonForge scans only the ComfyUI model roots from `COMFYUI_MODEL_ROOTS` (default: `/models/comfyui,/opt/ComfyUI/custom_nodes/comfyui_controlnet_aux/ckpts`).
+- `COMFYUI_MODEL_ROOTS` accepts multiple roots separated by commas, newlines, or semicolons.
+- In Docker Compose, the gateway mounts `/models` read-only for shared weights, and it falls back to a read-only supervisor-backed scan for ComfyUI container-only roots such as `comfyui_controlnet_aux/ckpts`.
+- Validation is read-only. NeonForge never downloads models, never mutates the ComfyUI models directory, and never tries to "fix" missing files.
+- If a template references a model that is not present, submission is rejected with a clear validation error before the workflow is queued.
+- The validator reports which root satisfied each required model and includes the scanned roots in `/api/v1/comfyui/models` for debugging.
+- The Wan Character Swap template validates the workflow's referenced Wan checkpoint, VAE, CLIP vision, text encoder, LoRAs, SAM2 weights, and preprocess ONNX/TorchScript files by filename.
+
+### Adding a New Template
+
+1. Add a manifest file to `gateway/templates/comfyui/<template-id>.manifest.json`.
+2. Add the workflow source JSON to `gateway/templates/comfyui/` and point `workflow_file` at it.
+3. Define `required_inputs`, `optional_params`, the `output` node expectation, and the `runtime_mappings` that patch node inputs at runtime.
+4. Make sure every referenced model is already present in the mounted ComfyUI model roots, then refresh the Character Swap tab or call `GET /api/v1/comfyui/templates` to see validation results.
 
 ### Per-Service Health Endpoints (internal, port 8000)
 

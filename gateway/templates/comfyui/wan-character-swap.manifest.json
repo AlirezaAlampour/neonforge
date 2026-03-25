@@ -1,0 +1,149 @@
+{
+  "id": "wan-character-swap",
+  "name": "Wan Character Swap",
+  "description": "Managed Wan 2.2 character-swap workflow using a reference image and driving video. NeonForge validates required models before queueing and never mutates the ComfyUI models directory.",
+  "category": "video",
+  "workflow_file": "wan-character-swap.workflow.json",
+  "workflow_format": "api",
+  "gpu_tier": "heavy",
+  "required_inputs": [
+    {
+      "id": "reference_image",
+      "label": "Reference Image",
+      "kind": "image",
+      "description": "Still image of the replacement character.",
+      "accepted_extensions": [
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".webp",
+        ".bmp"
+      ],
+      "max_size_mb": 20
+    },
+    {
+      "id": "driving_video",
+      "label": "Driving Video",
+      "kind": "video",
+      "description": "Source or driving video used to animate the swap.",
+      "accepted_extensions": [
+        ".mp4",
+        ".mov",
+        ".webm",
+        ".mkv",
+        ".avi"
+      ],
+      "max_size_mb": 500
+    }
+  ],
+  "optional_params": [
+    {
+      "id": "seed",
+      "label": "Seed",
+      "type": "integer",
+      "description": "Sampler seed.",
+      "default": 42,
+      "step": 1
+    },
+    {
+      "id": "steps",
+      "label": "Steps",
+      "type": "integer",
+      "description": "Sampling steps.",
+      "default": 6,
+      "min": 1,
+      "max": 60,
+      "step": 1
+    },
+    {
+      "id": "cfg",
+      "label": "CFG",
+      "type": "number",
+      "description": "Classifier-free guidance scale.",
+      "default": 1,
+      "min": 0,
+      "max": 20,
+      "step": 0.1
+    },
+    {
+      "id": "denoise_strength",
+      "label": "Denoise Strength",
+      "type": "number",
+      "description": "Sampler denoise strength.",
+      "default": 5,
+      "min": 0,
+      "max": 10,
+      "step": 0.1
+    },
+    {
+      "id": "frame_rate",
+      "label": "Frame Rate",
+      "type": "integer",
+      "description": "Output and load frame rate override.",
+      "default": 16,
+      "min": 1,
+      "max": 60,
+      "step": 1
+    }
+  ],
+  "runtime_mappings": [
+    {
+      "input_id": "reference_image",
+      "node_id": "57",
+      "input_name": "image",
+      "value_source": "asset_filename"
+    },
+    {
+      "input_id": "driving_video",
+      "node_id": "63",
+      "input_name": "video",
+      "value_source": "asset_filename"
+    },
+    {
+      "input_id": "seed",
+      "node_id": "27",
+      "input_name": "seed",
+      "value_source": "param"
+    },
+    {
+      "input_id": "steps",
+      "node_id": "27",
+      "input_name": "steps",
+      "value_source": "param"
+    },
+    {
+      "input_id": "cfg",
+      "node_id": "27",
+      "input_name": "cfg",
+      "value_source": "param"
+    },
+    {
+      "input_id": "denoise_strength",
+      "node_id": "27",
+      "input_name": "denoise_strength",
+      "value_source": "param"
+    },
+    {
+      "input_id": "frame_rate",
+      "node_id": "63",
+      "input_name": "force_rate",
+      "value_source": "param"
+    },
+    {
+      "input_id": "frame_rate",
+      "node_id": "30",
+      "input_name": "frame_rate",
+      "value_source": "param"
+    }
+  ],
+  "output_type": "video",
+  "output": {
+    "node_id": "30",
+    "node_type": "VHS_VideoCombine",
+    "media_keys": [
+      "gifs",
+      "videos",
+      "files"
+    ]
+  }
+}
