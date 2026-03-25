@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 
 import httpx
@@ -37,7 +38,10 @@ SERVICE_URLS = {
 
 # Only these services can be started/stopped via supervisor
 MANAGED_SERVICES = {"wan21", "f5tts", "liveportrait", "lipsync"}
-SCAN_TARGETS = {"comfyui": COMFYUI_CONTAINER_NAME}
+SCAN_TARGETS = {
+    "comfyui": COMFYUI_CONTAINER_NAME,
+    COMFYUI_CONTAINER_NAME: COMFYUI_CONTAINER_NAME,
+}
 
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s [supervisor] %(message)s")
 log = logging.getLogger("supervisor")
@@ -55,11 +59,38 @@ def _validate_service(service: str):
         )
 
 
-def _container_for_scan_target(target: str) -> str:
-    container = SCAN_TARGETS.get(target)
-    if not container:
-        raise HTTPException(404, f"Unknown scan target: {target}")
-    return container
+def _resolve_scan_target(target: str) -> dict[str, str]:
+    normalized = target.strip()
+    if not normalized:
+        raise HTTPException(
+            400,
+            detail={
+                "target": target,
+                "resolved_container": None,
+                "reason": "empty_target",
+                "message": "Scan target cannot be empty.",
+            },
+        )
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", normalized):
+        raise HTTPException(
+            400,
+            detail={
+                "target": target,
+                "resolved_container": None,
+                "reason": "invalid_target",
+                "message": "Scan target contains unsupported characters.",
+            },
+        )
+
+    resolved_container = SCAN_TARGETS.get(normalized)
+    if not resolved_container:
+        resolved_container = normalized if normalized.startswith("ai-") else f"ai-{normalized}"
+
+    return {
+        "target": target,
+        "normalized_target": normalized,
+        "resolved_container": resolved_container,
+    }
 
 
 CONTAINER_FILE_SCAN_SCRIPT = r"""
@@ -135,7 +166,8 @@ async def status(service: str):
 
 @app.get("/container-files/{target}")
 async def container_files(target: str, root: str):
-    container = _container_for_scan_target(target)
+    resolved = _resolve_scan_target(target)
+    container = resolved["resolved_container"]
 
     inspect = subprocess.run(
         ["docker", "inspect", "-f", "{{.State.Status}}", container],
@@ -144,11 +176,28 @@ async def container_files(target: str, root: str):
         timeout=10,
     )
     if inspect.returncode != 0:
-        raise HTTPException(404, f"Container not found: {container}")
+        raise HTTPException(
+            404,
+            detail={
+                **resolved,
+                "reason": "container_not_found",
+                "message": f"Container lookup failed for {container}.",
+                "docker_stdout": inspect.stdout.strip() or None,
+                "docker_stderr": inspect.stderr.strip() or None,
+            },
+        )
 
     state = inspect.stdout.strip()
     if state != "running":
-        raise HTTPException(503, f"Container {container} is not running (state={state})")
+        raise HTTPException(
+            503,
+            detail={
+                **resolved,
+                "reason": "container_not_running",
+                "message": f"Container {container} is not running.",
+                "state": state,
+            },
+        )
 
     proc = await asyncio.create_subprocess_exec(
         "docker",
@@ -173,14 +222,30 @@ async def container_files(target: str, root: str):
     )
     stdout, stderr = await proc.communicate()
     if proc.returncode != 0:
-        raise HTTPException(502, f"docker exec scan failed: {stderr.decode()[:300]}")
+        raise HTTPException(
+            502,
+            detail={
+                **resolved,
+                "reason": "docker_exec_failed",
+                "message": "docker exec scan failed.",
+                "docker_stderr": stderr.decode()[:300] or None,
+                "docker_stdout": stdout.decode()[:300] or None,
+            },
+        )
 
     try:
         payload = json.loads(stdout.decode())
     except json.JSONDecodeError as exc:
-        raise HTTPException(502, f"Invalid scan response from {container}: {exc}") from exc
+        raise HTTPException(
+            502,
+            detail={
+                **resolved,
+                "reason": "invalid_scan_response",
+                "message": f"Invalid scan response from {container}: {exc}",
+            },
+        ) from exc
 
-    payload["target"] = target
+    payload.update(resolved)
     payload["container"] = container
     payload["source"] = "comfyui_container"
     return payload

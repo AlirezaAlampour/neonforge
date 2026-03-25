@@ -7,20 +7,16 @@ FROM python:3.11-slim-bookworm AS base
 LABEL maintainer="ai-infra"
 LABEL component="supervisor"
 
-ARG TARGETARCH
-ARG COMPOSE_VERSION=v2.35.1
-
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl docker.io tini \
-    && case "${TARGETARCH}" in \
-        amd64) compose_arch="x86_64" ;; \
-        arm64) compose_arch="aarch64" ;; \
-        *) echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
-    esac \
-    && mkdir -p /usr/local/lib/docker/cli-plugins \
-    && curl -fsSL "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-${compose_arch}" \
-        -o /usr/local/lib/docker/cli-plugins/docker-compose \
-    && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
+        ca-certificates curl tini \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && . /etc/os-release \
+    && printf "Types: deb\nURIs: https://download.docker.com/linux/debian\nSuites: %s\nComponents: stable\nSigned-By: /etc/apt/keyrings/docker.asc\n" "$VERSION_CODENAME" > /etc/apt/sources.list.d/docker.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin \
+    && docker --version \
     && docker compose version \
     && apt-get purge -y --auto-remove curl \
     && rm -rf /var/lib/apt/lists/*

@@ -369,6 +369,26 @@ def _safe_json_loads(value: Optional[str], fallback: Any) -> Any:
 COMFYUI_INTERNAL_DEBUG_PARAM = "_neonforge_debug_dump"
 
 
+def _comfyui_error_detail(error: str, **context: Any) -> dict[str, Any]:
+    detail = {"error": error}
+    detail.update({key: value for key, value in context.items() if value is not None})
+    return detail
+
+
+def _http_error_text(detail: Any) -> str:
+    if isinstance(detail, str):
+        return detail
+    if isinstance(detail, dict):
+        message = detail.get("error") or detail.get("message")
+        if isinstance(message, str) and message.strip():
+            return message
+        try:
+            return json.dumps(detail, ensure_ascii=False)
+        except TypeError:
+            return str(detail)
+    return str(detail)
+
+
 def _public_comfyui_params(params: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in params.items() if key != COMFYUI_INTERNAL_DEBUG_PARAM}
 
@@ -731,7 +751,10 @@ def get_comfyui_template(template_id: str) -> ComfyUITemplateManifest:
     for manifest in load_comfyui_templates():
         if manifest.id == template_id:
             return manifest
-    raise HTTPException(404, f"Unknown ComfyUI template: {template_id}")
+    raise HTTPException(
+        404,
+        _comfyui_error_detail("Unknown ComfyUI template.", template_id=template_id),
+    )
 
 
 def resolve_template_workflow_path(manifest: ComfyUITemplateManifest) -> Path:
@@ -908,6 +931,26 @@ def scan_comfyui_models() -> dict[str, Any]:
                     )
                     response.raise_for_status()
                     remote_payload = response.json()
+            except httpx.HTTPStatusError as exc:
+                resolved_container = "ai-comfyui"
+                detail_message = exc.response.text.strip() or str(exc)
+                try:
+                    detail = exc.response.json().get("detail")
+                except (ValueError, AttributeError):
+                    detail = None
+                if isinstance(detail, dict):
+                    resolved_container = detail.get("resolved_container", resolved_container)
+                    detail_message = json.dumps(detail, ensure_ascii=False)
+                root_info = {
+                    "path": str(root),
+                    "resolved_path": str(root),
+                    "exists": False,
+                    "is_dir": False,
+                    "item_count": 0,
+                    "error": f"ComfyUI container scan failed: {detail_message}",
+                    "source": "comfyui_container",
+                    "container": resolved_container,
+                }
             except httpx.HTTPError as exc:
                 root_info = {
                     "path": str(root),
@@ -1204,7 +1247,10 @@ async def update_comfyui_job(
     with SessionLocal() as db:
         row = db.get(ComfyUIJobRecordDB, job_id)
         if not row:
-            raise HTTPException(404, f"ComfyUI job not found: {job_id}")
+            raise HTTPException(
+                404,
+                _comfyui_error_detail("ComfyUI job not found.", job_id=job_id),
+            )
         for key, value in updates.items():
             setattr(row, key, value)
         row.updated_at = now
@@ -1214,11 +1260,24 @@ async def update_comfyui_job(
     return row
 
 
-def get_comfyui_asset_or_404(asset_id: str) -> ComfyUIAssetRecord:
+def get_comfyui_asset_or_404(
+    asset_id: str,
+    *,
+    input_id: Optional[str] = None,
+    template_id: Optional[str] = None,
+) -> ComfyUIAssetRecord:
     with SessionLocal() as db:
         row = db.get(ComfyUIAssetRecord, asset_id)
     if not row:
-        raise HTTPException(404, f"Asset not found: {asset_id}")
+        raise HTTPException(
+            404,
+            _comfyui_error_detail(
+                "ComfyUI asset not found.",
+                asset_id=asset_id,
+                input_id=input_id,
+                template_id=template_id,
+            ),
+        )
     return row
 
 
@@ -1226,8 +1285,49 @@ def get_comfyui_job_or_404(job_id: str) -> ComfyUIJobRecordDB:
     with SessionLocal() as db:
         row = db.get(ComfyUIJobRecordDB, job_id)
     if not row:
-        raise HTTPException(404, f"ComfyUI job not found: {job_id}")
+        raise HTTPException(
+            404,
+            _comfyui_error_detail("ComfyUI job not found.", job_id=job_id),
+        )
     return row
+
+
+def resolve_comfyui_input_assets(
+    manifest: ComfyUITemplateManifest,
+    input_asset_ids: dict[str, Any],
+) -> dict[str, ComfyUIAssetRecord]:
+    resolved_assets: dict[str, ComfyUIAssetRecord] = {}
+    for spec in manifest.required_inputs:
+        asset_id = input_asset_ids.get(spec.id)
+        if not asset_id:
+            raise HTTPException(
+                400,
+                _comfyui_error_detail(
+                    "Missing required ComfyUI input asset.",
+                    template_id=manifest.id,
+                    input_id=spec.id,
+                    expected_kind=spec.kind,
+                ),
+            )
+        asset = get_comfyui_asset_or_404(
+            str(asset_id),
+            input_id=spec.id,
+            template_id=manifest.id,
+        )
+        if asset.kind != spec.kind:
+            raise HTTPException(
+                400,
+                _comfyui_error_detail(
+                    "Selected asset kind does not match the template input.",
+                    template_id=manifest.id,
+                    input_id=spec.id,
+                    asset_id=asset.id,
+                    expected_kind=spec.kind,
+                    actual_kind=asset.kind,
+                ),
+            )
+        resolved_assets[spec.id] = asset
+    return resolved_assets
 
 
 async def save_comfyui_upload(upload: UploadFile, kind: str) -> ComfyUIAssetRecord:
@@ -1410,11 +1510,12 @@ def _register_comfyui_task(job_id: str, task: asyncio.Task):
 
 
 async def run_comfyui_job(job_id: str):
-    row = get_comfyui_job_or_404(job_id)
-    manifest = get_comfyui_template(row.template_id)
-    semaphore = _gpu_sem_for_tier(row.gpu_tier)
+    job_row = get_comfyui_job_or_404(job_id)
+    manifest = get_comfyui_template(job_row.template_id)
+    semaphore = _gpu_sem_for_tier(job_row.gpu_tier)
 
     async def _execute():
+        current_job = job_row
         validation = validate_template_models(manifest)
         if validation["missing"]:
             missing_names = ", ".join(sorted({item["filename"] for item in validation["missing"]}))
@@ -1428,8 +1529,8 @@ async def run_comfyui_job(job_id: str):
             )
             return
 
-        allowed, mem, reason = memory_allows_job(row.gpu_tier)
-        if not allowed and row.gpu_tier != "light":
+        allowed, mem, reason = memory_allows_job(current_job.gpu_tier)
+        if not allowed and current_job.gpu_tier != "light":
             await update_comfyui_job(
                 job_id,
                 status=JobStatus.FAILED.value,
@@ -1442,17 +1543,13 @@ async def run_comfyui_job(job_id: str):
 
         await ensure_comfyui_reachable()
 
-        input_asset_ids = _safe_json_loads(row.inputs_json, {})
-        params = _safe_json_loads(row.params_json, {})
+        input_asset_ids = _safe_json_loads(current_job.inputs_json, {})
+        params = _safe_json_loads(current_job.params_json, {})
         public_params = _public_comfyui_params(params)
         prepared_inputs: dict[str, Any] = {}
+        resolved_assets = resolve_comfyui_input_assets(manifest, input_asset_ids)
         for spec in manifest.required_inputs:
-            asset_id = input_asset_ids.get(spec.id)
-            if not asset_id:
-                raise HTTPException(400, f"Missing required input asset: {spec.id}")
-            asset = get_comfyui_asset_or_404(asset_id)
-            if asset.kind != spec.kind:
-                raise HTTPException(400, f"Asset {asset.id} is not a valid {spec.kind} input.")
+            asset = resolved_assets[spec.id]
             prepared_inputs[spec.id] = prepare_asset_for_comfyui(asset)
 
         api_prompt = await convert_template_workflow_to_api(manifest)
@@ -1473,8 +1570,8 @@ async def run_comfyui_job(job_id: str):
             except OSError as exc:
                 raise HTTPException(500, f"Failed to write ComfyUI debug dump: {exc}") from exc
 
-        client_id = row.client_id or str(uuid.uuid4())
-        await update_comfyui_job(
+        client_id = current_job.client_id or str(uuid.uuid4())
+        current_job = await update_comfyui_job(
             job_id,
             client_id=client_id,
             validation_json=json.dumps(validation, ensure_ascii=False),
@@ -1555,14 +1652,14 @@ async def run_comfyui_job(job_id: str):
                     raise HTTPException(502, _history_error_message(history_entry) or "ComfyUI job failed.")
 
             queue_status = await get_comfyui_queue_status(prompt_id)
-            if queue_status == "running" and row.status != JobStatus.RUNNING.value:
-                row = await update_comfyui_job(
+            if queue_status == "running" and current_job.status != JobStatus.RUNNING.value:
+                current_job = await update_comfyui_job(
                     job_id,
                     status=JobStatus.RUNNING.value,
                     status_message="Generating video",
                 )
-            elif queue_status == "queued" and row.status != JobStatus.QUEUED.value:
-                row = await update_comfyui_job(
+            elif queue_status == "queued" and current_job.status != JobStatus.QUEUED.value:
+                current_job = await update_comfyui_job(
                     job_id,
                     status=JobStatus.QUEUED.value,
                     status_message="Queued in ComfyUI",
@@ -1578,21 +1675,35 @@ async def run_comfyui_job(job_id: str):
         else:
             await _execute()
     except HTTPException as exc:
-        await update_comfyui_job(
-            job_id,
-            status=JobStatus.FAILED.value,
-            error=str(exc.detail),
-            status_message="Failed",
-            completed_at=_now_utc(),
-        )
+        try:
+            await update_comfyui_job(
+                job_id,
+                status=JobStatus.FAILED.value,
+                error=_http_error_text(exc.detail),
+                status_message="Failed",
+                completed_at=_now_utc(),
+            )
+        except HTTPException as update_exc:
+            log.warning(
+                "Unable to mark ComfyUI job %s as failed after HTTP error: %s",
+                job_id,
+                _http_error_text(update_exc.detail),
+            )
     except Exception as exc:
-        await update_comfyui_job(
-            job_id,
-            status=JobStatus.FAILED.value,
-            error=str(exc),
-            status_message="Failed",
-            completed_at=_now_utc(),
-        )
+        try:
+            await update_comfyui_job(
+                job_id,
+                status=JobStatus.FAILED.value,
+                error=str(exc),
+                status_message="Failed",
+                completed_at=_now_utc(),
+            )
+        except HTTPException as update_exc:
+            log.warning(
+                "Unable to mark ComfyUI job %s as failed after exception: %s",
+                job_id,
+                _http_error_text(update_exc.detail),
+            )
 
 
 async def resume_incomplete_comfyui_jobs():
@@ -2161,12 +2272,16 @@ async def create_comfyui_job(payload: ComfyUIJobCreateRequest):
     required_ids = {spec.id for spec in manifest.required_inputs}
     missing_inputs = sorted(input_id for input_id in required_ids if not payload.inputs.get(input_id))
     if missing_inputs:
-        raise HTTPException(400, f"Missing required template inputs: {', '.join(missing_inputs)}")
+        raise HTTPException(
+            400,
+            _comfyui_error_detail(
+                "Missing required template inputs.",
+                template_id=manifest.id,
+                missing_inputs=missing_inputs,
+            ),
+        )
 
-    for spec in manifest.required_inputs:
-        asset = get_comfyui_asset_or_404(payload.inputs[spec.id])
-        if asset.kind != spec.kind:
-            raise HTTPException(400, f"Asset {asset.id} must be a {spec.kind} file.")
+    resolve_comfyui_input_assets(manifest, payload.inputs)
 
     stored_params = dict(payload.params)
     if payload.debug_dump:

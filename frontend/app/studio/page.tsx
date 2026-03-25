@@ -75,6 +75,7 @@ export default function StudioPage() {
   const [comfyTemplates, setComfyTemplates] = useState<ComfyUITemplate[]>([])
   const [comfyAssets, setComfyAssets] = useState<ComfyUIAsset[]>([])
   const [comfyModels, setComfyModels] = useState<ComfyUIModelsResponse | null>(null)
+  const [comfyAssetsLoaded, setComfyAssetsLoaded] = useState(false)
   const [refreshingComfy, setRefreshingComfy] = useState(false)
   const [uploadingAssetKind, setUploadingAssetKind] = useState<'image' | 'video' | null>(null)
   const [deletingComfyAssetId, setDeletingComfyAssetId] = useState<string | null>(null)
@@ -103,17 +104,49 @@ export default function StudioPage() {
   }, [])
 
   const refreshComfyData = useCallback(async () => {
-    try {
-      const [templates, assets, models] = await Promise.all([
-        fetchComfyUITemplates(),
-        fetchComfyUIAssets(),
-        fetchComfyUIModels(),
-      ])
-      setComfyTemplates(templates.items)
-      setComfyAssets(assets.items)
-      setComfyModels(models)
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Failed to load ComfyUI templates')
+    const [templatesResult, assetsResult, modelsResult] = await Promise.allSettled([
+      fetchComfyUITemplates(),
+      fetchComfyUIAssets(),
+      fetchComfyUIModels(),
+    ])
+
+    const failures: string[] = []
+
+    if (templatesResult.status === 'fulfilled') {
+      setComfyTemplates(templatesResult.value.items)
+    } else {
+      failures.push(
+        templatesResult.reason instanceof Error
+          ? templatesResult.reason.message
+          : 'Failed to load ComfyUI templates',
+      )
+    }
+
+    if (assetsResult.status === 'fulfilled') {
+      setComfyAssets(assetsResult.value.items)
+      setComfyAssetsLoaded(true)
+    } else {
+      setComfyAssets([])
+      setComfyAssetsLoaded(true)
+      failures.push(
+        assetsResult.reason instanceof Error
+          ? assetsResult.reason.message
+          : 'Failed to load ComfyUI assets',
+      )
+    }
+
+    if (modelsResult.status === 'fulfilled') {
+      setComfyModels(modelsResult.value)
+    } else {
+      failures.push(
+        modelsResult.reason instanceof Error
+          ? modelsResult.reason.message
+          : 'Failed to load ComfyUI model inventory',
+      )
+    }
+
+    if (failures.length > 0) {
+      setError(failures[0])
     }
   }, [])
 
@@ -172,13 +205,47 @@ export default function StudioPage() {
     [comfyAssets],
   )
 
+  const selectedReferenceAsset = useMemo(
+    () => imageAssets.find((asset) => asset.id === characterSwap.referenceImageAssetId) ?? null,
+    [characterSwap.referenceImageAssetId, imageAssets],
+  )
+
+  const selectedDrivingAsset = useMemo(
+    () => videoAssets.find((asset) => asset.id === characterSwap.drivingVideoAssetId) ?? null,
+    [characterSwap.drivingVideoAssetId, videoAssets],
+  )
+
   const selectedTemplateValidation = selectedTemplate?.validation ?? null
+  const hasBlockingCharacterSwapValidation = (selectedTemplateValidation?.missing.length ?? 0) > 0
   const canSubmitCharacterSwap =
     !!selectedTemplate &&
-    !!characterSwap.referenceImageAssetId &&
-    !!characterSwap.drivingVideoAssetId &&
+    !!selectedReferenceAsset &&
+    !!selectedDrivingAsset &&
+    comfyAssetsLoaded &&
     !submitting &&
-    !selectedTemplateValidation?.missing.length
+    !hasBlockingCharacterSwapValidation
+
+  useEffect(() => {
+    if (!comfyAssetsLoaded) return
+
+    const patch: Partial<typeof characterSwap> = {}
+    if (characterSwap.referenceImageAssetId && !selectedReferenceAsset) {
+      patch.referenceImageAssetId = ''
+    }
+    if (characterSwap.drivingVideoAssetId && !selectedDrivingAsset) {
+      patch.drivingVideoAssetId = ''
+    }
+    if (Object.keys(patch).length > 0) {
+      updateCharacterSwap(patch)
+    }
+  }, [
+    characterSwap.drivingVideoAssetId,
+    characterSwap.referenceImageAssetId,
+    comfyAssetsLoaded,
+    selectedDrivingAsset,
+    selectedReferenceAsset,
+    updateCharacterSwap,
+  ])
 
   const handleSavePreset = useCallback(async () => {
     if (!presetName.trim()) return
@@ -332,6 +399,14 @@ export default function StudioPage() {
 
   const handleCharacterSwapSubmit = useCallback(async () => {
     if (!selectedTemplate) return
+    if (!selectedReferenceAsset || !selectedDrivingAsset) {
+      setError('Select uploaded assets from the current Character Swap asset list before queueing the job.')
+      return
+    }
+    if (hasBlockingCharacterSwapValidation) {
+      setError('Resolve missing-model validation errors before queueing this Character Swap job.')
+      return
+    }
 
     setSubmitting(true)
     setError(null)
@@ -349,8 +424,8 @@ export default function StudioPage() {
       const result = await submitComfyUIJob({
         template_id: selectedTemplate.id,
         inputs: {
-          reference_image: characterSwap.referenceImageAssetId,
-          driving_video: characterSwap.drivingVideoAssetId,
+          reference_image: selectedReferenceAsset.id,
+          driving_video: selectedDrivingAsset.id,
         },
         params,
         debug_dump: characterSwap.debugDump,
@@ -365,7 +440,16 @@ export default function StudioPage() {
     } finally {
       setSubmitting(false)
     }
-  }, [characterSwap, refreshComfyData, selectedTemplate, trackJob])
+  }, [
+    characterSwap,
+    hasBlockingCharacterSwapValidation,
+    refreshComfyData,
+    selectedDrivingAsset,
+    selectedReferenceAsset,
+    selectedTemplate,
+    trackJob,
+    updateCharacterSwap,
+  ])
 
   return (
     <div className="space-y-6">
@@ -601,6 +685,13 @@ export default function StudioPage() {
                           </option>
                         ))}
                       </select>
+                      <p className="text-xs text-muted-foreground">
+                        {selectedReferenceAsset
+                          ? `Selected uploaded asset: ${selectedReferenceAsset.original_filename}`
+                          : comfyAssetsLoaded
+                            ? 'No uploaded backend image asset selected.'
+                            : 'Loading uploaded backend image assets...'}
+                      </p>
                       <FileDropzone
                         accept="image/*"
                         label="Drop reference image"
@@ -641,6 +732,13 @@ export default function StudioPage() {
                           </option>
                         ))}
                       </select>
+                      <p className="text-xs text-muted-foreground">
+                        {selectedDrivingAsset
+                          ? `Selected uploaded asset: ${selectedDrivingAsset.original_filename}`
+                          : comfyAssetsLoaded
+                            ? 'No uploaded backend video asset selected.'
+                            : 'Loading uploaded backend video assets...'}
+                      </p>
                       <FileDropzone
                         accept="video/*"
                         label="Drop driving video"
@@ -746,7 +844,10 @@ export default function StudioPage() {
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-3">
-                  {comfyAssets.length === 0 && (
+                  {!comfyAssetsLoaded && (
+                    <p className="text-sm text-muted-foreground">Loading uploaded character-swap assets...</p>
+                  )}
+                  {comfyAssetsLoaded && comfyAssets.length === 0 && (
                     <p className="text-sm text-muted-foreground">No uploaded character-swap assets yet.</p>
                   )}
                   {comfyAssets.map((asset) => (
