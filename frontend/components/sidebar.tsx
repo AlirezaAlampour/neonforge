@@ -11,6 +11,7 @@ const navItems = [
   { href: '/status', label: 'System Status', icon: Activity },
   { href: '/studio', label: 'Creative Studio', icon: LayoutGrid },
   { href: '/voice', label: 'Voice Studio', icon: Mic },
+  { href: '/voiceover', label: 'Voiceover Studio', icon: Mic },
   { href: '/broll', label: 'B-Roll Studio', icon: Video },
   { href: '/lipsync', label: 'Lip Sync Studio', icon: Clapperboard },
 ]

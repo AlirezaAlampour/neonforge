@@ -105,8 +105,12 @@ services:
       SUPERVISOR_URL: http://supervisor:8000
       WHISPER_URL: http://whisper:8000
       F5TTS_URL: http://f5tts:8000
+      FISH_SPEECH_ENABLED: ${FISH_SPEECH_ENABLED:-false}
+      FISH_SPEECH_INTERNAL_URL: ${FISH_SPEECH_INTERNAL_URL:-http://fish_speech:8000}
       LIVEPORTRAIT_URL: http://liveportrait:8000
       LIPSYNC_URL: http://lipsync:8000
+      VOXCPM2_ENABLED: ${VOXCPM2_ENABLED:-false}
+      VOXCPM2_INTERNAL_URL: ${VOXCPM2_INTERNAL_URL:-http://voxcpm2:8000}
       WAN21_URL: http://wan21:8000
       COMFYUI_URL: http://comfyui:8188
       COMFYUI_MODEL_ROOTS: ${COMFYUI_MODEL_ROOTS:-/models/comfyui,/opt/ComfyUI/custom_nodes/comfyui_controlnet_aux/ckpts}

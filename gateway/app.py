@@ -38,6 +38,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import DateTime, String, Text, UniqueConstraint, create_engine, desc, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+from voiceover.routes import router as voiceover_router
 
 # ---------------------------------------------------------------------------
 # Env parsing helpers
@@ -2296,6 +2297,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(voiceover_router)
 
 
 # ---------------------------------------------------------------------------
