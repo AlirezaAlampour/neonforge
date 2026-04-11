@@ -4,13 +4,20 @@ import { create } from 'zustand'
 import { createJSONStorage, persist } from 'zustand/middleware'
 import type { StudioTool } from '@/lib/types'
 
-export interface F5TTSFormState {
+export interface TTSFormState {
+  provider: string
   text: string
-  refText: string
-  speed: number
+  speakerName: string
+  referenceText: string
+  transcript: string
+  stylePrompt: string
+  targetSampleRate: string
+  outputFormat: string
+  options: Record<string, unknown>
   voiceMode: 'none' | 'saved' | 'upload'
   savedVoicePath: string
   uploadedRefAudioName: string | null
+  continuationAudioName: string | null
 }
 
 export interface LivePortraitFormState {
@@ -42,12 +49,12 @@ export interface CharacterSwapFormState {
 
 interface StudioState {
   activeTab: StudioTool
-  f5tts: F5TTSFormState
+  f5tts: TTSFormState
   liveportrait: LivePortraitFormState
   reactor: ReactorFormState
   characterSwap: CharacterSwapFormState
   setActiveTab: (tab: StudioTool) => void
-  updateF5TTS: (patch: Partial<F5TTSFormState>) => void
+  updateF5TTS: (patch: Partial<TTSFormState>) => void
   updateLivePortrait: (patch: Partial<LivePortraitFormState>) => void
   updateReactor: (patch: Partial<ReactorFormState>) => void
   updateCharacterSwap: (patch: Partial<CharacterSwapFormState>) => void
@@ -55,13 +62,20 @@ interface StudioState {
   applyPresetState: (tool: StudioTool, state: Record<string, unknown>) => void
 }
 
-const initialF5TTS: F5TTSFormState = {
+const initialF5TTS: TTSFormState = {
+  provider: 'f5tts',
   text: '',
-  refText: '',
-  speed: 1,
+  speakerName: '',
+  referenceText: '',
+  transcript: '',
+  stylePrompt: '',
+  targetSampleRate: '',
+  outputFormat: '',
+  options: { speed: 1 },
   voiceMode: 'none',
   savedVoicePath: '',
   uploadedRefAudioName: null,
+  continuationAudioName: null,
 }
 
 const initialLivePortrait: LivePortraitFormState = {
@@ -123,7 +137,7 @@ function toNumberOr(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback
 }
 
-function toVoiceMode(value: unknown): F5TTSFormState['voiceMode'] {
+function toVoiceMode(value: unknown): TTSFormState['voiceMode'] {
   return value === 'saved' || value === 'upload' || value === 'none' ? value : 'none'
 }
 
@@ -206,15 +220,26 @@ export const useStudioStore = create<StudioState>()(
         set((current) => {
           const payload = toRecord(state)
           if (tool === 'f5tts') {
+            const options = toRecord(payload.options)
+            if (!('speed' in options) && typeof payload.speed === 'number') {
+              options.speed = payload.speed
+            }
             return {
               f5tts: {
                 ...current.f5tts,
+                provider: toStringOr(payload.provider, current.f5tts.provider),
                 text: toStringOrEmpty(payload.text),
-                refText: toStringOrEmpty(payload.refText),
-                speed: toNumberOr(payload.speed, 1),
+                speakerName: toStringOrEmpty(payload.speakerName),
+                referenceText: toStringOr(payload.referenceText, toStringOrEmpty(payload.refText)),
+                transcript: toStringOrEmpty(payload.transcript),
+                stylePrompt: toStringOrEmpty(payload.stylePrompt),
+                targetSampleRate: toStringOrEmpty(payload.targetSampleRate),
+                outputFormat: toStringOrEmpty(payload.outputFormat),
+                options,
                 voiceMode: toVoiceMode(payload.voiceMode),
                 savedVoicePath: toStringOrEmpty(payload.savedVoicePath),
                 uploadedRefAudioName: toNullableString(payload.uploadedRefAudioName),
+                continuationAudioName: toNullableString(payload.continuationAudioName),
               },
             }
           }

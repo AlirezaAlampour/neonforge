@@ -78,6 +78,8 @@ services:
       COMPOSE_DIR: /project
       WAN21_URL: http://wan21:8000
       F5TTS_URL: http://f5tts:8000
+      FISH_SPEECH_URL: http://fish_speech:8000
+      PREMIUM_CLONE_TTS_URL: http://premium_clone_tts:8000
       LIVEPORTRAIT_URL: http://liveportrait:8000
       LIPSYNC_URL: http://lipsync:8000
       WHISPER_URL: http://whisper:8000
@@ -105,9 +107,20 @@ services:
       SUPERVISOR_URL: http://supervisor:8000
       WHISPER_URL: http://whisper:8000
       F5TTS_URL: http://f5tts:8000
+      FISH_SPEECH_URL: http://fish_speech:8000
+      PREMIUM_CLONE_TTS_URL: http://premium_clone_tts:8000
       LIVEPORTRAIT_URL: http://liveportrait:8000
       LIPSYNC_URL: http://lipsync:8000
       WAN21_URL: http://wan21:8000
+      FISH_SPEECH_ENABLED: ${FISH_SPEECH_ENABLED:-false}
+      PREMIUM_CLONE_TTS_ENABLED: ${PREMIUM_CLONE_TTS_ENABLED:-false}
+      FISH_SPEECH_DISPLAY_NAME: ${FISH_SPEECH_DISPLAY_NAME:-Fish Speech}
+      PREMIUM_CLONE_TTS_DISPLAY_NAME: ${PREMIUM_CLONE_TTS_DISPLAY_NAME:-Premium Clone TTS}
+      FISH_SPEECH_OUTPUT_FORMATS: ${FISH_SPEECH_OUTPUT_FORMATS:-wav,mp3,opus}
+      FISH_SPEECH_TARGET_SAMPLE_RATES: ${FISH_SPEECH_TARGET_SAMPLE_RATES:-}
+      PREMIUM_CLONE_TTS_OUTPUT_FORMATS: ${PREMIUM_CLONE_TTS_OUTPUT_FORMATS:-wav}
+      PREMIUM_CLONE_TTS_TARGET_SAMPLE_RATES: ${PREMIUM_CLONE_TTS_TARGET_SAMPLE_RATES:-}
+      PREMIUM_CLONE_TTS_SUPPORTS_48KHZ_OUTPUT: ${PREMIUM_CLONE_TTS_SUPPORTS_48KHZ_OUTPUT:-false}
       COMFYUI_URL: http://comfyui:8188
       COMFYUI_MODEL_ROOTS: ${COMFYUI_MODEL_ROOTS:-/models/comfyui,/opt/ComfyUI/custom_nodes/comfyui_controlnet_aux/ckpts}
       MEMORY_WARN_THRESHOLD: ${MEMORY_WARN_THRESHOLD:-70}
@@ -194,6 +207,56 @@ services:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
       <<: *healthcheck-defaults
       start_period: 120s
+    networks:
+      - ai-net
+
+  fish_speech:
+    build:
+      context: ./services/fish_speech
+      dockerfile: Dockerfile
+    container_name: ai-fish-speech
+    restart: unless-stopped
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      OUTPUTS_ROOT: /outputs
+      OUTPUT_DIR: /outputs/tts/fish_speech
+      FISH_SPEECH_RUNTIME_URL: ${FISH_SPEECH_RUNTIME_URL:-}
+      FISH_SPEECH_RUNTIME_HEALTH_PATH: ${FISH_SPEECH_RUNTIME_HEALTH_PATH:-/v1/health}
+      FISH_SPEECH_RUNTIME_TTS_PATH: ${FISH_SPEECH_RUNTIME_TTS_PATH:-/v1/tts}
+      FISH_SPEECH_TIMEOUT_SEC: ${FISH_SPEECH_TIMEOUT_SEC:-300}
+    volumes: *common-volumes
+    profiles:
+      - fish_speech
+      - full
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      <<: *healthcheck-defaults
+      start_period: 10s
+    networks:
+      - ai-net
+
+  premium_clone_tts:
+    build:
+      context: ./services/premium_clone_tts
+      dockerfile: Dockerfile
+    container_name: ai-premium-clone-tts
+    restart: unless-stopped
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      OUTPUTS_ROOT: /outputs
+      OUTPUT_DIR: /outputs/tts/premium_clone_tts
+      PREMIUM_CLONE_TTS_UPSTREAM_URL: ${PREMIUM_CLONE_TTS_UPSTREAM_URL:-}
+      PREMIUM_CLONE_TTS_HEALTH_PATH: ${PREMIUM_CLONE_TTS_HEALTH_PATH:-/healthz}
+      PREMIUM_CLONE_TTS_SYNTH_PATH: ${PREMIUM_CLONE_TTS_SYNTH_PATH:-/synthesize}
+      PREMIUM_CLONE_TTS_TIMEOUT_SEC: ${PREMIUM_CLONE_TTS_TIMEOUT_SEC:-300}
+    volumes: *common-volumes
+    profiles:
+      - premium_clone_tts
+      - full
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      <<: *healthcheck-defaults
+      start_period: 10s
     networks:
       - ai-net
 

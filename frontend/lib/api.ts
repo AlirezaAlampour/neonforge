@@ -15,6 +15,9 @@ import type {
   ReactorResult,
   ServicesStatus,
   StudioTool,
+  TTSProviderHealth,
+  TTSProviderListResponse,
+  TTSResult,
 } from './types'
 
 class ApiError extends Error {
@@ -62,6 +65,30 @@ export async function deleteHistoryItem(id: string): Promise<{ deleted: boolean;
 
 export async function fetchVoiceAssets(): Promise<AssetResponse> {
   return request('/api/v1/assets/voices')
+}
+
+export async function fetchTTSProviders(includeDisabled = true): Promise<TTSProviderListResponse> {
+  const suffix = includeDisabled ? '?include_disabled=true' : ''
+  return request(`/api/v1/tts/providers${suffix}`)
+}
+
+export async function fetchTTSProviderHealth(providerId: string): Promise<TTSProviderHealth> {
+  return request(`/api/v1/tts/providers/${encodeURIComponent(providerId)}/health`)
+}
+
+export async function fetchTTSJob(jobId: string): Promise<JobRecord> {
+  return request(`/api/v1/tts/jobs/${jobId}`)
+}
+
+export async function fetchTTSHistory(params?: {
+  provider?: string
+  limit?: number
+}): Promise<HistoryResponse> {
+  const query = new URLSearchParams()
+  if (params?.provider) query.set('provider', params.provider)
+  if (params?.limit) query.set('limit', String(params.limit))
+  const suffix = query.toString() ? `?${query.toString()}` : ''
+  return request(`/api/v1/tts/history${suffix}`)
 }
 
 export async function fetchLoraAssets(): Promise<AssetResponse> {
@@ -143,16 +170,22 @@ export async function fetchComfyUIJob(jobId: string): Promise<ComfyUIJobDetail> 
   return request(`/api/v1/comfyui/jobs/${jobId}`)
 }
 
-export async function submitTTS(formData: FormData): Promise<{ job_id: string }> {
-  const res = await fetch('/api/v1/tts/synthesize-with-audio', {
+export async function submitTTSJob(payload: FormData | Record<string, unknown>): Promise<TTSResult> {
+  const isFormData = payload instanceof FormData
+  const res = await fetch('/api/v1/tts/jobs', {
     method: 'POST',
-    body: formData,
+    headers: isFormData ? undefined : { 'Content-Type': 'application/json' },
+    body: isFormData ? payload : JSON.stringify(payload),
   })
   if (!res.ok) {
     const body = await res.text().catch(() => '')
     throw new ApiError(res.status, body || `HTTP ${res.status}`)
   }
   return res.json()
+}
+
+export async function submitTTS(formData: FormData): Promise<TTSResult> {
+  return submitTTSJob(formData)
 }
 
 export async function submitLivePortrait(formData: FormData): Promise<{ job_id: string }> {

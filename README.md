@@ -4,7 +4,7 @@ A production-grade local AI video pipeline running on a single NVIDIA DGX Spark 
 
 ## What This Is
 
-This stack runs five AI inference services behind a single API gateway, with job queuing, memory-aware scheduling, and automatic idle management. Everything runs in Docker containers on one machine with one GPU.
+This stack runs several AI inference services behind a single API gateway, with job queuing, memory-aware scheduling, and automatic idle management. Everything runs in Docker containers on one machine with one GPU.
 
 **Services:**
 
@@ -12,6 +12,8 @@ This stack runs five AI inference services behind a single API gateway, with job
 |---------|---------|------|------------|
 | **Faster-Whisper** | Audio transcription (STT) | Always-on | Light (~1-2 GB) |
 | **F5-TTS** | Text-to-speech synthesis | Warm | Medium (~2-3 GB) |
+| **Fish Speech Adapter** | Optional TTS provider adapter | Optional | Medium budget in gateway |
+| **Premium Clone TTS Adapter** | Optional premium cloning slot | Optional | Medium budget in gateway |
 | **LivePortrait** | Face animation from image + driving video | Warm | Medium (~2-4 GB) |
 | **Lip-sync** | Sync lip movements to audio (video-retalking) | Warm | Medium (~3-5 GB) |
 | **Wan 2.1** | Text-to-video generation | Lazy-start singleton | Heavy (~8-40 GB) |
@@ -53,6 +55,11 @@ This stack runs five AI inference services behind a single API gateway, with job
          |        | | (warm) | | (warm) |
          +--------+ +--------+ +--------+
 
+         +----------------+ +----------------------+
+         | Fish Speech    | | Premium Clone TTS   |
+         | (optional)     | | (optional scaffold) |
+         +----------------+ +----------------------+
+
          +----------------------------------+
          |        Wan 2.1 (lazy)            |
          |  Started on demand by Supervisor |
@@ -67,6 +74,9 @@ This stack runs five AI inference services behind a single API gateway, with job
 
 **Warm** -- Container always running, model loaded on first request, destroyed after idle timeout (default 30 min). Healthz responds immediately; first inference triggers model load.
 - F5-TTS, LivePortrait, Lip-sync
+
+**Optional adapters** -- Compose-profile services that stay off unless explicitly enabled. They plug extra TTS providers into the same gateway/UI flow without changing the built-in F5 path.
+- Fish Speech Adapter, Premium Clone TTS Adapter
 
 **Lazy-start singleton** -- Container stopped by default. Gateway asks Supervisor to start it on demand. Stopped by idle_manager after 5 min of inactivity. Only one instance ever runs.
 - Wan 2.1
@@ -101,10 +111,14 @@ docker compose up -d redis supervisor gateway whisper
 # 4. Start warm tier
 docker compose up -d f5tts liveportrait lipsync
 
-# 5. Verify
+# 5. (Optional) Enable additional TTS providers
+docker compose --profile fish_speech up -d fish_speech
+docker compose --profile premium_clone_tts up -d premium_clone_tts
+
+# 6. Verify
 python3 scripts/verify_dgx.py --smoke
 
-# 6. (Optional) Install idle manager systemd units
+# 7. (Optional) Install idle manager systemd units
 sudo cp systemd/ai-idle-manager.service /etc/systemd/system/
 sudo cp systemd/ai-idle-manager.timer /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -126,6 +140,11 @@ All requests go through `http://localhost:8080`.
 |--------|----------|---------|------|
 | POST | `/api/v1/whisper/transcribe` | Whisper | Light |
 | POST | `/api/v1/tts/synthesize` | F5-TTS | Medium |
+| GET | `/api/v1/tts/providers` | Registered TTS providers + capabilities | -- |
+| GET | `/api/v1/tts/providers/{provider_id}/health` | TTS provider health | -- |
+| POST | `/api/v1/tts/jobs` | Unified TTS job submission | Medium |
+| GET | `/api/v1/tts/jobs/{job_id}` | Unified TTS job detail | -- |
+| GET | `/api/v1/tts/history` | TTS-only generation history | -- |
 | POST | `/api/v1/liveportrait/animate` | LivePortrait | Medium |
 | POST | `/api/v1/lipsync/sync` | Lip-sync | Medium |
 | POST | `/api/v1/wan21/generate` | Wan 2.1 | Heavy |
@@ -143,6 +162,95 @@ All requests go through `http://localhost:8080`.
 | GET | `/memory` | UMA memory status + thresholds | -- |
 | GET | `/services/status` | All service health | -- |
 | GET | `/jobs/{job_id}` | Job status lookup | -- |
+
+## TTS Provider Architecture
+
+NeonForge now treats TTS as a provider registry instead of a single hard-coded backend.
+
+- The gateway owns provider discovery, capability validation, job submission, and TTS history.
+- `f5tts` remains the built-in provider and still serves the legacy `/api/v1/tts/synthesize` and `/api/v1/tts/synthesize-with-audio` routes.
+- `fish_speech` is an adapter service that converts NeonForge requests into the official Fish Speech `/v1/tts` API shape.
+- `premium_clone_tts` is an env-gated scaffold slot for a higher-fidelity cloning backend whose runtime contract is still intentionally open.
+
+Each provider reports metadata the frontend can render without hard-coded assumptions:
+
+- `provider_id`
+- `display_name`
+- `enabled`
+- `capabilities`
+- `supported_output_formats`
+- `supported_target_sample_rates`
+- `option_fields`
+
+### Capability Flags
+
+- `basic_tts`
+- `voice_clone`
+- `style_prompt`
+- `continuation_edit`
+- `transcript_guided_continuation`
+- `voice_conversion`
+- `supports_reference_audio`
+- `supports_multi_speaker`
+- `supports_48khz_output`
+
+### Unified TTS Request Shape
+
+`POST /api/v1/tts/jobs` accepts JSON or multipart form-data. The normalized fields are:
+
+- `provider`
+- `text`
+- `speaker_name`
+- `reference_audio_path` or multipart `reference_audio`
+- `reference_text`
+- `continuation_audio_path` or multipart `continuation_audio`
+- `transcript`
+- `style_prompt`
+- `target_sample_rate`
+- `output_format`
+- `options`
+
+The gateway validates those fields against the selected provider's capability map before proxying the request to a provider service.
+
+### Example Payloads
+
+F5-TTS with a saved voice asset:
+
+```json
+{
+  "provider": "f5tts",
+  "text": "Welcome back to NeonForge.",
+  "reference_audio_path": "narration/alice.wav",
+  "reference_text": "Welcome back to NeonForge.",
+  "options": {
+    "speed": 1.0
+  }
+}
+```
+
+Fish Speech with a preloaded reference ID:
+
+```json
+{
+  "provider": "fish_speech",
+  "text": "This provider is selected through the registry.",
+  "speaker_name": "alice",
+  "output_format": "mp3"
+}
+```
+
+### Enabling Optional Providers
+
+- Set `FISH_SPEECH_ENABLED=true` to expose the Fish Speech provider in the gateway registry.
+- Set `FISH_SPEECH_RUNTIME_URL` to a Fish Speech-compatible server that exposes the official `/v1/tts` API.
+- Set `PREMIUM_CLONE_TTS_ENABLED=true` to expose the premium clone slot.
+- Set `PREMIUM_CLONE_TTS_UPSTREAM_URL` once you have a backend ready to receive the scaffolded adapter contract.
+
+### Known Limitations
+
+- `fish_speech` is wired to the official Fish Speech server API, but NeonForge does not build or ship that heavyweight runtime in this repository.
+- `premium_clone_tts` is intentionally scaffolded. The adapter currently supports JSON responses with `output_path` or raw audio bytes, but runtime-specific request shaping is left as an explicit TODO.
+- The frontend renders provider capabilities and option fields dynamically, but only the current reference-audio and continuation-upload asset flows are exposed in the UI.
 
 ## ComfyUI Templates
 
@@ -218,12 +326,20 @@ dgx-ai-stack/
       app.py                  # F5-TTS, warm with true model destroy
       Dockerfile
       requirements.txt
+    fish_speech/
+      app.py                  # Fish Speech adapter service
+      Dockerfile
+      requirements.txt
     liveportrait/
       app.py                  # LivePortrait, warm with true model destroy
       Dockerfile
       requirements.txt
     lipsync/
       app.py                  # video-retalking/SadTalker, warm
+      Dockerfile
+      requirements.txt
+    premium_clone_tts/
+      app.py                  # Scaffolded premium clone adapter
       Dockerfile
       requirements.txt
     wan21/
@@ -260,6 +376,10 @@ All configuration is via `.env`. Key settings:
 | `WAN21_MODEL_VARIANT` | `1.3B` | Wan model size (1.3B safe, 14B risky) |
 | `WAN21_IDLE_TIMEOUT` | `300` | Seconds before idle Wan container stops |
 | `F5TTS_IDLE_TIMEOUT` | `1800` | Seconds before F5-TTS model is destroyed |
+| `FISH_SPEECH_ENABLED` | `false` | Expose Fish Speech in `/api/v1/tts/providers` |
+| `FISH_SPEECH_RUNTIME_URL` | empty | Fish Speech-compatible runtime base URL |
+| `PREMIUM_CLONE_TTS_ENABLED` | `false` | Expose the premium clone scaffold in the registry |
+| `PREMIUM_CLONE_TTS_UPSTREAM_URL` | empty | Backend URL for the premium clone scaffold |
 | `LIPSYNC_BACKEND` | `video-retalking` | Lip-sync backend (or `sadtalker`) |
 
 ## Hardware Target

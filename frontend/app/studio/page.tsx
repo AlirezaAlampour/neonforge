@@ -32,12 +32,13 @@ import {
   fetchComfyUITemplates,
   fetchLoraAssets,
   fetchPresets,
+  fetchTTSProviders,
   fetchVoiceAssets,
   savePreset,
   submitComfyUIJob,
   submitLivePortrait,
   submitReactor,
-  submitTTS,
+  submitTTSJob,
   uploadComfyUIAsset,
 } from '@/lib/api'
 import { useStudioStore } from '@/lib/stores/studio-store'
@@ -49,14 +50,26 @@ import type {
   ComfyUITemplate,
   PresetProfile,
   StudioTool,
+  TTSProvider,
 } from '@/lib/types'
 
 const tabs: Array<{ id: StudioTool; label: string; icon: typeof Mic }> = [
   { id: 'character-swap', label: 'Character Swap', icon: Boxes },
-  { id: 'f5tts', label: 'F5-TTS', icon: Mic },
+  { id: 'f5tts', label: 'TTS', icon: Mic },
   { id: 'liveportrait', label: 'LivePortrait', icon: Video },
   { id: 'reactor', label: 'ReActor', icon: Clapperboard },
 ]
+
+function normalizeOptionValue(provider: TTSProvider | null, optionId: string, value: unknown): unknown {
+  const field = provider?.option_fields.find((item) => item.id === optionId)
+  if (!field) return value
+  if (field.type === 'number' || field.type === 'integer') {
+    const numeric = Number(value)
+    return Number.isFinite(numeric) ? numeric : field.default
+  }
+  if (field.type === 'boolean') return Boolean(value)
+  return value
+}
 
 export default function StudioPage() {
   const { jobs, trackJob, dismissJob } = useJobPoller()
@@ -68,10 +81,12 @@ export default function StudioPage() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [f5RefAudioFile, setF5RefAudioFile] = useState<File | null>(null)
+  const [ttsContinuationFile, setTTSContinuationFile] = useState<File | null>(null)
   const [liveSourceFile, setLiveSourceFile] = useState<File | null>(null)
   const [liveDrivingFile, setLiveDrivingFile] = useState<File | null>(null)
   const [referenceUploadFile, setReferenceUploadFile] = useState<File | null>(null)
   const [drivingUploadFile, setDrivingUploadFile] = useState<File | null>(null)
+  const [ttsProviders, setTTSProviders] = useState<TTSProvider[]>([])
   const [comfyTemplates, setComfyTemplates] = useState<ComfyUITemplate[]>([])
   const [comfyAssets, setComfyAssets] = useState<ComfyUIAsset[]>([])
   const [comfyModels, setComfyModels] = useState<ComfyUIModelsResponse | null>(null)
@@ -100,6 +115,15 @@ export default function StudioPage() {
       setLoraAssets(loras.items)
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Failed to load saved assets')
+    }
+  }, [])
+
+  const refreshTTSProviders = useCallback(async () => {
+    try {
+      const response = await fetchTTSProviders()
+      setTTSProviders(response.items)
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Failed to load TTS providers')
     }
   }, [])
 
@@ -171,8 +195,19 @@ export default function StudioPage() {
 
   useEffect(() => {
     refreshAssets()
+    refreshTTSProviders()
     refreshComfyData()
-  }, [refreshAssets, refreshComfyData])
+  }, [refreshAssets, refreshComfyData, refreshTTSProviders])
+
+  const enabledTTSProviders = useMemo(
+    () => ttsProviders.filter((provider) => provider.enabled),
+    [ttsProviders],
+  )
+
+  const selectedTTSProvider = useMemo(
+    () => enabledTTSProviders.find((provider) => provider.provider_id === f5tts.provider) ?? enabledTTSProviders[0] ?? null,
+    [enabledTTSProviders, f5tts.provider],
+  )
 
   useEffect(() => {
     setSelectedPresetId('')
@@ -184,6 +219,46 @@ export default function StudioPage() {
       updateCharacterSwap({ templateId: comfyTemplates[0].id })
     }
   }, [characterSwap.templateId, comfyTemplates, updateCharacterSwap])
+
+  useEffect(() => {
+    if (!f5tts.provider && enabledTTSProviders.length > 0) {
+      updateF5TTS({ provider: enabledTTSProviders[0].provider_id })
+    }
+  }, [enabledTTSProviders, f5tts.provider, updateF5TTS])
+
+  useEffect(() => {
+    if (!selectedTTSProvider) return
+
+    updateF5TTS({
+      provider: selectedTTSProvider.provider_id,
+      outputFormat:
+        f5tts.outputFormat && selectedTTSProvider.supported_output_formats.includes(f5tts.outputFormat)
+          ? f5tts.outputFormat
+          : selectedTTSProvider.default_output_format || selectedTTSProvider.supported_output_formats[0] || '',
+      targetSampleRate:
+        f5tts.targetSampleRate &&
+        selectedTTSProvider.supported_target_sample_rates.includes(Number(f5tts.targetSampleRate))
+          ? f5tts.targetSampleRate
+          : selectedTTSProvider.default_target_sample_rate
+            ? String(selectedTTSProvider.default_target_sample_rate)
+            : '',
+      options: selectedTTSProvider.option_fields.reduce<Record<string, unknown>>((acc, field) => {
+        acc[field.id] = f5tts.options[field.id] ?? field.default ?? ''
+        return acc
+      }, {}),
+      voiceMode: selectedTTSProvider.capabilities.supports_reference_audio ? f5tts.voiceMode : 'none',
+      referenceText: selectedTTSProvider.capabilities.supports_reference_audio ? f5tts.referenceText : '',
+      transcript: selectedTTSProvider.capabilities.transcript_guided_continuation ? f5tts.transcript : '',
+      stylePrompt: selectedTTSProvider.capabilities.style_prompt ? f5tts.stylePrompt : '',
+    })
+
+    if (!selectedTTSProvider.capabilities.supports_reference_audio) {
+      setF5RefAudioFile(null)
+    }
+    if (!selectedTTSProvider.capabilities.continuation_edit) {
+      setTTSContinuationFile(null)
+    }
+  }, [selectedTTSProvider?.provider_id])
 
   const selectedPreset = useMemo(
     () => presets.find((preset) => preset.id === selectedPresetId) ?? null,
@@ -282,34 +357,55 @@ export default function StudioPage() {
   }, [refreshPresets, selectedPreset])
 
   const handleF5Submit = useCallback(async () => {
-    if (!f5tts.text.trim()) return
+    if (!selectedTTSProvider || !f5tts.text.trim()) return
 
     setSubmitting(true)
     setError(null)
     try {
       const formData = new FormData()
-      formData.append('text', f5tts.text)
-      formData.append('speed', String(f5tts.speed))
-      if (f5tts.refText.trim()) formData.append('ref_text', f5tts.refText.trim())
+      formData.append('provider', selectedTTSProvider.provider_id)
+      formData.append('text', f5tts.text.trim())
+      if (f5tts.speakerName.trim()) formData.append('speaker_name', f5tts.speakerName.trim())
+      if (f5tts.referenceText.trim()) formData.append('reference_text', f5tts.referenceText.trim())
+      if (f5tts.transcript.trim()) formData.append('transcript', f5tts.transcript.trim())
+      if (f5tts.stylePrompt.trim()) formData.append('style_prompt', f5tts.stylePrompt.trim())
+      if (f5tts.outputFormat) formData.append('output_format', f5tts.outputFormat)
+      if (f5tts.targetSampleRate) formData.append('target_sample_rate', f5tts.targetSampleRate)
 
-      if (f5tts.voiceMode === 'saved' && f5tts.savedVoicePath) {
-        formData.append('saved_voice_path', f5tts.savedVoicePath)
-      } else if (f5tts.voiceMode === 'upload') {
-        if (!f5RefAudioFile) {
-          setError('Upload mode is selected but no reference audio file is attached.')
-          return
-        }
-        formData.append('ref_audio', f5RefAudioFile)
+      const normalizedOptions: Record<string, unknown> = {}
+      for (const field of selectedTTSProvider.option_fields) {
+        const value = f5tts.options[field.id]
+        if (value === '' || value === null || value === undefined) continue
+        normalizedOptions[field.id] = normalizeOptionValue(selectedTTSProvider, field.id, value)
+      }
+      if (Object.keys(normalizedOptions).length > 0) {
+        formData.append('options', JSON.stringify(normalizedOptions))
       }
 
-      const result = await submitTTS(formData)
-      trackJob(result.job_id, 'f5tts')
+      if (selectedTTSProvider.capabilities.supports_reference_audio) {
+        if (f5tts.voiceMode === 'saved' && f5tts.savedVoicePath) {
+          formData.append('reference_audio_path', f5tts.savedVoicePath)
+        } else if (f5tts.voiceMode === 'upload') {
+          if (!f5RefAudioFile) {
+            setError('Upload mode is selected but no reference audio file is attached.')
+            return
+          }
+          formData.append('reference_audio', f5RefAudioFile)
+        }
+      }
+
+      if (selectedTTSProvider.capabilities.continuation_edit && ttsContinuationFile) {
+        formData.append('continuation_audio', ttsContinuationFile)
+      }
+
+      const result = await submitTTSJob(formData)
+      trackJob(result.job_id, result.provider ?? selectedTTSProvider.provider_id)
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'TTS request failed')
     } finally {
       setSubmitting(false)
     }
-  }, [f5RefAudioFile, f5tts, trackJob])
+  }, [f5RefAudioFile, f5tts, selectedTTSProvider, ttsContinuationFile, trackJob])
 
   const handleLivePortraitSubmit = useCallback(async () => {
     if (!liveSourceFile || !liveDrivingFile) return
@@ -928,6 +1024,31 @@ export default function StudioPage() {
             <>
               <Card>
                 <CardHeader>
+                  <CardTitle className="text-base">Provider</CardTitle>
+                  <CardDescription>Select a TTS provider and NeonForge will adapt the form to its capabilities.</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <select
+                    value={selectedTTSProvider?.provider_id ?? ''}
+                    onChange={(e) => updateF5TTS({ provider: e.target.value })}
+                    className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                  >
+                    {enabledTTSProviders.map((provider) => (
+                      <option key={provider.provider_id} value={provider.provider_id}>
+                        {provider.display_name}
+                      </option>
+                    ))}
+                  </select>
+                  {selectedTTSProvider && (
+                    <p className="text-xs text-muted-foreground">
+                      {selectedTTSProvider.description || `${selectedTTSProvider.display_name} is ready for NeonForge jobs.`}
+                    </p>
+                  )}
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
                   <CardTitle className="text-base">Text to Speech</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-4">
@@ -937,84 +1058,222 @@ export default function StudioPage() {
                     placeholder="Enter the text to synthesize..."
                     rows={4}
                   />
-                  <Input
-                    value={f5tts.refText}
-                    onChange={(e) => updateF5TTS({ refText: e.target.value })}
-                    placeholder="Optional reference transcript..."
-                  />
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <Label>Speed</Label>
-                      <span className="text-xs text-muted-foreground">{f5tts.speed.toFixed(2)}x</span>
-                    </div>
-                    <Slider value={f5tts.speed} min={0.5} max={2.0} step={0.05} onChange={(v) => updateF5TTS({ speed: v })} />
-                  </div>
                 </CardContent>
               </Card>
 
+              {selectedTTSProvider?.capabilities.supports_reference_audio && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-base">Voice Clone Source</CardTitle>
+                    <CardDescription>Select a saved voice asset or upload an ad-hoc sample.</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        variant={f5tts.voiceMode === 'none' ? 'default' : 'outline'}
+                        onClick={() => updateF5TTS({ voiceMode: 'none' })}
+                      >
+                        None
+                      </Button>
+                      <Button
+                        type="button"
+                        variant={f5tts.voiceMode === 'saved' ? 'default' : 'outline'}
+                        onClick={() => updateF5TTS({ voiceMode: 'saved' })}
+                      >
+                        Saved Voice
+                      </Button>
+                      <Button
+                        type="button"
+                        variant={f5tts.voiceMode === 'upload' ? 'default' : 'outline'}
+                        onClick={() => updateF5TTS({ voiceMode: 'upload' })}
+                      >
+                        Upload
+                      </Button>
+                    </div>
+
+                    {f5tts.voiceMode === 'saved' && (
+                      <select
+                        value={f5tts.savedVoicePath}
+                        onChange={(e) => updateF5TTS({ savedVoicePath: e.target.value })}
+                        className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                      >
+                        <option value="">Select saved voice</option>
+                        {voiceAssets.map((asset) => (
+                          <option key={asset.path} value={asset.path}>
+                            {asset.name}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+
+                    {f5tts.voiceMode === 'upload' && (
+                      <FileDropzone
+                        accept="audio/*"
+                        label="Drop reference audio here"
+                        hint="WAV, MP3, WebM up to 50 MB"
+                        file={f5RefAudioFile}
+                        onFileChange={(file) => {
+                          setF5RefAudioFile(file)
+                          updateF5TTS({ uploadedRefAudioName: file?.name ?? null })
+                        }}
+                        maxSizeMB={50}
+                        icon="audio"
+                      />
+                    )}
+
+                    <Input
+                      value={f5tts.referenceText}
+                      onChange={(e) => updateF5TTS({ referenceText: e.target.value })}
+                      placeholder="Optional reference transcript..."
+                    />
+                  </CardContent>
+                </Card>
+              )}
+
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-base">Voice Clone Source</CardTitle>
-                  <CardDescription>Select a saved voice asset or upload an ad-hoc sample.</CardDescription>
+                  <CardTitle className="text-base">Provider Controls</CardTitle>
                 </CardHeader>
-                <CardContent className="space-y-3">
-                  <div className="flex flex-wrap gap-2">
-                    <Button
-                      type="button"
-                      variant={f5tts.voiceMode === 'none' ? 'default' : 'outline'}
-                      onClick={() => updateF5TTS({ voiceMode: 'none' })}
-                    >
-                      None
-                    </Button>
-                    <Button
-                      type="button"
-                      variant={f5tts.voiceMode === 'saved' ? 'default' : 'outline'}
-                      onClick={() => updateF5TTS({ voiceMode: 'saved' })}
-                    >
-                      Saved Voice
-                    </Button>
-                    <Button
-                      type="button"
-                      variant={f5tts.voiceMode === 'upload' ? 'default' : 'outline'}
-                      onClick={() => updateF5TTS({ voiceMode: 'upload' })}
-                    >
-                      Upload
-                    </Button>
+                <CardContent className="space-y-4">
+                  <div className="space-y-2">
+                    <Label>Speaker / Reference Name</Label>
+                    <Input
+                      value={f5tts.speakerName}
+                      onChange={(e) => updateF5TTS({ speakerName: e.target.value })}
+                      placeholder="Optional provider-specific speaker or reference identifier"
+                    />
                   </div>
 
-                  {f5tts.voiceMode === 'saved' && (
-                    <select
-                      value={f5tts.savedVoicePath}
-                      onChange={(e) => updateF5TTS({ savedVoicePath: e.target.value })}
-                      className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
-                    >
-                      <option value="">Select saved voice</option>
-                      {voiceAssets.map((asset) => (
-                        <option key={asset.path} value={asset.path}>
-                          {asset.name}
-                        </option>
-                      ))}
-                    </select>
+                  {selectedTTSProvider?.capabilities.style_prompt && (
+                    <div className="space-y-2">
+                      <Label>Style Prompt</Label>
+                      <Textarea
+                        value={f5tts.stylePrompt}
+                        onChange={(e) => updateF5TTS({ stylePrompt: e.target.value })}
+                        rows={3}
+                        placeholder="Describe the intended delivery, pacing, or tone..."
+                      />
+                    </div>
                   )}
 
-                  {f5tts.voiceMode === 'upload' && (
+                  {selectedTTSProvider?.capabilities.continuation_edit && (
                     <FileDropzone
                       accept="audio/*"
-                      label="Drop reference audio here"
-                      hint="WAV, MP3, WebM up to 50 MB"
-                      file={f5RefAudioFile}
+                      label="Drop continuation seed audio here"
+                      hint={f5tts.continuationAudioName || 'Optional seed clip for continuation/edit capable providers'}
+                      file={ttsContinuationFile}
                       onFileChange={(file) => {
-                        setF5RefAudioFile(file)
-                        updateF5TTS({ uploadedRefAudioName: file?.name ?? null })
+                        setTTSContinuationFile(file)
+                        updateF5TTS({ continuationAudioName: file?.name ?? null })
                       }}
                       maxSizeMB={50}
                       icon="audio"
                     />
                   )}
+
+                  {selectedTTSProvider?.capabilities.transcript_guided_continuation && (
+                    <div className="space-y-2">
+                      <Label>Transcript Guidance</Label>
+                      <Textarea
+                        value={f5tts.transcript}
+                        onChange={(e) => updateF5TTS({ transcript: e.target.value })}
+                        rows={3}
+                        placeholder="Optional transcript or continuation guidance..."
+                      />
+                    </div>
+                  )}
+
+                  {(selectedTTSProvider?.supported_output_formats.length ?? 0) > 1 && (
+                    <div className="space-y-2">
+                      <Label>Output Format</Label>
+                      <select
+                        value={f5tts.outputFormat}
+                        onChange={(e) => updateF5TTS({ outputFormat: e.target.value })}
+                        className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                      >
+                        {selectedTTSProvider?.supported_output_formats.map((format) => (
+                          <option key={format} value={format}>
+                            {format.toUpperCase()}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
+                  {(selectedTTSProvider?.supported_target_sample_rates.length ?? 0) > 1 && (
+                    <div className="space-y-2">
+                      <Label>Target Sample Rate</Label>
+                      <select
+                        value={f5tts.targetSampleRate}
+                        onChange={(e) => updateF5TTS({ targetSampleRate: e.target.value })}
+                        className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                      >
+                        {selectedTTSProvider?.supported_target_sample_rates.map((sampleRate) => (
+                          <option key={sampleRate} value={sampleRate}>
+                            {sampleRate.toLocaleString()} Hz
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
+                  {selectedTTSProvider?.option_fields.map((field) => {
+                    const value = f5tts.options[field.id]
+                    const numericValue = typeof value === 'number' ? value : Number(value ?? field.default ?? 0)
+                    if ((field.type === 'number' || field.type === 'integer') && field.min != null && field.max != null) {
+                      return (
+                        <div key={field.id} className="space-y-2">
+                          <div className="flex items-center justify-between">
+                            <Label>{field.label}</Label>
+                            <span className="text-xs text-muted-foreground">{numericValue.toFixed(2)}</span>
+                          </div>
+                          <Slider
+                            value={numericValue}
+                            min={field.min}
+                            max={field.max}
+                            step={field.step ?? 0.1}
+                            onChange={(next) =>
+                              updateF5TTS({
+                                options: {
+                                  ...f5tts.options,
+                                  [field.id]: next,
+                                },
+                              })
+                            }
+                          />
+                          {field.description && <p className="text-xs text-muted-foreground">{field.description}</p>}
+                        </div>
+                      )
+                    }
+                    return (
+                      <div key={field.id} className="space-y-2">
+                        <Label>{field.label}</Label>
+                        <Input
+                          type={field.type === 'number' || field.type === 'integer' ? 'number' : 'text'}
+                          value={String(value ?? field.default ?? '')}
+                          onChange={(e) =>
+                            updateF5TTS({
+                              options: {
+                                ...f5tts.options,
+                                [field.id]: e.target.value,
+                              },
+                            })
+                          }
+                        />
+                        {field.description && <p className="text-xs text-muted-foreground">{field.description}</p>}
+                      </div>
+                    )
+                  })}
                 </CardContent>
               </Card>
 
-              <Button type="button" className="gap-2" onClick={handleF5Submit} disabled={submitting || !f5tts.text.trim()}>
+              <Button
+                type="button"
+                className="gap-2"
+                onClick={handleF5Submit}
+                disabled={submitting || !f5tts.text.trim() || !selectedTTSProvider}
+              >
                 <Send className="h-4 w-4" />
                 {submitting ? 'Submitting...' : 'Generate Voice'}
               </Button>
@@ -1136,7 +1395,7 @@ export default function StudioPage() {
 
         <div className="space-y-4">
           <JobTracker jobs={jobs} onDismiss={dismissJob} />
-          <HistoryPane services={['f5tts', 'liveportrait', 'reactor', 'comfyui']} />
+          <HistoryPane services={['f5tts', 'fish_speech', 'premium_clone_tts', 'liveportrait', 'reactor', 'comfyui']} />
         </div>
       </div>
     </div>

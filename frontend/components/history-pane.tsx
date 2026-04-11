@@ -18,7 +18,14 @@ function mediaKind(path: string): 'audio' | 'video' | 'other' {
   if (lower.endsWith('.mp4') || lower.endsWith('.mov') || lower.endsWith('.mkv') || lower.endsWith('.webm')) {
     return 'video'
   }
-  if (lower.endsWith('.wav') || lower.endsWith('.mp3') || lower.endsWith('.ogg') || lower.endsWith('.m4a')) {
+  if (
+    lower.endsWith('.wav') ||
+    lower.endsWith('.mp3') ||
+    lower.endsWith('.ogg') ||
+    lower.endsWith('.opus') ||
+    lower.endsWith('.flac') ||
+    lower.endsWith('.m4a')
+  ) {
     return 'audio'
   }
   return 'other'

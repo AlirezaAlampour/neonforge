@@ -17,6 +17,8 @@
 | Supervisor | `supervisor/` | `supervisor/Dockerfile` | Internal-only `supervisor:8000`; gateway calls `/start/{service}`, `/stop/{service}`, `/status/{service}` | FastAPI, `httpx`, Docker socket, read-only mount of repo compose project |
 | Whisper | `services/whisper/` | `services/whisper/Dockerfile` | Internal `whisper:8000`; gateway proxies `/api/v1/whisper/transcribe` to `/transcribe` | Faster-Whisper, FastAPI, shared model/cache/output mounts |
 | F5-TTS | `services/f5tts/` | `services/f5tts/Dockerfile` | Internal `f5tts:8000`; gateway proxies `/api/v1/tts/synthesize` and `/api/v1/tts/synthesize-with-audio`; supervisor can start/stop it | FastAPI, `librosa`, `soundfile`, shared model/cache/output mounts |
+| Fish Speech Adapter | `services/fish_speech/` | `services/fish_speech/Dockerfile` | Internal `fish_speech:8000`; gateway routes unified `/api/v1/tts/jobs` provider calls here when enabled | FastAPI, `httpx`, shared output mount, Fish Speech-compatible upstream runtime |
+| Premium Clone TTS Adapter | `services/premium_clone_tts/` | `services/premium_clone_tts/Dockerfile` | Internal `premium_clone_tts:8000`; gateway routes unified `/api/v1/tts/jobs` provider calls here when enabled | FastAPI, `httpx`, shared output mount, scaffolded upstream contract |
 | LivePortrait | `services/liveportrait/` | `services/liveportrait/Dockerfile` | Internal `liveportrait:8000`; gateway proxies `/api/v1/liveportrait/animate` to `/animate`; supervisor can start/stop it | FastAPI, PyTorch, ONNX Runtime, InsightFace, MediaPipe, shared mounts |
 | Lip-sync | `services/lipsync/` | `services/lipsync/Dockerfile` | Internal `lipsync:8000`; gateway proxies `/api/v1/lipsync/sync` to `/sync`; supervisor can start/stop it | FastAPI, PyTorch, OpenCV, video-retalking stack, GFPGAN/Real-ESRGAN, shared mounts |
 | Wan 2.1 | `services/wan21/` | `services/wan21/Dockerfile` | Internal `wan21:8000`; gateway proxies `/api/v1/wan21/generate` to `/generate`; lazy-start profile started by supervisor and stopped after idle | FastAPI, PyTorch, Diffusers, Transformers, Accelerate, shared mounts, heavy UMA memory budget |
@@ -27,7 +29,8 @@
 
 - Browser clients usually enter through `frontend:3000`, which rewrites API traffic to `gateway:8000`.
 - External API clients can call the gateway directly on host port `8080`.
-- The gateway talks to Redis for readiness and activity state, then proxies work to `whisper`, `f5tts`, `liveportrait`, `lipsync`, and `wan21` over `ai-net`.
+- The gateway talks to Redis for readiness and activity state, then proxies work to `whisper`, `f5tts`, `fish_speech`, `premium_clone_tts`, `liveportrait`, `lipsync`, and `wan21` over `ai-net`.
+- TTS-specific routing now goes through a provider registry in `gateway/app.py`, which exposes provider metadata, capability flags, unified TTS job submission, and provider health endpoints.
 - The gateway does not mount the Docker socket. It delegates lifecycle operations to the internal supervisor service over HTTP.
 - The supervisor holds the Docker socket and runs `docker compose` to start or stop managed services (`wan21`, `f5tts`, `liveportrait`, `lipsync`).
 - The host idle manager polls Redis activity timestamps and stops idle managed containers from outside Docker via the local Docker CLI.

@@ -49,8 +49,8 @@ export function JobTracker({ jobs, onDismiss }: JobTrackerProps) {
       {jobs.map((job) => {
         const config = statusConfig[job.status]
         const Icon = config.icon
-        const isMedia = job.result_path?.match(/\.(mp4|wav|webm|mp3)$/)
-        const isAudio = job.result_path?.match(/\.(wav|mp3|webm)$/)
+        const isMedia = job.result_path?.match(/\.(mp4|wav|webm|mp3|opus|flac|m4a)$/)
+        const isAudio = job.result_path?.match(/\.(wav|mp3|webm|opus|flac|m4a)$/)
         const resultUrl = job.result_path
           ? outputUrl(job.result_path, job.completed_at ?? job.started_at ?? job.job_id)
           : null

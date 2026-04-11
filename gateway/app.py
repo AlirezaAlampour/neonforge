@@ -13,6 +13,8 @@ Design:
 """
 
 import asyncio
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
 import difflib
 import hashlib
 import json
@@ -35,7 +37,7 @@ import redis.asyncio as aioredis
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import DateTime, String, Text, UniqueConstraint, create_engine, desc, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
@@ -54,6 +56,36 @@ def _parse_path_list_env(value: Optional[str], defaults: list[str]) -> list[Path
         seen.add(normalized)
         roots.append(Path(normalized))
     return roots
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_str_list_env(value: Optional[str], defaults: list[str]) -> list[str]:
+    parts = re.split(r"[\n,;]+", value) if value and value.strip() else defaults
+    items: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        normalized = part.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        items.append(normalized)
+    return items
+
+
+def _parse_int_list_env(value: Optional[str], defaults: list[int]) -> list[int]:
+    items: list[int] = []
+    for raw in _parse_str_list_env(value, [str(item) for item in defaults]):
+        try:
+            items.append(int(raw))
+        except ValueError:
+            continue
+    return items
 
 
 # ---------------------------------------------------------------------------
@@ -111,9 +143,17 @@ SERVICE_URLS = {
     "wan21": os.getenv("WAN21_URL", "http://wan21:8000"),
 }
 
+if _env_bool("FISH_SPEECH_ENABLED", False):
+    SERVICE_URLS["fish_speech"] = os.getenv("FISH_SPEECH_URL", "http://fish_speech:8000")
+
+if _env_bool("PREMIUM_CLONE_TTS_ENABLED", False):
+    SERVICE_URLS["premium_clone_tts"] = os.getenv("PREMIUM_CLONE_TTS_URL", "http://premium_clone_tts:8000")
+
 MODEL_NAME_BY_SERVICE = {
     "whisper": "Faster-Whisper",
     "f5tts": "F5-TTS",
+    "fish_speech": os.getenv("FISH_SPEECH_DISPLAY_NAME", "Fish Speech"),
+    "premium_clone_tts": os.getenv("PREMIUM_CLONE_TTS_DISPLAY_NAME", "Premium Clone TTS"),
     "liveportrait": "LivePortrait",
     "lipsync": os.getenv("LIPSYNC_BACKEND", "video-retalking"),
     "wan21": f"Wan 2.1 {os.getenv('WAN21_MODEL_VARIANT', '1.3B')}",
@@ -122,7 +162,7 @@ MODEL_NAME_BY_SERVICE = {
 }
 
 GPU_HEAVY_SERVICES = {"wan21"}
-GPU_MEDIUM_SERVICES = {"liveportrait", "lipsync", "f5tts", "reactor"}
+GPU_MEDIUM_SERVICES = {"liveportrait", "lipsync", "f5tts", "fish_speech", "premium_clone_tts", "reactor"}
 GPU_LIGHT_SERVICES = {"whisper"}
 
 VOICE_EXTENSIONS = {
@@ -607,7 +647,7 @@ def _serialize_comfyui_debug_dump_path(job_id: str, params: dict[str, Any]) -> O
 
 
 def _extract_prompt(service: str, payload: dict[str, Any]) -> Optional[str]:
-    if service in {"f5tts"}:
+    if service in TTS_PROVIDER_IDS:
         return payload.get("text")
     if service in {"wan21", "reactor"}:
         return payload.get("prompt")
@@ -706,6 +746,109 @@ def list_asset_files(asset_dir: Path, extensions: set[str]) -> list[dict[str, An
     return items
 
 
+def _form_text(form: Any, key: str, default: str = "") -> str:
+    value = form.get(key, default)
+    if hasattr(value, "filename"):
+        return default
+    if value is None:
+        return default
+    return str(value)
+
+
+async def _read_upload_file(upload: UploadFile | None) -> tuple[str, bytes, str] | None:
+    if upload is None or not upload.filename:
+        return None
+
+    try:
+        content = await upload.read()
+    finally:
+        await upload.close()
+
+    if not content:
+        return None
+
+    content_type = upload.content_type or mimetypes.guess_type(upload.filename)[0] or "application/octet-stream"
+    return (upload.filename, content, content_type)
+
+
+def _read_asset_audio(path_value: str | None) -> tuple[str, bytes, str] | None:
+    if not path_value:
+        return None
+    asset_path = resolve_asset_path(path_value, VOICE_ASSETS_DIR)
+    return (
+        asset_path.name,
+        asset_path.read_bytes(),
+        mimetypes.guess_type(asset_path.name)[0] or "application/octet-stream",
+    )
+
+
+async def parse_tts_job_submission(
+    request: Request,
+    *,
+    default_provider: str = "f5tts",
+) -> tuple[TTSJobCreateRequest, TTSUploadBundle]:
+    content_type = request.headers.get("content-type", "")
+
+    try:
+        if "multipart/form-data" in content_type or "application/x-www-form-urlencoded" in content_type:
+            form = await request.form()
+            payload = TTSJobCreateRequest.model_validate(
+                {
+                    "provider": _form_text(form, "provider", default_provider) or default_provider,
+                    "text": _form_text(form, "text"),
+                    "speaker_name": _form_text(form, "speaker_name") or None,
+                    "reference_audio_path": _form_text(form, "reference_audio_path")
+                    or _form_text(form, "saved_voice_path")
+                    or None,
+                    "reference_text": _form_text(form, "reference_text") or _form_text(form, "ref_text") or None,
+                    "continuation_audio_path": _form_text(form, "continuation_audio_path") or None,
+                    "transcript": _form_text(form, "transcript") or None,
+                    "style_prompt": _form_text(form, "style_prompt") or None,
+                    "target_sample_rate": _form_text(form, "target_sample_rate") or None,
+                    "output_format": _form_text(form, "output_format") or _form_text(form, "format") or None,
+                    "options": _form_text(form, "options") or None,
+                    "speed": _form_text(form, "speed") or None,
+                }
+            )
+
+            reference_upload = await _read_upload_file(
+                form.get("reference_audio") if form.get("reference_audio") else form.get("ref_audio")
+            )
+            continuation_upload = await _read_upload_file(
+                form.get("continuation_audio") if form.get("continuation_audio") else form.get("seed_audio")
+            )
+        else:
+            payload = TTSJobCreateRequest.model_validate(await request.json())
+            reference_upload = None
+            continuation_upload = None
+    except Exception as exc:
+        raise HTTPException(400, f"Invalid TTS request: {exc}") from exc
+
+    if reference_upload and payload.reference_audio_path:
+        raise HTTPException(400, "Choose either reference_audio upload or reference_audio_path, not both.")
+    if continuation_upload and payload.continuation_audio_path:
+        raise HTTPException(400, "Choose either continuation_audio upload or continuation_audio_path, not both.")
+
+    uploads = TTSUploadBundle(
+        reference_audio=reference_upload or _read_asset_audio(payload.reference_audio_path),
+        continuation_audio=continuation_upload or _read_asset_audio(payload.continuation_audio_path),
+    )
+    return payload, uploads
+
+
+async def create_tts_job_from_request(
+    request: Request,
+    *,
+    default_provider: str = "f5tts",
+) -> dict[str, Any]:
+    payload, uploads = await parse_tts_job_submission(request, default_provider=default_provider)
+    provider = TTS_PROVIDER_REGISTRY.get(payload.provider)
+    result = await provider.execute(payload, request, uploads)
+    if isinstance(result, dict):
+        result.setdefault("provider", provider.provider_id)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Job Queue
 # ---------------------------------------------------------------------------
@@ -729,6 +872,610 @@ class JobRecord(BaseModel):
     debug_artifacts: list[dict[str, Any]] = Field(default_factory=list)
     message: Optional[str] = None
     error: Optional[str] = None
+
+
+@dataclass
+class TTSUploadBundle:
+    reference_audio: tuple[str, bytes, str] | None = None
+    continuation_audio: tuple[str, bytes, str] | None = None
+
+
+class TTSProviderCapabilities(BaseModel):
+    basic_tts: bool = True
+    voice_clone: bool = False
+    style_prompt: bool = False
+    continuation_edit: bool = False
+    transcript_guided_continuation: bool = False
+    voice_conversion: bool = False
+    supports_reference_audio: bool = False
+    supports_multi_speaker: bool = False
+    supports_48khz_output: bool = False
+
+
+class TTSProviderOptionField(BaseModel):
+    id: str
+    label: str
+    type: str
+    description: str = ""
+    default: Any = None
+    min: Optional[float] = None
+    max: Optional[float] = None
+    step: Optional[float] = None
+
+
+class TTSJobCreateRequest(BaseModel):
+    provider: str = Field(default="f5tts", min_length=1, max_length=64)
+    text: str = Field(min_length=1)
+    speaker_name: str | None = None
+    reference_audio_path: str | None = None
+    reference_text: str | None = None
+    continuation_audio_path: str | None = None
+    transcript: str | None = None
+    style_prompt: str | None = None
+    target_sample_rate: int | None = Field(default=None, ge=8000, le=192000)
+    output_format: str | None = Field(default=None, min_length=2, max_length=16)
+    options: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_legacy_fields(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+
+        payload = dict(value)
+        payload.setdefault("provider", "f5tts")
+
+        if not payload.get("reference_audio_path") and payload.get("saved_voice_path"):
+            payload["reference_audio_path"] = payload.get("saved_voice_path")
+        if not payload.get("reference_audio_path") and payload.get("ref_audio_path"):
+            payload["reference_audio_path"] = payload.get("ref_audio_path")
+        if not payload.get("reference_text") and payload.get("ref_text"):
+            payload["reference_text"] = payload.get("ref_text")
+        if not payload.get("output_format") and payload.get("format"):
+            payload["output_format"] = payload.get("format")
+
+        raw_options = payload.get("options")
+        if isinstance(raw_options, str):
+            try:
+                payload["options"] = json.loads(raw_options)
+            except json.JSONDecodeError as exc:
+                raise ValueError("options must be valid JSON") from exc
+        elif raw_options is None:
+            payload["options"] = {}
+
+        if payload.get("speed") not in (None, ""):
+            payload.setdefault("options", {})
+            payload["options"]["speed"] = payload.get("speed")
+
+        return payload
+
+
+class TTSProviderDescriptor(BaseModel):
+    provider_id: str
+    display_name: str
+    service: str
+    enabled: bool
+    description: str = ""
+    gpu_tier: str = "medium"
+    default_output_format: str = "wav"
+    supported_output_formats: list[str] = Field(default_factory=lambda: ["wav"])
+    default_target_sample_rate: int | None = None
+    supported_target_sample_rates: list[int] = Field(default_factory=list)
+    capabilities: TTSProviderCapabilities
+    option_fields: list[TTSProviderOptionField] = Field(default_factory=list)
+
+
+class TTSProviderHealth(BaseModel):
+    provider_id: str
+    display_name: str
+    enabled: bool
+    service: str
+    alive: bool
+    ready: bool
+    status: str
+    detail: str | None = None
+    service_url: str | None = None
+    ready_payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class TTSProvider(ABC):
+    def __init__(
+        self,
+        *,
+        provider_id: str,
+        display_name: str,
+        service_name: str,
+        enabled: bool,
+        description: str,
+        capabilities: TTSProviderCapabilities,
+        gpu_tier: str = "medium",
+        supported_output_formats: list[str] | None = None,
+        default_output_format: str = "wav",
+        supported_target_sample_rates: list[int] | None = None,
+        default_target_sample_rate: int | None = None,
+        option_fields: list[TTSProviderOptionField] | None = None,
+    ):
+        self.provider_id = provider_id
+        self.display_name = display_name
+        self.service_name = service_name
+        self.enabled = enabled
+        self.description = description
+        self.capabilities = capabilities
+        self.gpu_tier = gpu_tier
+        self.supported_output_formats = supported_output_formats or [default_output_format]
+        self.default_output_format = default_output_format
+        self.supported_target_sample_rates = supported_target_sample_rates or []
+        self.default_target_sample_rate = default_target_sample_rate
+        self.option_fields = option_fields or []
+
+    def serialize(self) -> dict[str, Any]:
+        return TTSProviderDescriptor(
+            provider_id=self.provider_id,
+            display_name=self.display_name,
+            service=self.service_name,
+            enabled=self.enabled,
+            description=self.description,
+            gpu_tier=self.gpu_tier,
+            default_output_format=self.default_output_format,
+            supported_output_formats=self.supported_output_formats,
+            default_target_sample_rate=self.default_target_sample_rate,
+            supported_target_sample_rates=self.supported_target_sample_rates,
+            capabilities=self.capabilities,
+            option_fields=self.option_fields,
+        ).model_dump()
+
+    def list_capabilities(self) -> dict[str, Any]:
+        return self.capabilities.model_dump()
+
+    async def health_check(self) -> dict[str, Any]:
+        if not self.enabled:
+            return TTSProviderHealth(
+                provider_id=self.provider_id,
+                display_name=self.display_name,
+                enabled=False,
+                service=self.service_name,
+                alive=False,
+                ready=False,
+                status="disabled",
+                detail="Provider is disabled by configuration.",
+                service_url=SERVICE_URLS.get(self.service_name),
+            ).model_dump()
+
+        url = SERVICE_URLS.get(self.service_name)
+        if not url:
+            return TTSProviderHealth(
+                provider_id=self.provider_id,
+                display_name=self.display_name,
+                enabled=True,
+                service=self.service_name,
+                alive=False,
+                ready=False,
+                status="unconfigured",
+                detail="Service URL is not configured.",
+            ).model_dump()
+
+        if http_client is None:
+            return TTSProviderHealth(
+                provider_id=self.provider_id,
+                display_name=self.display_name,
+                enabled=True,
+                service=self.service_name,
+                alive=False,
+                ready=False,
+                status="starting",
+                detail="HTTP client is not initialized yet.",
+                service_url=url,
+            ).model_dump()
+
+        alive = False
+        ready = False
+        ready_payload: dict[str, Any] = {}
+        detail: str | None = None
+        status = "offline"
+
+        try:
+            response = await http_client.get(f"{url.rstrip('/')}/healthz", timeout=3.0)
+            alive = response.status_code == 200
+        except Exception as exc:
+            detail = str(exc)
+
+        if alive:
+            try:
+                ready_response = await http_client.get(f"{url.rstrip('/')}/readyz", timeout=3.0)
+                ready = ready_response.status_code == 200
+                ready_payload = ready_response.json() if ready_response.content else {}
+            except Exception as exc:
+                detail = str(exc)
+
+        if ready:
+            status = "ready"
+        elif alive:
+            status = "alive"
+
+        return TTSProviderHealth(
+            provider_id=self.provider_id,
+            display_name=self.display_name,
+            enabled=True,
+            service=self.service_name,
+            alive=alive,
+            ready=ready,
+            status=status,
+            detail=detail,
+            service_url=url,
+            ready_payload=ready_payload,
+        ).model_dump()
+
+    def validate_request(self, payload: TTSJobCreateRequest, uploads: TTSUploadBundle) -> None:
+        if not self.enabled:
+            raise HTTPException(404, f"TTS provider '{self.provider_id}' is disabled.")
+        if not payload.text.strip():
+            raise HTTPException(400, "text is required")
+
+        if payload.style_prompt and not self.capabilities.style_prompt:
+            raise HTTPException(400, f"Provider '{self.provider_id}' does not support style_prompt.")
+
+        if payload.reference_text and not self.capabilities.supports_reference_audio:
+            raise HTTPException(400, f"Provider '{self.provider_id}' does not accept reference audio metadata.")
+
+        if (uploads.reference_audio or payload.reference_audio_path) and not self.capabilities.supports_reference_audio:
+            raise HTTPException(400, f"Provider '{self.provider_id}' does not support reference audio.")
+
+        if (uploads.continuation_audio or payload.continuation_audio_path) and not self.capabilities.continuation_edit:
+            raise HTTPException(400, f"Provider '{self.provider_id}' does not support continuation/edit audio.")
+
+        if payload.transcript and not self.capabilities.transcript_guided_continuation:
+            raise HTTPException(400, f"Provider '{self.provider_id}' does not support transcript-guided continuation.")
+
+        if payload.target_sample_rate == 48000 and not self.capabilities.supports_48khz_output:
+            raise HTTPException(400, f"Provider '{self.provider_id}' does not advertise 48 kHz output support.")
+
+        if payload.output_format:
+            normalized_format = payload.output_format.lower()
+            if normalized_format not in {fmt.lower() for fmt in self.supported_output_formats}:
+                raise HTTPException(
+                    400,
+                    f"Unsupported output_format '{payload.output_format}' for provider '{self.provider_id}'.",
+                )
+
+        if payload.target_sample_rate and self.supported_target_sample_rates:
+            if payload.target_sample_rate not in self.supported_target_sample_rates:
+                raise HTTPException(
+                    400,
+                    f"Unsupported target_sample_rate '{payload.target_sample_rate}' for provider '{self.provider_id}'.",
+                )
+
+    def operation_for(self, payload: TTSJobCreateRequest, uploads: TTSUploadBundle) -> str:
+        if payload.transcript or uploads.continuation_audio or payload.continuation_audio_path:
+            return "edit_or_continue"
+        if uploads.reference_audio or payload.reference_audio_path:
+            return "clone_voice"
+        return "synthesize"
+
+    async def execute(
+        self,
+        payload: TTSJobCreateRequest,
+        request: Request,
+        uploads: TTSUploadBundle,
+    ) -> dict[str, Any]:
+        self.validate_request(payload, uploads)
+        operation = self.operation_for(payload, uploads)
+        if operation == "edit_or_continue":
+            return await self.edit_or_continue(payload, request, uploads)
+        if operation == "clone_voice":
+            return await self.clone_voice(payload, request, uploads)
+        return await self.synthesize(payload, request, uploads)
+
+    @abstractmethod
+    async def synthesize(
+        self,
+        payload: TTSJobCreateRequest,
+        request: Request,
+        uploads: TTSUploadBundle,
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    async def clone_voice(
+        self,
+        payload: TTSJobCreateRequest,
+        request: Request,
+        uploads: TTSUploadBundle,
+    ) -> dict[str, Any]:
+        if not self.capabilities.voice_clone:
+            raise HTTPException(400, f"Provider '{self.provider_id}' does not support voice cloning.")
+        return await self.synthesize(payload, request, uploads)
+
+    async def edit_or_continue(
+        self,
+        payload: TTSJobCreateRequest,
+        request: Request,
+        uploads: TTSUploadBundle,
+    ) -> dict[str, Any]:
+        raise HTTPException(400, f"Provider '{self.provider_id}' does not support continuation or editing.")
+
+    async def convert_voice(
+        self,
+        payload: TTSJobCreateRequest,
+        request: Request,
+        uploads: TTSUploadBundle,
+    ) -> dict[str, Any]:
+        raise HTTPException(400, f"Provider '{self.provider_id}' does not support voice conversion.")
+
+
+class ServiceBackedTTSProvider(TTSProvider):
+    def _tier_kwargs(self) -> dict[str, bool]:
+        return {
+            "is_gpu_heavy": self.gpu_tier == "heavy",
+            "is_gpu_medium": self.gpu_tier == "medium",
+        }
+
+    def _multipart_data(self, payload: TTSJobCreateRequest) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "provider": payload.provider,
+            "text": payload.text,
+            "speaker_name": payload.speaker_name or "",
+            "reference_audio_path": payload.reference_audio_path or "",
+            "reference_text": payload.reference_text or "",
+            "continuation_audio_path": payload.continuation_audio_path or "",
+            "transcript": payload.transcript or "",
+            "style_prompt": payload.style_prompt or "",
+            "target_sample_rate": str(payload.target_sample_rate or ""),
+            "output_format": payload.output_format or self.default_output_format,
+        }
+        if payload.options:
+            data["options"] = json.dumps(payload.options, ensure_ascii=False)
+        return data
+
+    def _json_payload(self, payload: TTSJobCreateRequest) -> dict[str, Any]:
+        body = payload.model_dump()
+        body["output_format"] = payload.output_format or self.default_output_format
+        return body
+
+    def _files_payload(self, uploads: TTSUploadBundle) -> dict[str, tuple[str, bytes, str]]:
+        files: dict[str, tuple[str, bytes, str]] = {}
+        if uploads.reference_audio:
+            files["reference_audio"] = uploads.reference_audio
+        if uploads.continuation_audio:
+            files["continuation_audio"] = uploads.continuation_audio
+        return files
+
+    async def _submit(
+        self,
+        payload: TTSJobCreateRequest,
+        request: Request,
+        uploads: TTSUploadBundle,
+        path: str,
+    ) -> dict[str, Any]:
+        files = self._files_payload(uploads)
+        if files:
+            return await proxy_to_service(
+                self.service_name,
+                path,
+                request,
+                files=files,
+                data=self._multipart_data(payload),
+                public_service=self.provider_id,
+                history_model_used=self.display_name,
+                **self._tier_kwargs(),
+            )
+        return await proxy_to_service(
+            self.service_name,
+            path,
+            request,
+            json_body=self._json_payload(payload),
+            public_service=self.provider_id,
+            history_model_used=self.display_name,
+            **self._tier_kwargs(),
+        )
+
+    async def synthesize(
+        self,
+        payload: TTSJobCreateRequest,
+        request: Request,
+        uploads: TTSUploadBundle,
+    ) -> dict[str, Any]:
+        return await self._submit(payload, request, uploads, "/synthesize")
+
+
+class F5TTSProvider(TTSProvider):
+    def __init__(self):
+        super().__init__(
+            provider_id="f5tts",
+            display_name="F5-TTS",
+            service_name="f5tts",
+            enabled=True,
+            description="Existing warm-tier F5-TTS integration.",
+            capabilities=TTSProviderCapabilities(
+                basic_tts=True,
+                voice_clone=True,
+                supports_reference_audio=True,
+            ),
+            gpu_tier="medium",
+            supported_output_formats=["wav"],
+            default_output_format="wav",
+            supported_target_sample_rates=[int(os.getenv("F5TTS_SAMPLE_RATE", "24000"))],
+            default_target_sample_rate=int(os.getenv("F5TTS_SAMPLE_RATE", "24000")),
+            option_fields=[
+                TTSProviderOptionField(
+                    id="speed",
+                    label="Speed",
+                    type="number",
+                    description="Playback speed multiplier for F5-TTS.",
+                    default=1.0,
+                    min=0.5,
+                    max=2.0,
+                    step=0.05,
+                )
+            ],
+        )
+
+    def validate_request(self, payload: TTSJobCreateRequest, uploads: TTSUploadBundle) -> None:
+        super().validate_request(payload, uploads)
+        if payload.target_sample_rate and payload.target_sample_rate != self.default_target_sample_rate:
+            raise HTTPException(
+                400,
+                f"F5-TTS currently outputs {self.default_target_sample_rate} Hz audio only.",
+            )
+
+    async def synthesize(
+        self,
+        payload: TTSJobCreateRequest,
+        request: Request,
+        uploads: TTSUploadBundle,
+    ) -> dict[str, Any]:
+        speed = payload.options.get("speed", 1.0)
+        try:
+            speed_value = float(speed)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, "options.speed must be numeric") from exc
+
+        files: dict[str, tuple[str, bytes, str]] | None = None
+        if uploads.reference_audio:
+            files = {"ref_audio": uploads.reference_audio}
+
+        data = {
+            "text": payload.text,
+            "ref_text": payload.reference_text or "",
+            "speed": speed_value,
+        }
+
+        if files:
+            return await proxy_to_service(
+                "f5tts",
+                "/synthesize",
+                request,
+                files=files,
+                data=data,
+                public_service=self.provider_id,
+                history_model_used=self.display_name,
+                is_gpu_medium=True,
+            )
+
+        return await proxy_to_service(
+            "f5tts",
+            "/synthesize",
+            request,
+            json_body=data,
+            public_service=self.provider_id,
+            history_model_used=self.display_name,
+            is_gpu_medium=True,
+        )
+
+
+class TTSProviderRegistry:
+    def __init__(self, providers: list[TTSProvider]):
+        self._providers = {provider.provider_id: provider for provider in providers}
+
+    def list(self, *, include_disabled: bool = True) -> list[dict[str, Any]]:
+        providers = list(self._providers.values())
+        if not include_disabled:
+            providers = [provider for provider in providers if provider.enabled]
+        return [provider.serialize() for provider in providers]
+
+    def get(self, provider_id: str) -> TTSProvider:
+        provider = self._providers.get(provider_id)
+        if not provider:
+            raise HTTPException(404, f"Unknown TTS provider '{provider_id}'.")
+        return provider
+
+    def ids(self) -> set[str]:
+        return set(self._providers.keys())
+
+
+def _tts_capabilities_from_env(prefix: str, defaults: dict[str, bool]) -> TTSProviderCapabilities:
+    return TTSProviderCapabilities(
+        basic_tts=_env_bool(f"{prefix}_BASIC_TTS", defaults.get("basic_tts", True)),
+        voice_clone=_env_bool(f"{prefix}_VOICE_CLONE", defaults.get("voice_clone", False)),
+        style_prompt=_env_bool(f"{prefix}_STYLE_PROMPT", defaults.get("style_prompt", False)),
+        continuation_edit=_env_bool(
+            f"{prefix}_CONTINUATION_EDIT",
+            defaults.get("continuation_edit", False),
+        ),
+        transcript_guided_continuation=_env_bool(
+            f"{prefix}_TRANSCRIPT_GUIDED_CONTINUATION",
+            defaults.get("transcript_guided_continuation", False),
+        ),
+        voice_conversion=_env_bool(f"{prefix}_VOICE_CONVERSION", defaults.get("voice_conversion", False)),
+        supports_reference_audio=_env_bool(
+            f"{prefix}_SUPPORTS_REFERENCE_AUDIO",
+            defaults.get("supports_reference_audio", False),
+        ),
+        supports_multi_speaker=_env_bool(
+            f"{prefix}_SUPPORTS_MULTI_SPEAKER",
+            defaults.get("supports_multi_speaker", False),
+        ),
+        supports_48khz_output=_env_bool(
+            f"{prefix}_SUPPORTS_48KHZ_OUTPUT",
+            defaults.get("supports_48khz_output", False),
+        ),
+    )
+
+
+def build_tts_provider_registry() -> TTSProviderRegistry:
+    fish_provider = ServiceBackedTTSProvider(
+        provider_id="fish_speech",
+        display_name=os.getenv("FISH_SPEECH_DISPLAY_NAME", "Fish Speech"),
+        service_name="fish_speech",
+        enabled=_env_bool("FISH_SPEECH_ENABLED", False),
+        description="Adapter for a Fish Speech-compatible upstream runtime.",
+        capabilities=_tts_capabilities_from_env(
+            "FISH_SPEECH",
+            {
+                "basic_tts": True,
+                "voice_clone": True,
+                "supports_reference_audio": True,
+            },
+        ),
+        gpu_tier="medium",
+        supported_output_formats=_parse_str_list_env(
+            os.getenv("FISH_SPEECH_OUTPUT_FORMATS"),
+            ["wav", "mp3", "opus"],
+        ),
+        default_output_format=os.getenv("FISH_SPEECH_DEFAULT_OUTPUT_FORMAT", "wav"),
+        supported_target_sample_rates=_parse_int_list_env(
+            os.getenv("FISH_SPEECH_TARGET_SAMPLE_RATES"),
+            [],
+        ),
+        default_target_sample_rate=None,
+    )
+
+    premium_provider = ServiceBackedTTSProvider(
+        provider_id="premium_clone_tts",
+        display_name=os.getenv("PREMIUM_CLONE_TTS_DISPLAY_NAME", "Premium Clone TTS"),
+        service_name="premium_clone_tts",
+        enabled=_env_bool("PREMIUM_CLONE_TTS_ENABLED", False),
+        description="Scaffolded premium cloning slot with a pass-through adapter for future runtime wiring.",
+        capabilities=_tts_capabilities_from_env(
+            "PREMIUM_CLONE_TTS",
+            {
+                "basic_tts": True,
+                "voice_clone": True,
+                "supports_reference_audio": True,
+            },
+        ),
+        gpu_tier="medium",
+        supported_output_formats=_parse_str_list_env(
+            os.getenv("PREMIUM_CLONE_TTS_OUTPUT_FORMATS"),
+            ["wav"],
+        ),
+        default_output_format=os.getenv("PREMIUM_CLONE_TTS_DEFAULT_OUTPUT_FORMAT", "wav"),
+        supported_target_sample_rates=_parse_int_list_env(
+            os.getenv("PREMIUM_CLONE_TTS_TARGET_SAMPLE_RATES"),
+            [],
+        ),
+        default_target_sample_rate=None,
+    )
+
+    return TTSProviderRegistry(
+        [
+            F5TTSProvider(),
+            fish_provider,
+            premium_provider,
+        ]
+    )
+
+
+TTS_PROVIDER_REGISTRY = build_tts_provider_registry()
+TTS_PROVIDER_IDS = TTS_PROVIDER_REGISTRY.ids()
 
 
 class PresetUpsertRequest(BaseModel):
@@ -2374,10 +3121,13 @@ async def proxy_to_service(
     json_body: dict[str, Any] | None = None,
     is_gpu_heavy: bool = False,
     is_gpu_medium: bool = False,
+    public_service: str | None = None,
+    history_model_used: str | None = None,
 ):
+    job_service = public_service or service
     job_id = str(uuid.uuid4())
     now = _now_utc().isoformat()
-    job = JobRecord(job_id=job_id, service=service, status=JobStatus.QUEUED, created_at=now)
+    job = JobRecord(job_id=job_id, service=job_service, status=JobStatus.QUEUED, created_at=now)
     await store_job(job)
 
     tier = "heavy" if is_gpu_heavy else "medium" if is_gpu_medium else "light"
@@ -2420,7 +3170,7 @@ async def proxy_to_service(
         job.status = JobStatus.RUNNING
         job.started_at = _now_utc().isoformat()
         await store_job(job)
-        await record_service_activity(service)
+        await record_service_activity(job_service)
 
         try:
             if files:
@@ -2453,9 +3203,10 @@ async def proxy_to_service(
                 try:
                     persist_generation_record(
                         job_id=job_id,
-                        service=service,
+                        service=job_service,
                         payload=payload_for_history,
                         output_path=job.result_path,
+                        model_used=history_model_used,
                     )
                 except Exception as hist_error:
                     log.warning("History persistence failed for job %s: %s", job_id, hist_error)
@@ -2490,47 +3241,61 @@ async def whisper_transcribe(request: Request, audio: UploadFile = File(...)):
     return await proxy_to_service("whisper", "/transcribe", request, files=files)
 
 
+@app.get("/api/v1/tts/providers")
+async def list_tts_providers(include_disabled: bool = True):
+    return {
+        "items": TTS_PROVIDER_REGISTRY.list(include_disabled=include_disabled),
+    }
+
+
+@app.get("/api/v1/tts/providers/{provider_id}/health")
+async def get_tts_provider_health(provider_id: str):
+    provider = TTS_PROVIDER_REGISTRY.get(provider_id)
+    return await provider.health_check()
+
+
+@app.post("/api/v1/tts/jobs")
+async def create_tts_job(request: Request):
+    return await create_tts_job_from_request(request)
+
+
+@app.get("/api/v1/tts/jobs/{job_id}")
+async def get_tts_job(job_id: str):
+    job = await get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    return job
+
+
+@app.get("/api/v1/tts/history")
+async def list_tts_history(limit: int = 200, provider: Optional[str] = None):
+    clamped_limit = max(1, min(limit, 1000))
+    allowed_services = TTS_PROVIDER_IDS
+    if provider:
+        if provider not in allowed_services:
+            raise HTTPException(404, f"Unknown TTS provider '{provider}'.")
+        allowed_services = {provider}
+
+    with SessionLocal() as db:
+        stmt = (
+            select(GenerationHistory)
+            .where(GenerationHistory.service.in_(sorted(allowed_services)))
+            .order_by(desc(GenerationHistory.created_at))
+            .limit(clamped_limit)
+        )
+        rows = db.execute(stmt).scalars().all()
+
+    return {"items": [serialize_generation(row) for row in rows]}
+
+
 @app.post("/api/v1/tts/synthesize")
 async def tts_synthesize(request: Request):
-    return await proxy_to_service("f5tts", "/synthesize", request, is_gpu_medium=True)
+    return await create_tts_job_from_request(request, default_provider="f5tts")
 
 
 @app.post("/api/v1/tts/synthesize-with-audio")
-async def tts_synthesize_with_audio(
-    request: Request,
-    text: str = Form(...),
-    ref_audio: UploadFile = File(None),
-    saved_voice_path: str = Form(""),
-    ref_text: str = Form(""),
-    speed: float = Form(1.0),
-):
-    """Send reference audio as raw bytes so the backend avoids path-based loading."""
-    files = {}
-    data = {"text": text, "speed": speed, "ref_text": ref_text}
-
-    if ref_audio and ref_audio.filename and saved_voice_path:
-        raise HTTPException(400, "Choose either uploaded ref_audio or saved_voice_path, not both")
-
-    # CASE 1: Uploaded file - Read bytes directly
-    if ref_audio and ref_audio.filename:
-        content = await ref_audio.read()
-        files["ref_audio"] = (ref_audio.filename, content, ref_audio.content_type)
-
-    # CASE 2: Saved asset - Read from local assets and send as bytes
-    elif saved_voice_path:
-        asset_full_path = resolve_asset_path(saved_voice_path, VOICE_ASSETS_DIR)
-        with open(asset_full_path, "rb") as f:
-            guessed_type = mimetypes.guess_type(asset_full_path.name)[0] or "application/octet-stream"
-            files["ref_audio"] = (asset_full_path.name, f.read(), guessed_type)
-
-    return await proxy_to_service(
-        "f5tts",
-        "/synthesize",
-        request,
-        files=files if files else None,
-        data=data,
-        is_gpu_medium=True,
-    )
+async def tts_synthesize_with_audio(request: Request):
+    return await create_tts_job_from_request(request, default_provider="f5tts")
 
 @app.post("/api/v1/liveportrait/animate")
 async def liveportrait_animate(

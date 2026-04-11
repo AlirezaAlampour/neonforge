@@ -12,6 +12,8 @@ import { MemoryGauge } from '@/components/memory-gauge'
 const serviceLabels: Record<string, { label: string; tier: string; icon: typeof Cpu }> = {
   whisper: { label: 'Whisper STT', tier: 'Always-On', icon: Cpu },
   f5tts: { label: 'F5-TTS', tier: 'Warm', icon: Zap },
+  fish_speech: { label: 'Fish Speech', tier: 'Optional', icon: Zap },
+  premium_clone_tts: { label: 'Premium Clone TTS', tier: 'Optional', icon: Zap },
   liveportrait: { label: 'LivePortrait', tier: 'Warm', icon: Server },
   lipsync: { label: 'Lip Sync', tier: 'Warm', icon: Server },
   wan21: { label: 'Wan 2.1', tier: 'Lazy-Start', icon: HardDrive },

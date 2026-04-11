@@ -51,12 +51,68 @@ export interface JobRecord {
   error?: string | null
 }
 
+export interface TTSProviderCapabilities {
+  basic_tts: boolean
+  voice_clone: boolean
+  style_prompt: boolean
+  continuation_edit: boolean
+  transcript_guided_continuation: boolean
+  voice_conversion: boolean
+  supports_reference_audio: boolean
+  supports_multi_speaker: boolean
+  supports_48khz_output: boolean
+}
+
+export interface TTSProviderOptionField {
+  id: string
+  label: string
+  type: string
+  description: string
+  default: string | number | boolean | null
+  min?: number | null
+  max?: number | null
+  step?: number | null
+}
+
+export interface TTSProvider {
+  provider_id: string
+  display_name: string
+  service: string
+  enabled: boolean
+  description: string
+  gpu_tier: string
+  default_output_format: string
+  supported_output_formats: string[]
+  default_target_sample_rate?: number | null
+  supported_target_sample_rates: number[]
+  capabilities: TTSProviderCapabilities
+  option_fields: TTSProviderOptionField[]
+}
+
+export interface TTSProviderListResponse {
+  items: TTSProvider[]
+}
+
+export interface TTSProviderHealth {
+  provider_id: string
+  display_name: string
+  enabled: boolean
+  service: string
+  alive: boolean
+  ready: boolean
+  status: string
+  detail?: string | null
+  service_url?: string | null
+  ready_payload?: Record<string, unknown>
+}
+
 export interface TTSResult {
-  output_path: string
-  sample_rate: number
-  duration: number
-  processing_time: number
+  output_path?: string
+  sample_rate?: number
+  duration?: number
+  processing_time?: number
   job_id: string
+  provider?: string
 }
 
 export interface Wan21Result {
