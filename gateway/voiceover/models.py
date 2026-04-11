@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import mimetypes
 import os
 from abc import ABC, abstractmethod
@@ -159,13 +160,16 @@ class F5TTSModel(_HTTPVoiceoverModel):
 
 
 class FishSpeechModel(_HTTPVoiceoverModel):
+    def __init__(self) -> None:
+        self._reference_text_cache: dict[str, str] = {}
+
     @property
     def model_id(self) -> str:
         return "fish_speech"
 
     @property
     def display_name(self) -> str:
-        return "Fish Speech 1.5 (Local)"
+        return "Fish Speech S2 Pro (Local)"
 
     @property
     def supports_reference_audio(self) -> bool:
@@ -175,16 +179,89 @@ class FishSpeechModel(_HTTPVoiceoverModel):
     def base_url(self) -> str:
         return os.getenv("FISH_SPEECH_INTERNAL_URL", "http://fish_speech:8000")
 
+    @property
+    def whisper_url(self) -> str:
+        return os.getenv("WHISPER_URL", "http://whisper:8000")
+
     def is_available(self) -> bool:
-        return os.getenv("FISH_SPEECH_ENABLED", "false").lower() == "true" and _service_reachable(self.base_url)
+        if os.getenv("FISH_SPEECH_ENABLED", "false").lower() != "true":
+            return False
+
+        try:
+            response = httpx.get(
+                f"{self.base_url.rstrip('/')}/v1/health",
+                timeout=httpx.Timeout(5.0, connect=3.0),
+            )
+            payload = response.json()
+            return response.status_code == 200 and payload.get("status") == "ok"
+        except Exception:
+            return False
 
     def availability_error(self) -> str:
         return "Fish Speech is not enabled or reachable"
 
+    def _transcribe_reference_audio(self, audio_name: str, audio_bytes: bytes, media_type: str) -> str:
+        cache_key = f"{audio_name}:{len(audio_bytes)}"
+        cached = self._reference_text_cache.get(cache_key)
+        if cached:
+            return cached
+
+        try:
+            response = httpx.post(
+                f"{self.whisper_url.rstrip('/')}/transcribe",
+                files={"audio": (audio_name, audio_bytes, media_type)},
+                timeout=httpx.Timeout(180.0, connect=10.0),
+            )
+            response.raise_for_status()
+            payload = response.json()
+            text = str(payload.get("text") or "").strip()
+        except Exception as exc:
+            raise ModelUnavailableError("Fish Speech could not transcribe the reference audio") from exc
+        if not text:
+            raise ModelUnavailableError("Fish Speech could not transcribe the reference audio")
+
+        self._reference_text_cache[cache_key] = text
+        return text
+
     def synthesize(self, text: str, reference_audio_path: str | None, options: dict[str, Any]) -> bytes:
         if not self.is_available():
             raise ModelUnavailableError(self.availability_error())
-        return super().synthesize(text, reference_audio_path, options)
+
+        references: list[dict[str, str]] = []
+        if reference_audio_path:
+            container_audio_path = host_path_to_container(reference_audio_path)
+            audio_bytes = container_audio_path.read_bytes()
+            audio_name = container_audio_path.name
+            media_type = mimetypes.guess_type(audio_name)[0] or "application/octet-stream"
+            reference_text = self._transcribe_reference_audio(audio_name, audio_bytes, media_type)
+            references.append(
+                {
+                    "audio": base64.b64encode(audio_bytes).decode("utf-8"),
+                    "text": reference_text,
+                }
+            )
+
+        payload = {
+            "text": text,
+            "chunk_length": 200,
+            "format": "wav",
+            "references": references,
+            "reference_id": None,
+            "normalize": True,
+            "streaming": False,
+            "use_memory_cache": "on" if references else "off",
+        }
+
+        try:
+            response = httpx.post(
+                f"{self.base_url.rstrip('/')}/v1/tts",
+                json=payload,
+                timeout=httpx.Timeout(600.0, connect=10.0),
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise ModelUnavailableError("Fish Speech synthesis failed") from exc
+        return response.content
 
 
 class VoxCPM2Model(_HTTPVoiceoverModel):

@@ -33,12 +33,27 @@ def load_model():
     from faster_whisper import WhisperModel
     log.info("Loading faster-whisper model: %s (compute=%s)", MODEL_SIZE, COMPUTE_TYPE)
     t0 = time.time()
-    model = WhisperModel(
-        MODEL_SIZE,
-        device="cuda",
-        compute_type=COMPUTE_TYPE,
-        download_root=MODEL_DIR,
-    )
+    try:
+        model = WhisperModel(
+            MODEL_SIZE,
+            device="cuda",
+            compute_type=COMPUTE_TYPE,
+            download_root=MODEL_DIR,
+        )
+    except ValueError as exc:
+        if "CUDA support" not in str(exc):
+            raise
+        cpu_compute_type = os.getenv("WHISPER_CPU_COMPUTE_TYPE", "int8")
+        log.warning(
+            "CUDA Whisper runtime unavailable, falling back to CPU (%s)",
+            cpu_compute_type,
+        )
+        model = WhisperModel(
+            MODEL_SIZE,
+            device="cpu",
+            compute_type=cpu_compute_type,
+            download_root=MODEL_DIR,
+        )
     elapsed = time.time() - t0
     log.info("Model loaded in %.1fs", elapsed)
     model_loaded = True
