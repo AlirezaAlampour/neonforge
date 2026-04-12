@@ -201,6 +201,21 @@ services:
     networks:
       - ai-net
 
+  fish_speech:
+    image: dgx-ai-stack-fish_speech
+    container_name: ai-fish-speech
+    restart: unless-stopped
+    <<: *common-gpu
+    environment:
+      <<: *common-env
+    volumes: *common-volumes
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/v1/health')"]
+      <<: *healthcheck-defaults
+      start_period: 180s
+    networks:
+      - ai-net
+
   comfyui:
     build:
       context: .

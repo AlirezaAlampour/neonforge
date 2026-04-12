@@ -216,7 +216,9 @@ export function VoiceoverStudio() {
   const refreshModels = useCallback(async () => {
     setModelsLoading(true)
     try {
-      const data = await apiRequest<VoiceoverModelSummary[]>('/api/v1/voiceover/models')
+      const data = await apiRequest<VoiceoverModelSummary[]>('/api/v1/voiceover/models', {
+        cache: 'no-store',
+      })
       setModels(data)
       setGenerationError(null)
       setSelectedModelId((current) => {
@@ -286,6 +288,17 @@ export function VoiceoverStudio() {
     void refreshModels()
     void refreshRecentVoiceovers()
   }, [refreshModels, refreshProfiles, refreshRecentVoiceovers])
+
+  useEffect(() => {
+    const handleWindowFocus = () => {
+      void refreshModels()
+    }
+
+    window.addEventListener('focus', handleWindowFocus)
+    return () => {
+      window.removeEventListener('focus', handleWindowFocus)
+    }
+  }, [refreshModels])
 
   useEffect(() => {
     if (!formStateRestored || typeof window === 'undefined') return
