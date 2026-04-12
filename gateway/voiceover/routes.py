@@ -41,6 +41,7 @@ class CreateVoiceoverJobRequest(BaseModel):
     model_id: str
     output_format: str = "wav"
     speed: float = 1.0
+    preserve_raw_chunks: bool = False
 
 
 def _now_iso() -> str:
@@ -349,6 +350,7 @@ async def create_voiceover_job(request: CreateVoiceoverJobRequest, background_ta
         output_format,
         speed,
         redis_client,
+        request.preserve_raw_chunks,
     )
 
     return {"job_id": job_id, "status": "pending"}

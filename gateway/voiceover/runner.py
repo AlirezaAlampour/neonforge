@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import audioop
+import json
 import os
 import re
 import shutil
@@ -30,6 +31,7 @@ VOX_EDGE_FADE_MS = 8
 VOX_CROSSFADE_MS = 12
 VOX_MIN_CLIP_MS = 150
 VOX_SILENCE_THRESHOLD_RATIO = 0.008
+VOX_DEBUG_MANIFEST_FILENAME = "vox_debug_manifest.json"
 
 
 def _container_output_dir(job_id: str) -> Path:
@@ -91,6 +93,17 @@ def _build_output_filename(output_basename: str, extension: str) -> str:
 def _read_wave_params(path: Path) -> tuple[int, int, int]:
     with wave.open(str(path), "rb") as wav_file:
         return wav_file.getnchannels(), wav_file.getsampwidth(), wav_file.getframerate()
+
+
+def _read_wave_duration_ms(path: Path) -> float | None:
+    try:
+        with wave.open(str(path), "rb") as wav_file:
+            frame_rate = wav_file.getframerate()
+            if frame_rate <= 0:
+                return None
+            return round((wav_file.getnframes() / float(frame_rate)) * 1000.0, 1)
+    except Exception:
+        return None
 
 
 def _write_silence_wav(path: Path, *, channels: int, sample_width: int, sample_rate: int, duration_ms: int) -> None:
@@ -405,7 +418,56 @@ def _convert_to_mp3_if_possible(final_wav_path: Path, final_mp3_path: Path) -> P
         return final_wav_path
 
 
-async def run_voiceover_job(job_id, profile_id, script, model_id, output_format, speed, redis_client) -> None:
+def _build_vox_debug_manifest(
+    *,
+    job_id: str,
+    model_id: str,
+    voice_profile_id: str,
+    chunk_options: dict[str, int],
+    chunks: list[dict],
+    rendered_chunk_paths: list[Path],
+    final_output_filename: str,
+) -> dict[str, Any]:
+    rendered_iter = iter(rendered_chunk_paths)
+    ordered_chunks: list[dict[str, Any]] = []
+
+    for chunk_index, chunk in enumerate(chunks, start=1):
+        raw_chunk_filename: str | None = None
+        raw_chunk_duration_ms: float | None = None
+
+        if not chunk.get("is_pause"):
+            raw_chunk_path = next(rendered_iter)
+            raw_chunk_filename = raw_chunk_path.name
+            raw_chunk_duration_ms = _read_wave_duration_ms(raw_chunk_path)
+
+        ordered_chunks.append(
+            {
+                "chunk_index": chunk_index,
+                "chunk_text": str(chunk.get("text", "")),
+                "raw_chunk_filename": raw_chunk_filename,
+                "raw_chunk_duration_ms": raw_chunk_duration_ms,
+                "is_pause": bool(chunk.get("is_pause")),
+            }
+        )
+
+    return {
+        "job_id": job_id,
+        "model_id": model_id,
+        "voice_profile_id": voice_profile_id,
+        "chunking_settings": {
+            "max_chars": chunk_options.get("max_chars"),
+            "target_sentences_per_chunk": chunk_options.get("target_sentences_per_chunk"),
+        },
+        "ordered_chunks": ordered_chunks,
+        "final_output_filename": final_output_filename,
+    }
+
+
+def _write_json_file(path: Path, payload: dict[str, Any]) -> None:
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+async def run_voiceover_job(job_id, profile_id, script, model_id, output_format, speed, redis_client, preserve_raw_chunks: bool = False) -> None:
     job_key = f"voiceover:{job_id}"
     completed_chunks = 0
 
@@ -506,6 +568,19 @@ async def run_voiceover_job(job_id, profile_id, script, model_id, output_format,
         if str(output_format).lower() == "mp3":
             final_output_path = await asyncio.to_thread(_convert_to_mp3_if_possible, final_wav_path, final_mp3_path)
 
+        if model_id == VOX_MODEL_ID:
+            manifest_path = work_dir / VOX_DEBUG_MANIFEST_FILENAME
+            manifest_payload = _build_vox_debug_manifest(
+                job_id=str(job_id),
+                model_id=model_id,
+                voice_profile_id=profile.id,
+                chunk_options=chunk_options,
+                chunks=chunks,
+                rendered_chunk_paths=rendered_chunk_paths,
+                final_output_filename=final_output_path.name,
+            )
+            await asyncio.to_thread(_write_json_file, manifest_path, manifest_payload)
+
         merged_path.unlink(missing_ok=True)
 
         host_output_path = _host_output_dir(str(job_id)) / final_output_path.name
@@ -519,8 +594,9 @@ async def run_voiceover_job(job_id, profile_id, script, model_id, output_format,
             error="",
         )
 
-        for path in work_dir.glob("chunk_*.wav"):
-            path.unlink(missing_ok=True)
+        if not (model_id == VOX_MODEL_ID and preserve_raw_chunks):
+            for path in work_dir.glob("chunk_*.wav"):
+                path.unlink(missing_ok=True)
         for path in work_dir.glob("pause_*.wav"):
             path.unlink(missing_ok=True)
         merged_path.unlink(missing_ok=True)

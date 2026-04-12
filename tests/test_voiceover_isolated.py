@@ -1,3 +1,6 @@
+import asyncio
+import io
+import json
 import math
 import struct
 import sys
@@ -27,6 +30,13 @@ def _configure_voice_profile_storage(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(profiles, "REGISTRY_CONTAINER_PATH", registry_path)
 
 
+def _configure_voiceover_output_storage(monkeypatch, tmp_path: Path) -> Path:
+    outputs_root = tmp_path / "outputs"
+    monkeypatch.setattr(runner, "HOST_OUTPUTS_ROOT", outputs_root)
+    monkeypatch.setattr(runner, "CONTAINER_OUTPUTS_ROOT", outputs_root)
+    return outputs_root
+
+
 def _tone_frames(duration_ms: int, *, sample_rate: int = 24000, amplitude: int = 5000, frequency_hz: float = 220.0) -> bytes:
     frame_count = int(sample_rate * (duration_ms / 1000.0))
     payload = bytearray()
@@ -49,6 +59,16 @@ def _write_pcm_wav(path: Path, frames: bytes, *, sample_rate: int = 24000) -> No
         wav_file.writeframes(frames)
 
 
+def _pcm_wav_bytes(frames: bytes, *, sample_rate: int = 24000) -> bytes:
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(frames)
+    return buffer.getvalue()
+
+
 def _wav_duration_ms(path: Path) -> float:
     with wave.open(str(path), "rb") as wav_file:
         return (wav_file.getnframes() / float(wav_file.getframerate())) * 1000.0
@@ -65,6 +85,12 @@ class _FakeResponse:
 
     def json(self):
         return self._payload
+
+
+class _FakeVoxModel:
+    def synthesize(self, text: str, reference_audio_path: str | None, options: dict) -> bytes:
+        frequency_hz = 220.0 + (len(text) % 7) * 25.0
+        return _pcm_wav_bytes(_tone_frames(260, frequency_hz=frequency_hz))
 
 
 def test_fish_reference_transcript_is_persisted_and_reused(monkeypatch, tmp_path: Path):
@@ -182,3 +208,114 @@ def test_vox_stitching_keeps_pause_chunks(tmp_path: Path):
 
     assert duration_ms > 950
     assert duration_ms < 1025
+
+
+def test_vox_debug_job_writes_manifest_and_preserves_raw_chunks(monkeypatch, tmp_path: Path):
+    _configure_voice_profile_storage(monkeypatch, tmp_path)
+    outputs_root = _configure_voiceover_output_storage(monkeypatch, tmp_path)
+
+    reference_wav = tmp_path / "reference.wav"
+    _write_pcm_wav(reference_wav, _tone_frames(300))
+    profile = save_profile(
+        name="Vox Debug",
+        audio_bytes=reference_wav.read_bytes(),
+        filename="reference.wav",
+        notes="",
+    )
+
+    monkeypatch.setattr(
+        runner.ModelRegistry,
+        "get_model",
+        staticmethod(lambda model_id: _FakeVoxModel() if model_id == runner.VOX_MODEL_ID else None),
+    )
+
+    job_id = "vox-debug-job"
+    asyncio.run(
+        runner.run_voiceover_job(
+            job_id,
+            profile.id,
+            "Sentence one. Sentence two. Sentence three.",
+            runner.VOX_MODEL_ID,
+            "wav",
+            1.0,
+            None,
+            True,
+        )
+    )
+
+    job_dir = outputs_root / runner.VOICEOVER_RELATIVE_DIR / job_id
+    manifest_path = job_dir / runner.VOX_DEBUG_MANIFEST_FILENAME
+    raw_chunks = sorted(job_dir.glob("chunk_*.wav"))
+    final_outputs = sorted(
+        path for path in job_dir.glob("*.wav")
+        if not path.name.startswith("chunk_") and path.name != "merged.wav"
+    )
+
+    assert manifest_path.exists()
+    assert [path.name for path in raw_chunks] == ["chunk_0001.wav", "chunk_0002.wav"]
+    assert len(final_outputs) == 1
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["job_id"] == job_id
+    assert manifest["model_id"] == runner.VOX_MODEL_ID
+    assert manifest["voice_profile_id"] == profile.id
+    assert manifest["chunking_settings"] == {
+        "max_chars": runner.VOX_MAX_CHARS,
+        "target_sentences_per_chunk": runner.VOX_TARGET_SENTENCES_PER_CHUNK,
+    }
+    assert manifest["final_output_filename"] == final_outputs[0].name
+    assert manifest["ordered_chunks"] == [
+        {
+            "chunk_index": 1,
+            "chunk_text": "Sentence one. Sentence two.",
+            "raw_chunk_filename": "chunk_0001.wav",
+            "raw_chunk_duration_ms": 260.0,
+            "is_pause": False,
+        },
+        {
+            "chunk_index": 2,
+            "chunk_text": "Sentence three.",
+            "raw_chunk_filename": "chunk_0002.wav",
+            "raw_chunk_duration_ms": 260.0,
+            "is_pause": False,
+        },
+    ]
+
+
+def test_vox_debug_manifest_is_written_even_when_raw_chunks_are_cleaned(monkeypatch, tmp_path: Path):
+    _configure_voice_profile_storage(monkeypatch, tmp_path)
+    outputs_root = _configure_voiceover_output_storage(monkeypatch, tmp_path)
+
+    reference_wav = tmp_path / "reference.wav"
+    _write_pcm_wav(reference_wav, _tone_frames(300))
+    profile = save_profile(
+        name="Vox Default Cleanup",
+        audio_bytes=reference_wav.read_bytes(),
+        filename="reference.wav",
+        notes="",
+    )
+
+    monkeypatch.setattr(
+        runner.ModelRegistry,
+        "get_model",
+        staticmethod(lambda model_id: _FakeVoxModel() if model_id == runner.VOX_MODEL_ID else None),
+    )
+
+    job_id = "vox-debug-off-job"
+    asyncio.run(
+        runner.run_voiceover_job(
+            job_id,
+            profile.id,
+            "Sentence one. Sentence two. Sentence three.",
+            runner.VOX_MODEL_ID,
+            "wav",
+            1.0,
+            None,
+            False,
+        )
+    )
+
+    job_dir = outputs_root / runner.VOICEOVER_RELATIVE_DIR / job_id
+
+    assert (job_dir / runner.VOX_DEBUG_MANIFEST_FILENAME).exists()
+    assert list(job_dir.glob("chunk_*.wav")) == []
