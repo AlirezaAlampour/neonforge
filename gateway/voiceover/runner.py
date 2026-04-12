@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 import subprocess
+import unicodedata
 import wave
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +18,9 @@ from .profiles import get_profile, host_path_to_container
 HOST_OUTPUTS_ROOT = Path("/srv/ai/outputs")
 CONTAINER_OUTPUTS_ROOT = Path(os.getenv("OUTPUTS_ROOT", "/outputs"))
 VOICEOVER_RELATIVE_DIR = Path("voiceover")
+VOX_MODEL_ID = "voxcpm2"
+VOX_MAX_CHARS = 120
+VOX_TARGET_SENTENCES_PER_CHUNK = 1
 
 
 def _container_output_dir(job_id: str) -> Path:
@@ -48,6 +54,29 @@ async def _update_job(redis_client, job_key: str, **fields: Any) -> None:
     }
     if payload:
         await redis_client.hset(job_key, mapping=payload)
+
+
+def _sanitize_filename_part(value: str, fallback: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value)
+    ascii_value = normalized.encode("ascii", "ignore").decode("ascii")
+    cleaned = re.sub(r"[^a-z0-9]+", "_", ascii_value.lower()).strip("_")
+    return cleaned or fallback
+
+
+def _output_filename_timestamp() -> str:
+    return datetime.now().astimezone().strftime("%Y-%m-%d_%H%M%S")
+
+
+def _build_output_basename(model_id: str, profile_name: str) -> str:
+    safe_model = _sanitize_filename_part(model_id, "voiceover")
+    safe_profile = _sanitize_filename_part(profile_name, "voice")
+    timestamp = _output_filename_timestamp()
+    return f"{safe_model}_{safe_profile}_{timestamp}"
+
+
+def _build_output_filename(output_basename: str, extension: str) -> str:
+    normalized_extension = extension.lower().lstrip(".") or "wav"
+    return f"{output_basename}.{normalized_extension}"
 
 
 def _read_wave_params(path: Path) -> tuple[int, int, int]:
@@ -180,7 +209,14 @@ async def run_voiceover_job(job_id, profile_id, script, model_id, output_format,
             await _update_job(redis_client, job_key, status="failed", error="Requested model was not found")
             return
 
-        chunks = chunk_script(script)
+        chunk_options: dict[str, int] = {}
+        if model_id == VOX_MODEL_ID:
+            chunk_options = {
+                "max_chars": VOX_MAX_CHARS,
+                "target_sentences_per_chunk": VOX_TARGET_SENTENCES_PER_CHUNK,
+            }
+
+        chunks = chunk_script(script, **chunk_options)
         synthesis_chunks = [chunk for chunk in chunks if not chunk.get("is_pause")]
         total_chunks = len(synthesis_chunks)
         if total_chunks == 0:
@@ -241,8 +277,9 @@ async def run_voiceover_job(job_id, profile_id, script, model_id, output_format,
 
         sequence_files = _build_sequence_files(chunks, rendered_chunk_paths, work_dir)
         merged_path = work_dir / "merged.wav"
-        final_wav_path = work_dir / "final.wav"
-        final_mp3_path = work_dir / "final.mp3"
+        output_basename = _build_output_basename(model_id, profile.name)
+        final_wav_path = work_dir / _build_output_filename(output_basename, "wav")
+        final_mp3_path = work_dir / _build_output_filename(output_basename, "mp3")
 
         stitched_with_sox = await asyncio.to_thread(_stitch_with_sox, sequence_files, merged_path, final_wav_path)
         if not stitched_with_sox:
@@ -252,6 +289,8 @@ async def run_voiceover_job(job_id, profile_id, script, model_id, output_format,
         final_output_path = final_wav_path
         if str(output_format).lower() == "mp3":
             final_output_path = await asyncio.to_thread(_convert_to_mp3_if_possible, final_wav_path, final_mp3_path)
+
+        merged_path.unlink(missing_ok=True)
 
         host_output_path = _host_output_dir(str(job_id)) / final_output_path.name
         await _update_job(

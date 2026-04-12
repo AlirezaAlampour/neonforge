@@ -80,6 +80,7 @@ async def _read_job(job_id: str) -> dict[str, Any] | None:
         if data.get(key) not in (None, ""):
             data[key] = int(data[key])
     if data.get("output_path"):
+        data["filename"] = Path(str(data["output_path"])).name
         data["output_url"] = f"/api/v1/voiceover/output/{job_id}"
     return data
 
@@ -159,10 +160,19 @@ def _find_voiceover_output(job_id: str) -> Path | None:
     if not job_dir.exists() or not job_dir.is_dir():
         return None
 
-    for filename in ("final.mp3", "final.wav"):
-        output_path = job_dir / filename
-        if output_path.exists() and output_path.is_file():
-            return output_path
+    candidates: list[Path] = []
+    for child in job_dir.iterdir():
+        if not child.is_file():
+            continue
+        if child.suffix.lower() not in ALLOWED_AUDIO_EXTENSIONS:
+            continue
+        if child.name == "merged.wav" or child.name.startswith("chunk_") or child.name.startswith("pause_"):
+            continue
+        candidates.append(child)
+
+    if candidates:
+        candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+        return candidates[0]
 
     return None
 

@@ -267,6 +267,9 @@ class FishSpeechModel(_HTTPVoiceoverModel):
 
 
 class VoxCPM2Model(_HTTPVoiceoverModel):
+    def __init__(self) -> None:
+        self._reference_text_cache: dict[str, str] = {}
+
     @property
     def model_id(self) -> str:
         return "voxcpm2"
@@ -283,16 +286,84 @@ class VoxCPM2Model(_HTTPVoiceoverModel):
     def base_url(self) -> str:
         return os.getenv("VOXCPM2_INTERNAL_URL", "http://voxcpm2:8000")
 
+    @property
+    def whisper_url(self) -> str:
+        return os.getenv("WHISPER_URL", "http://whisper:8000")
+
     def is_available(self) -> bool:
-        return os.getenv("VOXCPM2_ENABLED", "false").lower() == "true" and _service_reachable(self.base_url)
+        if os.getenv("VOXCPM2_ENABLED", "false").lower() != "true":
+            return False
+
+        if not _service_reachable(self.base_url):
+            return False
+
+        try:
+            response = httpx.get(
+                f"{self.base_url.rstrip('/')}/v1/health",
+                timeout=httpx.Timeout(5.0, connect=3.0),
+            )
+            payload = response.json()
+            return response.status_code == 200 and payload.get("status") == "ok"
+        except Exception:
+            return False
 
     def availability_error(self) -> str:
-        return "VoxCPM2 is not enabled or reachable"
+        return "VoxCPM2 is not enabled or the runtime is unreachable/unhealthy"
+
+    def _transcribe_reference_audio(self, audio_name: str, audio_bytes: bytes, media_type: str) -> str | None:
+        cache_key = f"{audio_name}:{len(audio_bytes)}"
+        cached = self._reference_text_cache.get(cache_key)
+        if cached:
+            return cached
+
+        try:
+            response = httpx.post(
+                f"{self.whisper_url.rstrip('/')}/transcribe",
+                files={"audio": (audio_name, audio_bytes, media_type)},
+                timeout=httpx.Timeout(180.0, connect=10.0),
+            )
+            response.raise_for_status()
+            payload = response.json()
+            text = str(payload.get("text") or "").strip()
+        except Exception:
+            return None
+
+        if not text:
+            return None
+
+        self._reference_text_cache[cache_key] = text
+        return text
 
     def synthesize(self, text: str, reference_audio_path: str | None, options: dict[str, Any]) -> bytes:
         if not self.is_available():
             raise ModelUnavailableError(self.availability_error())
-        return super().synthesize(text, reference_audio_path, options)
+
+        data = {"text": text}
+        reference_bytes: bytes | None = None
+        audio_name: str | None = None
+        media_type: str | None = None
+
+        if reference_audio_path:
+            container_audio_path = host_path_to_container(reference_audio_path)
+            reference_bytes = container_audio_path.read_bytes()
+            audio_name = container_audio_path.name
+            media_type = mimetypes.guess_type(audio_name)[0] or "application/octet-stream"
+            prompt_text = self._transcribe_reference_audio(audio_name, reference_bytes, media_type)
+            if prompt_text:
+                data["prompt_text"] = prompt_text
+
+        files: dict[str, tuple[str, bytes, str]] = {}
+        if reference_bytes is not None and audio_name is not None and media_type is not None:
+            files["reference_audio"] = (audio_name, reference_bytes, media_type)
+
+        response = httpx.post(
+            f"{self.base_url.rstrip('/')}/synthesize",
+            data=data,
+            files=files or None,
+            timeout=httpx.Timeout(600.0, connect=10.0),
+        )
+        response.raise_for_status()
+        return response.content
 
 
 class PremiumCloneModel(VoiceoverModel):

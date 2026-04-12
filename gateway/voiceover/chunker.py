@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import re
 
-SENTENCE_PATTERN = re.compile(r".+?(?:[.!?](?=\s|$)|$)", re.DOTALL)
+SENTENCE_ENDINGS = ".!?"
+SENTENCE_CLOSERS = '\'")]'
 
 
 def _emit_text_chunk(text: str, *, soft_split: bool = False) -> dict:
@@ -45,31 +46,71 @@ def _soft_split_sentence(sentence: str, max_chars: int) -> list[dict]:
 
 
 def _split_sentences(paragraph: str) -> list[str]:
-    return [match.group(0).strip() for match in SENTENCE_PATTERN.finditer(paragraph.strip()) if match.group(0).strip()]
+    text = paragraph.strip()
+    if not text:
+        return []
+
+    sentences: list[str] = []
+    start_index = 0
+
+    for index, character in enumerate(text):
+        if character not in SENTENCE_ENDINGS:
+            continue
+
+        end_index = index + 1
+        while end_index < len(text) and text[end_index] in SENTENCE_CLOSERS:
+            end_index += 1
+
+        if end_index < len(text) and not text[end_index].isspace():
+            continue
+
+        sentence = text[start_index:end_index].strip()
+        if sentence:
+            sentences.append(sentence)
+        start_index = end_index
+
+    trailing = text[start_index:].strip()
+    if trailing:
+        sentences.append(trailing)
+
+    return sentences
 
 
-def _chunk_paragraph(paragraph: str, max_chars: int) -> list[dict]:
+def _chunk_paragraph(
+    paragraph: str,
+    max_chars: int,
+    target_sentences_per_chunk: int | None = None,
+) -> list[dict]:
     sentences = _split_sentences(paragraph)
     if not sentences:
         return []
 
     chunks: list[dict] = []
     current = ""
+    current_sentence_count = 0
 
     for sentence in sentences:
         if len(sentence) > max_chars:
             if current:
                 chunks.append(_emit_text_chunk(current))
                 current = ""
+                current_sentence_count = 0
             chunks.extend(_soft_split_sentence(sentence, max_chars))
             continue
 
         candidate = f"{current} {sentence}".strip() if current else sentence
-        if current and len(candidate) > max_chars:
+        sentence_limit_reached = (
+            target_sentences_per_chunk is not None
+            and current
+            and current_sentence_count >= target_sentences_per_chunk
+        )
+        if current and (len(candidate) > max_chars or sentence_limit_reached):
             chunks.append(_emit_text_chunk(current))
             current = sentence
+            current_sentence_count = 1
         else:
             current = candidate
+            current_sentence_count += 1
 
     if current:
         chunks.append(_emit_text_chunk(current))
@@ -77,7 +118,11 @@ def _chunk_paragraph(paragraph: str, max_chars: int) -> list[dict]:
     return chunks
 
 
-def chunk_script(text: str, max_chars: int = 200) -> list[dict]:
+def chunk_script(
+    text: str,
+    max_chars: int = 200,
+    target_sentences_per_chunk: int | None = None,
+) -> list[dict]:
     normalized = text.replace("\r\n", "\n").strip()
     if not normalized:
         return []
@@ -89,7 +134,13 @@ def chunk_script(text: str, max_chars: int = 200) -> list[dict]:
     ordered: list[dict] = []
 
     for index, paragraph in enumerate(paragraphs):
-        ordered.extend(_chunk_paragraph(paragraph, max_chars=max_chars))
+        ordered.extend(
+            _chunk_paragraph(
+                paragraph,
+                max_chars=max_chars,
+                target_sentences_per_chunk=target_sentences_per_chunk,
+            )
+        )
         if index < len(paragraphs) - 1:
             ordered.append({"text": "", "pause_ms": 600, "is_pause": True})
 

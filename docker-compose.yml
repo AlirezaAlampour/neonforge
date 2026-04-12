@@ -216,6 +216,26 @@ services:
     networks:
       - ai-net
 
+  voxcpm2:
+    build:
+      context: ./services/voxcpm2
+      dockerfile: Dockerfile
+    container_name: ai-voxcpm2
+    restart: unless-stopped
+    <<: *common-gpu
+    environment:
+      <<: *common-env
+      VOXCPM2_MODEL_PATH: ${VOXCPM2_MODEL_PATH:-/models/voxcpm2/openbmb/VoxCPM2}
+    volumes: *common-volumes
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/v1/health')"]
+      interval: 30s
+      timeout: 60s
+      retries: 3
+      start_period: 180s
+    networks:
+      - ai-net
+
   comfyui:
     build:
       context: .
