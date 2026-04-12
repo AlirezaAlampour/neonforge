@@ -19,6 +19,20 @@ def test_basic_sentence_splitting():
     assert all(chunk["is_pause"] is False for chunk in chunks)
 
 
+def test_sentence_splitting_keeps_closing_quotes_with_the_sentence():
+    chunks = chunk_script(
+        'He said "Hello." Then left! Why?',
+        max_chars=80,
+        target_sentences_per_chunk=1,
+    )
+
+    assert [chunk["text"] for chunk in chunks] == [
+        'He said "Hello."',
+        "Then left!",
+        "Why?",
+    ]
+
+
 def test_paragraph_pause_insertion():
     chunks = chunk_script("Paragraph one.\n\nParagraph two.", max_chars=80)
 
@@ -61,3 +75,43 @@ def test_multiple_short_sentences_can_share_a_chunk():
     chunks = chunk_script("One. Two. Three.", max_chars=11)
 
     assert [chunk["text"] for chunk in chunks] == ["One. Two.", "Three."]
+
+
+def test_target_sentences_per_chunk_limits_sentence_grouping():
+    chunks = chunk_script(
+        "One. Two. Three. Four.",
+        max_chars=200,
+        target_sentences_per_chunk=2,
+    )
+
+    assert [chunk["text"] for chunk in chunks] == [
+        "One. Two.",
+        "Three. Four.",
+    ]
+
+
+def test_target_sentences_per_chunk_does_not_override_soft_split():
+    text = "This sentence keeps going, adding more words, until it absolutely must split."
+
+    chunks = chunk_script(
+        text,
+        max_chars=30,
+        target_sentences_per_chunk=1,
+    )
+
+    assert len(chunks) > 1
+    assert all(chunk["soft_split"] is True for chunk in chunks)
+
+
+def test_vox_style_sentence_boundary_chunking_keeps_each_sentence_independent():
+    chunks = chunk_script(
+        "First sentence. Second sentence! Third question?",
+        max_chars=120,
+        target_sentences_per_chunk=1,
+    )
+
+    assert [chunk["text"] for chunk in chunks] == [
+        "First sentence.",
+        "Second sentence!",
+        "Third question?",
+    ]

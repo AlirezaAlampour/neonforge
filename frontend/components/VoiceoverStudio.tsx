@@ -43,6 +43,7 @@ interface VoiceoverJobStatus {
   total_chunks?: number
   completed_chunks?: number
   error?: string
+  filename?: string
   output_path?: string
   output_url?: string
   created_at?: string
@@ -64,6 +65,19 @@ interface PersistedVoiceoverFormState {
   speed?: number
 }
 
+interface PersistedActiveVoiceoverJob {
+  jobId: string
+  modelId: string
+  modelLabel: string
+  profileId: string
+  profileName: string
+  createdAt: string
+}
+
+interface TrackedVoiceoverJob extends PersistedActiveVoiceoverJob {
+  status: VoiceoverJobStatus | null
+}
+
 const dateFormatter = new Intl.DateTimeFormat('en-US', {
   dateStyle: 'medium',
   timeStyle: 'short',
@@ -73,6 +87,7 @@ const MIN_SPEED = 0.8
 const MAX_SPEED = 1.25
 const SPEED_STEP = 0.05
 const VOICEOVER_FORM_STATE_KEY = 'neonforge-voiceover-form-state-v1'
+const VOICEOVER_ACTIVE_JOBS_KEY = 'neonforge-voiceover-active-jobs-v1'
 
 function clampSpeed(value: number): number {
   if (!Number.isFinite(value)) return 1
@@ -81,6 +96,77 @@ function clampSpeed(value: number): number {
 
 function isOutputFormat(value: unknown): value is 'wav' | 'mp3' {
   return value === 'wav' || value === 'mp3'
+}
+
+function isTerminalJobStatus(status: string | null | undefined): boolean {
+  return status === 'done' || status === 'failed'
+}
+
+function getJobProgressValue(status: VoiceoverJobStatus | null): number {
+  if (!status?.total_chunks) return 0
+  return (100 * (status.completed_chunks ?? 0)) / status.total_chunks
+}
+
+function sortTrackedJobs<T extends { createdAt: string }>(jobs: T[]): T[] {
+  return [...jobs].sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
+}
+
+function upsertTrackedJob(current: TrackedVoiceoverJob[], nextJob: TrackedVoiceoverJob): TrackedVoiceoverJob[] {
+  return sortTrackedJobs([nextJob, ...current.filter((job) => job.jobId !== nextJob.jobId)])
+}
+
+function readPersistedActiveJobs(): PersistedActiveVoiceoverJob[] {
+  if (typeof window === 'undefined') return []
+
+  try {
+    const raw = window.localStorage.getItem(VOICEOVER_ACTIVE_JOBS_KEY)
+    if (!raw) return []
+
+    const payload = JSON.parse(raw)
+    if (!Array.isArray(payload)) return []
+
+    return payload.flatMap((item) => {
+      if (typeof item !== 'object' || item === null) return []
+
+      const candidate = item as Partial<PersistedActiveVoiceoverJob>
+      if (
+        typeof candidate.jobId !== 'string' ||
+        typeof candidate.modelId !== 'string' ||
+        typeof candidate.modelLabel !== 'string' ||
+        typeof candidate.profileId !== 'string' ||
+        typeof candidate.profileName !== 'string' ||
+        typeof candidate.createdAt !== 'string'
+      ) {
+        return []
+      }
+
+      return [
+        {
+          jobId: candidate.jobId,
+          modelId: candidate.modelId,
+          modelLabel: candidate.modelLabel,
+          profileId: candidate.profileId,
+          profileName: candidate.profileName,
+          createdAt: candidate.createdAt,
+        },
+      ]
+    })
+  } catch {
+    return []
+  }
+}
+
+function getTrackedJobFilename(job: TrackedVoiceoverJob): string | null {
+  if (typeof job.status?.filename === 'string' && job.status.filename.trim()) {
+    return job.status.filename
+  }
+
+  if (typeof job.status?.output_path === 'string' && job.status.output_path.trim()) {
+    const parts = job.status.output_path.split('/')
+    return parts[parts.length - 1] || null
+  }
+
+  return null
 }
 
 function extractErrorMessage(payload: unknown, fallback: string): string {
@@ -162,6 +248,7 @@ function uploadVoiceProfile(formData: FormData, onProgress: (value: number) => v
 
 export function VoiceoverStudio() {
   const restoredFormStateRef = useRef<PersistedVoiceoverFormState | null>(null)
+  const activeJobsRef = useRef<TrackedVoiceoverJob[]>([])
   const [profiles, setProfiles] = useState<VoiceProfile[]>([])
   const [models, setModels] = useState<VoiceoverModelSummary[]>([])
   const [recentVoiceovers, setRecentVoiceovers] = useState<RecentVoiceover[]>([])
@@ -186,8 +273,7 @@ export function VoiceoverStudio() {
   const [outputFormat, setOutputFormat] = useState<'wav' | 'mp3'>('wav')
   const [speed, setSpeed] = useState(1)
   const [speedInput, setSpeedInput] = useState('1.00')
-  const [jobId, setJobId] = useState<string | null>(null)
-  const [jobStatus, setJobStatus] = useState<VoiceoverJobStatus | null>(null)
+  const [trackedJobs, setTrackedJobs] = useState<TrackedVoiceoverJob[]>([])
   const [submittingJob, setSubmittingJob] = useState(false)
   const [deletingOutputId, setDeletingOutputId] = useState<string | null>(null)
   const [previewProfileId, setPreviewProfileId] = useState<string | null>(null)
@@ -216,7 +302,9 @@ export function VoiceoverStudio() {
   const refreshModels = useCallback(async () => {
     setModelsLoading(true)
     try {
-      const data = await apiRequest<VoiceoverModelSummary[]>('/api/v1/voiceover/models')
+      const data = await apiRequest<VoiceoverModelSummary[]>('/api/v1/voiceover/models', {
+        cache: 'no-store',
+      })
       setModels(data)
       setGenerationError(null)
       setSelectedModelId((current) => {
@@ -263,6 +351,8 @@ export function VoiceoverStudio() {
       } catch {
         restoredFormStateRef.current = null
       }
+
+      setTrackedJobs(readPersistedActiveJobs().map((job) => ({ ...job, status: null })))
     }
 
     setFormStateRestored(true)
@@ -288,6 +378,17 @@ export function VoiceoverStudio() {
   }, [refreshModels, refreshProfiles, refreshRecentVoiceovers])
 
   useEffect(() => {
+    const handleWindowFocus = () => {
+      void refreshModels()
+    }
+
+    window.addEventListener('focus', handleWindowFocus)
+    return () => {
+      window.removeEventListener('focus', handleWindowFocus)
+    }
+  }, [refreshModels])
+
+  useEffect(() => {
     if (!formStateRestored || typeof window === 'undefined') return
 
     const payload: PersistedVoiceoverFormState = {
@@ -302,23 +403,94 @@ export function VoiceoverStudio() {
   }, [formStateRestored, outputFormat, script, selectedModelId, selectedProfileId, speed])
 
   useEffect(() => {
-    if (!jobId) return
+    if (typeof window === 'undefined') return
+
+    const payload = trackedJobs
+      .filter((job) => !isTerminalJobStatus(job.status?.status))
+      .map(({ status: _status, ...job }) => job)
+
+    if (payload.length === 0) {
+      window.localStorage.removeItem(VOICEOVER_ACTIVE_JOBS_KEY)
+      return
+    }
+
+    window.localStorage.setItem(VOICEOVER_ACTIVE_JOBS_KEY, JSON.stringify(payload))
+  }, [trackedJobs])
+
+  const selectedModel = useMemo(
+    () => models.find((model) => model.model_id === selectedModelId) ?? null,
+    [models, selectedModelId],
+  )
+  const selectedProfile = useMemo(
+    () => profiles.find((profile) => profile.id === selectedProfileId) ?? null,
+    [profiles, selectedProfileId],
+  )
+  const availableModels = useMemo(() => models.filter((model) => model.available), [models])
+  const activeJobs = useMemo(
+    () => trackedJobs.filter((job) => !isTerminalJobStatus(job.status?.status)),
+    [trackedJobs],
+  )
+  const activeJobsKey = useMemo(
+    () => activeJobs.map((job) => job.jobId).sort().join(','),
+    [activeJobs],
+  )
+
+  useEffect(() => {
+    activeJobsRef.current = activeJobs
+  }, [activeJobs])
+
+  useEffect(() => {
+    if (!activeJobsKey) return
 
     let cancelled = false
     let timerId: number | null = null
 
     const poll = async () => {
-      try {
-        const nextStatus = await apiRequest<VoiceoverJobStatus>(`/api/v1/voiceover/jobs/${jobId}`)
-        if (cancelled) return
-        setJobStatus(nextStatus)
-        if (nextStatus.status === 'done' || nextStatus.status === 'failed') {
-          if (timerId !== null) window.clearInterval(timerId)
-        }
-      } catch (error: unknown) {
-        if (cancelled) return
-        setGenerationError(error instanceof Error ? error.message : 'Failed to poll voiceover job')
-        if (timerId !== null) window.clearInterval(timerId)
+      const jobsToPoll = activeJobsRef.current
+      if (jobsToPoll.length === 0) return
+
+      const results = await Promise.allSettled(
+        jobsToPoll.map(async (job) => ({
+          jobId: job.jobId,
+          status: await apiRequest<VoiceoverJobStatus>(`/api/v1/voiceover/jobs/${job.jobId}`),
+        })),
+      )
+
+      if (cancelled) return
+
+      let shouldRefreshRecent = false
+      let pollingError: string | null = null
+      const resultsByJobId = new Map(results.map((result, index) => [jobsToPoll[index].jobId, result]))
+
+      setTrackedJobs((current) =>
+        current.flatMap((job) => {
+          const result = resultsByJobId.get(job.jobId)
+          if (!result) return [job]
+
+          if (result.status === 'fulfilled') {
+            if (result.value.status.status === 'done' && job.status?.status !== 'done') {
+              shouldRefreshRecent = true
+            }
+            return [{ ...job, status: result.value.status }]
+          }
+
+          const message = result.reason instanceof Error ? result.reason.message : 'Failed to poll voiceover job'
+          if (message === 'Voiceover job not found') {
+            return []
+          }
+
+          if (!pollingError) {
+            pollingError = message
+          }
+          return [job]
+        }),
+      )
+
+      if (pollingError) {
+        setGenerationError(pollingError)
+      }
+      if (shouldRefreshRecent) {
+        void refreshRecentVoiceovers()
       }
     }
 
@@ -331,30 +503,18 @@ export function VoiceoverStudio() {
       cancelled = true
       if (timerId !== null) window.clearInterval(timerId)
     }
-  }, [jobId])
+  }, [activeJobsKey, refreshRecentVoiceovers])
 
-  useEffect(() => {
-    if (jobStatus?.status !== 'done') return
-    void refreshRecentVoiceovers()
-  }, [jobStatus?.status, refreshRecentVoiceovers])
-
-  const selectedModel = useMemo(
-    () => models.find((model) => model.model_id === selectedModelId) ?? null,
-    [models, selectedModelId],
+  const chunkEstimateSize = selectedModelId === 'voxcpm2' ? 120 : 150
+  const roughChunkEstimate = useMemo(
+    () => (script.length === 0 ? 0 : Math.ceil(script.length / chunkEstimateSize)),
+    [chunkEstimateSize, script.length],
   )
-  const availableModels = useMemo(() => models.filter((model) => model.available), [models])
-
-  const roughChunkEstimate = useMemo(() => (script.length === 0 ? 0 : Math.ceil(script.length / 150)), [script.length])
   const canGenerate =
     !!selectedProfileId &&
     !!script.trim() &&
     !!selectedModel?.available &&
     !submittingJob
-
-  const progressValue = useMemo(() => {
-    if (!jobStatus?.total_chunks) return 0
-    return (100 * (jobStatus.completed_chunks ?? 0)) / jobStatus.total_chunks
-  }, [jobStatus])
 
   const updateSpeed = (nextValue: number) => {
     const normalized = Number(clampSpeed(nextValue).toFixed(2))
@@ -419,7 +579,6 @@ export function VoiceoverStudio() {
 
     setSubmittingJob(true)
     setGenerationError(null)
-    setJobStatus(null)
     setSpeed(requestedSpeed)
     setSpeedInput(requestedSpeed.toFixed(2))
 
@@ -436,8 +595,17 @@ export function VoiceoverStudio() {
         }),
       })
 
-      setJobId(response.job_id)
-      setJobStatus({ status: response.status, completed_chunks: 0, total_chunks: 0 })
+      setTrackedJobs((current) =>
+        upsertTrackedJob(current, {
+          jobId: response.job_id,
+          modelId: selectedModel.model_id,
+          modelLabel: selectedModel.display_name,
+          profileId: selectedProfileId,
+          profileName: selectedProfile?.name ?? 'Voice',
+          createdAt: new Date().toISOString(),
+          status: { status: response.status, completed_chunks: 0, total_chunks: 0 },
+        }),
+      )
     } catch (error: unknown) {
       setGenerationError(error instanceof Error ? error.message : 'Failed to start voiceover job')
     } finally {
@@ -455,11 +623,8 @@ export function VoiceoverStudio() {
       await apiRequest<{ deleted: boolean }>(`/api/v1/voiceover/output/${item.job_id}`, {
         method: 'DELETE',
       })
+      setTrackedJobs((current) => current.filter((job) => job.jobId !== item.job_id))
       setRecentVoiceovers((current) => current.filter((voiceover) => voiceover.job_id !== item.job_id))
-      if (jobId === item.job_id) {
-        setJobId(null)
-        setJobStatus(null)
-      }
     } catch (error: unknown) {
       setRecentError(error instanceof Error ? error.message : 'Failed to delete voiceover output')
     } finally {
@@ -759,44 +924,82 @@ export function VoiceoverStudio() {
               </div>
             )}
 
-            {jobStatus && (
-              <div className="space-y-4 rounded-xl bg-background/35 p-4 ring-1 ring-border/40">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <p className="text-sm font-semibold">Current Job</p>
-                    <p className="mt-1 text-xs text-muted-foreground">Status: {jobStatus.status}</p>
-                  </div>
-                  {jobId && <p className="text-xs font-mono text-muted-foreground">{jobId}</p>}
+            <div className="space-y-4 rounded-xl bg-background/35 p-4 ring-1 ring-border/40">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold">Job Activity</p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Active jobs keep polling after a refresh on this browser. Finished outputs also appear below in Recent Voiceovers.
+                  </p>
                 </div>
-
-                <div className="space-y-2">
-                  <Progress value={progressValue} indeterminate={jobStatus.status === 'pending' || jobStatus.status === 'stitching'} />
-                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-                    <span>
-                      {jobStatus.completed_chunks ?? 0} / {jobStatus.total_chunks ?? 0} chunks complete
-                    </span>
-                    {jobStatus.status === 'stitching' && <span>Finalizing audio...</span>}
-                  </div>
-                </div>
-
-                {jobStatus.status === 'failed' && jobStatus.error && (
-                  <p className="text-sm text-red-300">{jobStatus.error}</p>
-                )}
-
-                {jobStatus.status === 'done' && jobStatus.output_url && (
-                  <div className="space-y-3">
-                    <audio controls className="w-full" src={jobStatus.output_url}>
-                      Your browser does not support audio playback.
-                    </audio>
-                    <a href={jobStatus.output_url} download className="inline-flex">
-                      <Button type="button" variant="outline">
-                        Download Audio
-                      </Button>
-                    </a>
-                  </div>
-                )}
+                <p className="text-xs text-muted-foreground">
+                  {activeJobs.length} active, {trackedJobs.length} tracked
+                </p>
               </div>
-            )}
+
+              {trackedJobs.length > 0 ? (
+                <div className="space-y-3">
+                  {trackedJobs.map((job) => {
+                    const currentStatus = job.status
+                    const progressValue = getJobProgressValue(currentStatus)
+                    const jobFilename = getTrackedJobFilename(job)
+                    const isIndeterminate =
+                      !currentStatus || currentStatus.status === 'pending' || currentStatus.status === 'stitching'
+
+                    return (
+                      <div key={job.jobId} className="rounded-xl bg-background/45 p-4 ring-1 ring-border/35">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold">{job.modelLabel}</p>
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              {job.profileName} • Started {dateFormatter.format(new Date(job.createdAt))}
+                            </p>
+                            <p className="mt-1 text-xs font-mono text-muted-foreground">{job.jobId}</p>
+                            {jobFilename && <p className="mt-2 text-xs text-muted-foreground">Output: {jobFilename}</p>}
+                          </div>
+                          <div className="rounded-full border border-border/50 px-2.5 py-1 text-xs font-medium text-muted-foreground">
+                            {currentStatus?.status ?? 'restoring'}
+                          </div>
+                        </div>
+
+                        <div className="mt-4 space-y-2">
+                          <Progress value={progressValue} indeterminate={isIndeterminate} />
+                          <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+                            <span>
+                              {currentStatus?.completed_chunks ?? 0} / {currentStatus?.total_chunks ?? 0} chunks complete
+                            </span>
+                            {currentStatus?.status === 'stitching' && <span>Finalizing audio...</span>}
+                            {!currentStatus && <span>Restoring job state...</span>}
+                          </div>
+                        </div>
+
+                        {currentStatus?.status === 'failed' && currentStatus.error && (
+                          <p className="mt-3 text-sm text-red-300">{currentStatus.error}</p>
+                        )}
+
+                        {currentStatus?.status === 'done' && currentStatus.output_url && (
+                          <div className="mt-4 space-y-3">
+                            <audio controls className="w-full" src={`${currentStatus.output_url}?v=${encodeURIComponent(currentStatus.created_at ?? job.createdAt)}`}>
+                              Your browser does not support audio playback.
+                            </audio>
+                            <a href={currentStatus.output_url} download className="inline-flex">
+                              <Button type="button" variant="outline" size="sm" className="gap-2">
+                                <Download className="h-3.5 w-3.5" />
+                                Download Audio
+                              </Button>
+                            </a>
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : (
+                <div className="rounded-xl border border-dashed border-border/50 p-6 text-center text-sm text-muted-foreground">
+                  Start a voiceover to track its progress here, even if you refresh the page.
+                </div>
+              )}
+            </div>
           </CardContent>
         )}
       </Card>

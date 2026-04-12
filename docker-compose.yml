@@ -202,22 +202,37 @@ services:
       - ai-net
 
   fish_speech:
-    build:
-      context: ./services/fish_speech
-      dockerfile: Dockerfile
+    image: dgx-ai-stack-fish_speech
     container_name: ai-fish-speech
     restart: unless-stopped
     <<: *common-gpu
     environment:
       <<: *common-env
-      FISH_SPEECH_MODEL_PATH: ${FISH_SPEECH_MODEL_PATH:-/models/fish_speech/s2-pro}
-      FISH_SPEECH_DECODER_PATH: ${FISH_SPEECH_DECODER_PATH:-/models/fish_speech/s2-pro/codec.pth}
-      FISH_SPEECH_DECODER_CONFIG_NAME: ${FISH_SPEECH_DECODER_CONFIG_NAME:-modded_dac_vq}
     volumes: *common-volumes
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/v1/health')"]
       <<: *healthcheck-defaults
-      start_period: 900s
+      start_period: 180s
+    networks:
+      - ai-net
+
+  voxcpm2:
+    build:
+      context: ./services/voxcpm2
+      dockerfile: Dockerfile
+    container_name: ai-voxcpm2
+    restart: unless-stopped
+    <<: *common-gpu
+    environment:
+      <<: *common-env
+      VOXCPM2_MODEL_PATH: ${VOXCPM2_MODEL_PATH:-/models/voxcpm2/openbmb/VoxCPM2}
+    volumes: *common-volumes
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/v1/health')"]
+      interval: 30s
+      timeout: 60s
+      retries: 3
+      start_period: 180s
     networks:
       - ai-net
 
