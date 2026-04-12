@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import audioop
 import os
 import re
 import shutil
@@ -18,9 +19,17 @@ from .profiles import get_profile, host_path_to_container
 HOST_OUTPUTS_ROOT = Path("/srv/ai/outputs")
 CONTAINER_OUTPUTS_ROOT = Path(os.getenv("OUTPUTS_ROOT", "/outputs"))
 VOICEOVER_RELATIVE_DIR = Path("voiceover")
+FISH_MODEL_ID = "fish_speech"
 VOX_MODEL_ID = "voxcpm2"
-VOX_MAX_CHARS = 120
-VOX_TARGET_SENTENCES_PER_CHUNK = 1
+VOX_MAX_CHARS = 220
+VOX_TARGET_SENTENCES_PER_CHUNK = 2
+VOX_SILENCE_WINDOW_MS = 10
+VOX_HEAD_GUARD_MS = 20
+VOX_TAIL_GUARD_MS = 60
+VOX_EDGE_FADE_MS = 8
+VOX_CROSSFADE_MS = 12
+VOX_MIN_CLIP_MS = 150
+VOX_SILENCE_THRESHOLD_RATIO = 0.008
 
 
 def _container_output_dir(job_id: str) -> Path:
@@ -92,6 +101,208 @@ def _write_silence_wav(path: Path, *, channels: int, sample_width: int, sample_r
         wav_file.setsampwidth(sample_width)
         wav_file.setframerate(sample_rate)
         wav_file.writeframes(silence_frame * frame_count)
+
+
+def _write_wav_frames(path: Path, *, channels: int, sample_width: int, sample_rate: int, frames: bytes) -> None:
+    with wave.open(str(path), "wb") as wav_file:
+        wav_file.setnchannels(channels)
+        wav_file.setsampwidth(sample_width)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(frames)
+
+
+def _read_wav_frames(path: Path) -> tuple[tuple[int, int, int], bytes]:
+    with wave.open(str(path), "rb") as wav_file:
+        params = (wav_file.getnchannels(), wav_file.getsampwidth(), wav_file.getframerate())
+        frames = wav_file.readframes(wav_file.getnframes())
+    return params, frames
+
+
+def _pcm_frame_width(channels: int, sample_width: int) -> int:
+    return channels * sample_width
+
+
+def _pcm_frames_for_ms(sample_rate: int, duration_ms: int) -> int:
+    if duration_ms <= 0:
+        return 0
+    return max(1, int(round(sample_rate * (duration_ms / 1000.0))))
+
+
+def _silence_pcm(channels: int, sample_width: int, sample_rate: int, duration_ms: int) -> bytes:
+    frame_count = int(sample_rate * (duration_ms / 1000.0))
+    silence_frame = b"\x00" * sample_width * channels
+    return silence_frame * frame_count
+
+
+def _vox_silence_threshold(sample_width: int) -> int:
+    max_amplitude = max(1, (1 << (8 * sample_width - 1)) - 1)
+    return max(64, int(max_amplitude * VOX_SILENCE_THRESHOLD_RATIO))
+
+
+def _vox_find_speech_bounds(frames: bytes, *, channels: int, sample_width: int, sample_rate: int) -> tuple[int, int]:
+    frame_width = _pcm_frame_width(channels, sample_width)
+    total_frames = len(frames) // frame_width
+    if total_frames <= 0:
+        return 0, 0
+
+    window_frames = min(total_frames, _pcm_frames_for_ms(sample_rate, VOX_SILENCE_WINDOW_MS))
+    threshold = _vox_silence_threshold(sample_width)
+
+    first_speech_frame: int | None = None
+    for start_frame in range(0, total_frames, window_frames):
+        end_frame = min(total_frames, start_frame + window_frames)
+        fragment = frames[start_frame * frame_width:end_frame * frame_width]
+        if audioop.rms(fragment, sample_width) > threshold:
+            first_speech_frame = start_frame
+            break
+
+    if first_speech_frame is None:
+        return 0, total_frames
+
+    last_speech_frame = total_frames
+    for start_frame in range(max(0, total_frames - window_frames), -1, -window_frames):
+        end_frame = min(total_frames, start_frame + window_frames)
+        fragment = frames[start_frame * frame_width:end_frame * frame_width]
+        if audioop.rms(fragment, sample_width) > threshold:
+            last_speech_frame = end_frame
+            break
+
+    start_frame = max(0, first_speech_frame - _pcm_frames_for_ms(sample_rate, VOX_HEAD_GUARD_MS))
+    end_frame = min(total_frames, last_speech_frame + _pcm_frames_for_ms(sample_rate, VOX_TAIL_GUARD_MS))
+
+    if end_frame - start_frame < _pcm_frames_for_ms(sample_rate, VOX_MIN_CLIP_MS):
+        return 0, total_frames
+
+    return start_frame, end_frame
+
+
+def _apply_edge_fade(frames: bytes, *, channels: int, sample_width: int, sample_rate: int) -> bytes:
+    frame_width = _pcm_frame_width(channels, sample_width)
+    total_frames = len(frames) // frame_width
+    fade_frames = min(total_frames // 2, _pcm_frames_for_ms(sample_rate, VOX_EDGE_FADE_MS))
+    if fade_frames <= 0:
+        return frames
+
+    output = bytearray(len(frames))
+    for frame_index in range(total_frames):
+        start = frame_index * frame_width
+        end = start + frame_width
+        frame = frames[start:end]
+
+        gain = 1.0
+        if frame_index < fade_frames:
+            gain = min(gain, (frame_index + 1) / fade_frames)
+
+        frames_to_end = total_frames - frame_index
+        if frames_to_end <= fade_frames:
+            gain = min(gain, frames_to_end / fade_frames)
+
+        if gain < 0.999:
+            frame = audioop.mul(frame, sample_width, gain)
+
+        output[start:end] = frame
+
+    return bytes(output)
+
+
+def _append_crossfaded(assembled: bytearray, next_frames: bytes, *, channels: int, sample_width: int, sample_rate: int) -> None:
+    frame_width = _pcm_frame_width(channels, sample_width)
+    if not assembled or not next_frames:
+        assembled.extend(next_frames)
+        return
+
+    overlap_frames = min(
+        _pcm_frames_for_ms(sample_rate, VOX_CROSSFADE_MS),
+        len(assembled) // frame_width,
+        len(next_frames) // frame_width,
+    )
+    if overlap_frames <= 0:
+        assembled.extend(next_frames)
+        return
+
+    overlap_bytes = overlap_frames * frame_width
+    left_overlap = bytes(assembled[-overlap_bytes:])
+    right_overlap = next_frames[:overlap_bytes]
+    mixed_overlap = bytearray(overlap_bytes)
+
+    for frame_index in range(overlap_frames):
+        start = frame_index * frame_width
+        end = start + frame_width
+        left_gain = (overlap_frames - frame_index) / (overlap_frames + 1)
+        right_gain = (frame_index + 1) / (overlap_frames + 1)
+        left_frame = audioop.mul(left_overlap[start:end], sample_width, left_gain)
+        right_frame = audioop.mul(right_overlap[start:end], sample_width, right_gain)
+        mixed_overlap[start:end] = audioop.add(left_frame, right_frame, sample_width)
+
+    assembled[-overlap_bytes:] = mixed_overlap
+    assembled.extend(next_frames[overlap_bytes:])
+
+
+def _prepare_vox_chunk(path: Path, expected_params: tuple[int, int, int]) -> bytes:
+    params, frames = _read_wav_frames(path)
+    if params != expected_params:
+        raise RuntimeError("Chunk WAV parameters do not match and cannot be merged safely")
+
+    channels, sample_width, sample_rate = params
+    start_frame, end_frame = _vox_find_speech_bounds(
+        frames,
+        channels=channels,
+        sample_width=sample_width,
+        sample_rate=sample_rate,
+    )
+    frame_width = _pcm_frame_width(channels, sample_width)
+    trimmed_frames = frames[start_frame * frame_width:end_frame * frame_width] or frames
+    return _apply_edge_fade(
+        trimmed_frames,
+        channels=channels,
+        sample_width=sample_width,
+        sample_rate=sample_rate,
+    )
+
+
+def _stitch_vox_wavs(chunks: list[dict], rendered_chunks: list[Path], destination: Path) -> None:
+    if not rendered_chunks:
+        raise RuntimeError("No chunk audio available to stitch")
+
+    channels, sample_width, sample_rate = _read_wave_params(rendered_chunks[0])
+    expected_params = (channels, sample_width, sample_rate)
+    rendered_iter = iter(rendered_chunks)
+    assembled = bytearray()
+    previous_was_audio = False
+
+    for chunk in chunks:
+        if chunk.get("is_pause"):
+            assembled.extend(
+                _silence_pcm(
+                    channels=channels,
+                    sample_width=sample_width,
+                    sample_rate=sample_rate,
+                    duration_ms=int(chunk.get("pause_ms", 0)),
+                )
+            )
+            previous_was_audio = False
+            continue
+
+        prepared_frames = _prepare_vox_chunk(next(rendered_iter), expected_params)
+        if previous_was_audio:
+            _append_crossfaded(
+                assembled,
+                prepared_frames,
+                channels=channels,
+                sample_width=sample_width,
+                sample_rate=sample_rate,
+            )
+        else:
+            assembled.extend(prepared_frames)
+        previous_was_audio = True
+
+    _write_wav_frames(
+        destination,
+        channels=channels,
+        sample_width=sample_width,
+        sample_rate=sample_rate,
+        frames=bytes(assembled),
+    )
 
 
 def _merge_wavs_python(paths: list[Path], destination: Path) -> None:
@@ -238,6 +449,8 @@ async def run_voiceover_job(job_id, profile_id, script, model_id, output_format,
         rendered_chunk_paths: list[Path] = []
         reference_audio_path = profile.reference_audio_path
         model_options = {"speed": speed}
+        if model_id == FISH_MODEL_ID:
+            model_options["voice_profile_id"] = profile.id
 
         for chunk_index, chunk in enumerate(chunks, start=1):
             if chunk.get("is_pause"):
@@ -275,16 +488,19 @@ async def run_voiceover_job(job_id, profile_id, script, model_id, output_format,
 
         await _update_job(redis_client, job_key, status="stitching")
 
-        sequence_files = _build_sequence_files(chunks, rendered_chunk_paths, work_dir)
         merged_path = work_dir / "merged.wav"
         output_basename = _build_output_basename(model_id, profile.name)
         final_wav_path = work_dir / _build_output_filename(output_basename, "wav")
         final_mp3_path = work_dir / _build_output_filename(output_basename, "mp3")
 
-        stitched_with_sox = await asyncio.to_thread(_stitch_with_sox, sequence_files, merged_path, final_wav_path)
-        if not stitched_with_sox:
-            await asyncio.to_thread(_merge_wavs_python, sequence_files, merged_path)
-            shutil.copyfile(merged_path, final_wav_path)
+        if model_id == VOX_MODEL_ID:
+            await asyncio.to_thread(_stitch_vox_wavs, chunks, rendered_chunk_paths, final_wav_path)
+        else:
+            sequence_files = _build_sequence_files(chunks, rendered_chunk_paths, work_dir)
+            stitched_with_sox = await asyncio.to_thread(_stitch_with_sox, sequence_files, merged_path, final_wav_path)
+            if not stitched_with_sox:
+                await asyncio.to_thread(_merge_wavs_python, sequence_files, merged_path)
+                shutil.copyfile(merged_path, final_wav_path)
 
         final_output_path = final_wav_path
         if str(output_format).lower() == "mp3":

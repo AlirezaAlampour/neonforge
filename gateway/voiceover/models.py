@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 
-from .profiles import host_path_to_container
+from .profiles import get_profile, host_path_to_container, update_profile_reference_transcript
 
 HOST_OUTPUTS_ROOT = Path("/srv/ai/outputs")
 CONTAINER_OUTPUTS_ROOT = Path(os.getenv("OUTPUTS_ROOT", "/outputs"))
@@ -200,7 +200,41 @@ class FishSpeechModel(_HTTPVoiceoverModel):
     def availability_error(self) -> str:
         return "Fish Speech is not enabled or reachable"
 
-    def _transcribe_reference_audio(self, audio_name: str, audio_bytes: bytes, media_type: str) -> str:
+    def _cache_reference_text(self, cache_key: str, text: str, profile_id: str | None) -> str:
+        cleaned_text = text.strip()
+        if not cleaned_text:
+            raise ModelUnavailableError("Fish Speech could not transcribe the reference audio")
+
+        self._reference_text_cache[cache_key] = cleaned_text
+        if profile_id:
+            self._reference_text_cache[f"profile:{profile_id}"] = cleaned_text
+            try:
+                update_profile_reference_transcript(profile_id, cleaned_text)
+            except Exception:
+                pass
+
+        return cleaned_text
+
+    def _transcribe_reference_audio(
+        self,
+        audio_name: str,
+        audio_bytes: bytes,
+        media_type: str,
+        profile_id: str | None = None,
+    ) -> str:
+        profile_cache_key = f"profile:{profile_id}" if profile_id else None
+        if profile_cache_key:
+            cached = self._reference_text_cache.get(profile_cache_key)
+            if cached:
+                return cached
+
+            profile = get_profile(profile_id)
+            if profile and profile.reference_transcript:
+                cleaned_text = profile.reference_transcript.strip()
+                if cleaned_text:
+                    self._reference_text_cache[profile_cache_key] = cleaned_text
+                    return cleaned_text
+
         cache_key = f"{audio_name}:{len(audio_bytes)}"
         cached = self._reference_text_cache.get(cache_key)
         if cached:
@@ -218,11 +252,7 @@ class FishSpeechModel(_HTTPVoiceoverModel):
         except Exception as exc:
             raise ModelUnavailableError("Fish Speech could not transcribe the reference audio") from exc
 
-        if not text:
-            raise ModelUnavailableError("Fish Speech could not transcribe the reference audio")
-
-        self._reference_text_cache[cache_key] = text
-        return text
+        return self._cache_reference_text(cache_key, text, profile_id)
 
     def synthesize(self, text: str, reference_audio_path: str | None, options: dict[str, Any]) -> bytes:
         if not self.is_available():
@@ -234,7 +264,8 @@ class FishSpeechModel(_HTTPVoiceoverModel):
             audio_bytes = container_audio_path.read_bytes()
             audio_name = container_audio_path.name
             media_type = mimetypes.guess_type(audio_name)[0] or "application/octet-stream"
-            reference_text = self._transcribe_reference_audio(audio_name, audio_bytes, media_type)
+            profile_id = str(options.get("voice_profile_id") or "").strip() or None
+            reference_text = self._transcribe_reference_audio(audio_name, audio_bytes, media_type, profile_id)
             references.append(
                 {
                     "audio": base64.b64encode(audio_bytes).decode("utf-8"),

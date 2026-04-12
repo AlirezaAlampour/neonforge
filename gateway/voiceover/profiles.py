@@ -26,6 +26,7 @@ class VoiceProfile:
     reference_audio_path: str
     created_at: str
     notes: str | None = None
+    reference_transcript: str | None = None
 
 
 def _now_iso() -> str:
@@ -56,6 +57,9 @@ def _deserialize_profile(payload: dict) -> VoiceProfile:
         reference_audio_path=str(payload["reference_audio_path"]),
         created_at=str(payload["created_at"]),
         notes=str(payload["notes"]) if payload.get("notes") not in (None, "") else None,
+        reference_transcript=str(payload["reference_transcript"])
+        if payload.get("reference_transcript") not in (None, "")
+        else None,
     )
 
 
@@ -150,3 +154,24 @@ def get_profile(profile_id: str) -> VoiceProfile | None:
             if profile.id == profile_id:
                 return profile
     return None
+
+
+def update_profile_reference_transcript(profile_id: str, transcript: str) -> VoiceProfile | None:
+    cleaned_transcript = transcript.strip()
+    if not cleaned_transcript:
+        raise ValueError("Reference transcript must not be empty")
+
+    with _locked_registry(exclusive=True) as (handle, profiles):
+        updated_profile: VoiceProfile | None = None
+        for profile in profiles:
+            if profile.id != profile_id:
+                continue
+            profile.reference_transcript = cleaned_transcript
+            updated_profile = profile
+            break
+
+        if updated_profile is None:
+            return None
+
+        _write_profiles(handle, profiles)
+        return updated_profile
