@@ -75,7 +75,7 @@ def test_fish_reference_transcript_is_persisted_and_reused(monkeypatch, tmp_path
     profile = save_profile(
         name="Narrator",
         audio_bytes=reference_wav.read_bytes(),
-        filename="reference.wav",
+        stored_filename="reference.wav",
         notes="",
     )
 

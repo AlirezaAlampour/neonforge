@@ -19,6 +19,15 @@ The legacy TTS flow is useful for shorter direct generations. Voiceover Studio a
 7. Track active jobs in the page UI.
 8. Play, download, or delete completed outputs from Recent Voiceovers.
 
+## Reference audio ingest
+
+- voice profile uploads accept `.wav`, `.mp3`, and `.m4a`
+- accepted uploads are decoded once with `ffmpeg` and stored as a PCM WAV master
+- new saved voice profiles always persist as `.wav`
+- ingest does **not** force `24 kHz` mono; keep a high-quality master reference and do model-specific conversion later when required
+- clips longer than 30 seconds are rejected when duration tools are available
+- older already-saved MP3/WAV reference files should remain compatible
+
 ## Current backends
 
 ### f5tts
@@ -42,6 +51,7 @@ The legacy TTS flow is useful for shorter direct generations. Voiceover Studio a
 - sentence-boundary-first chunking
 - paragraph-aware pause preservation
 - model-specific chunk tuning where needed
+- voice profile preview/download from the stored normalized WAV master
 - speed control in the Voiceover Studio UI
 - recent outputs list with playback, download, and delete
 - active job restore after refresh/navigation

@@ -1,31 +1,45 @@
-# DGX Spark AI Stack
+# NeonForge
 
-A production-grade local AI video pipeline running on a single NVIDIA DGX Spark (GB10, 128 GB UMA, ARM64, CUDA 13.0).
+A production-grade local AI video and voice stack for a single NVIDIA DGX Spark (GB10, 128 GB UMA, ARM64, CUDA 13.0).
 
 ## What This Is
 
-This stack runs five AI inference services behind a single API gateway, with job queuing, memory-aware scheduling, and automatic idle management. Everything runs in Docker containers on one machine with one GPU.
+NeonForge combines a Next.js frontend, a FastAPI gateway, Redis/supervisor orchestration, and several local AI runtimes for voice, video, and workflow-driven generation on one machine with one GPU.
 
-**Services:**
+## Project Docs
 
-| Service | Purpose | Tier | GPU Weight |
-|---------|---------|------|------------|
-| **Faster-Whisper** | Audio transcription (STT) | Always-on | Light (~1-2 GB) |
-| **F5-TTS** | Text-to-speech synthesis | Warm | Medium (~2-3 GB) |
-| **LivePortrait** | Face animation from image + driving video | Warm | Medium (~2-4 GB) |
-| **Lip-sync** | Sync lip movements to audio (video-retalking) | Warm | Medium (~3-5 GB) |
-| **Wan 2.1** | Text-to-video generation | Lazy-start singleton | Heavy (~8-40 GB) |
+- [CURRENT_STATE.md](CURRENT_STATE.md) for the fastest current product summary.
+- [ARCHITECTURE.md](ARCHITECTURE.md) for service boundaries, ports, and runtime wiring.
+- [VOICEOVER_STUDIO.md](VOICEOVER_STUDIO.md) for the isolated long-form narration path.
+- [ACCEPTANCE_TESTS.md](ACCEPTANCE_TESTS.md) for validation and smoke-test workflows.
 
-**Infrastructure:**
+**AI and media runtimes:**
+
+| Runtime | Purpose | Notes |
+|---------|---------|-------|
+| **Faster-Whisper** | Audio transcription (STT) | Always-on baseline service; also used to transcribe reference audio for Fish Speech |
+| **F5-TTS** | Text-to-speech and voiceover synthesis | Most reliable local voiceover backend |
+| **Fish Speech 1.5** | Higher-quality local voiceover synthesis | Optional; enabled with `FISH_SPEECH_ENABLED=true` |
+| **VoxCPM2** | Experimental local voiceover synthesis | Optional; enabled with `VOXCPM2_ENABLED=true` |
+| **LivePortrait** | Face animation from image + driving video | Warm GPU runtime |
+| **Lip-sync** | Audio-driven mouth animation | Warm GPU runtime |
+| **Wan 2.1** | Text-to-video generation | Lazy-start singleton |
+| **ComfyUI** | Template-driven Character Swap and related workflows | Optional Compose profile |
+| **Wan 2.2 Animate UI** | Separate Gradio UI for Wan experimentation | Optional sidecar UI |
+
+**Core infrastructure:**
 
 | Component | Purpose |
 |-----------|---------|
-| **Gateway** | Public API entry point, job queue, memory gating, request routing |
+| **Frontend** | Director's Console web UI on `:3000` |
+| **Gateway** | Public API entry point, request routing, voiceover jobs, ComfyUI management, memory gating |
 | **Supervisor** | Internal sidecar with Docker socket, starts/stops lazy containers |
 | **Redis** | Job state, activity timestamps, service coordination |
 | **Idle Manager** | Host-side systemd service, stops idle containers, thermal monitoring |
 
 ## Architecture
+
+This diagram focuses on the core gateway/supervisor path. The frontend, optional voiceover runtimes, ComfyUI, and the `wan-ui` sidecar are omitted for readability.
 
 ```
                     Internet / LAN
@@ -63,13 +77,16 @@ This stack runs five AI inference services behind a single API gateway, with job
 ### Service Tiers
 
 **Always-on** -- Container and model always running. Instant response.
-- Redis, Gateway, Supervisor, Whisper
+- Frontend, Redis, Gateway, Supervisor, Whisper
 
-**Warm** -- Container always running, model loaded on first request, destroyed after idle timeout (default 30 min). Healthz responds immediately; first inference triggers model load.
-- F5-TTS, LivePortrait, Lip-sync
+**Warm / on-demand model services** -- Containers are typically running, and some runtimes load on first request or destroy models after idle. Healthz responds immediately even when inference will still trigger heavier setup work.
+- F5-TTS, Fish Speech, VoxCPM2, LivePortrait, Lip-sync
 
 **Lazy-start singleton** -- Container stopped by default. Gateway asks Supervisor to start it on demand. Stopped by idle_manager after 5 min of inactivity. Only one instance ever runs.
 - Wan 2.1
+
+**Optional sidecars** -- Started only when you enable the relevant workflow or UI.
+- ComfyUI, Wan 2.2 Animate UI
 
 ### Key Design Decisions
 
@@ -83,28 +100,34 @@ This stack runs five AI inference services behind a single API gateway, with job
 
 5. **video-retalking over MuseTalk.** See [COMPATIBILITY_NOTES.md](COMPATIBILITY_NOTES.md) for the full comparison. TL;DR: video-retalking has proven quality, subprocess isolation, and lower memory. MuseTalk has no ARM64 support and unstable API.
 
+6. **Voiceover Studio stays isolated.** The older Voice Studio / direct TTS flow remains separate from the newer long-form Voiceover Studio path. Voice profile uploads accept WAV, MP3, and M4A, decode once with `ffmpeg`, and store a PCM WAV master so downstream runtimes receive canonical reference audio without extra lossy transcodes.
+
 ## Quick Start
 
 ```bash
 # 1. Clone and configure
-cd ~/dgx-ai-stack
+cd ~/neonforge
 cp .env.example .env
 # Edit .env if needed (defaults are conservative and production-safe)
 
 # 2. Create host directories
-sudo mkdir -p /srv/ai/{models,cache/hf,outputs,logs}
+sudo mkdir -p /srv/ai/{models,cache/hf,outputs,assets,logs}
 sudo chown -R $USER:$USER /srv/ai
 
 # 3. Start always-on tier
-docker compose up -d redis supervisor gateway whisper
+docker compose up -d redis supervisor gateway frontend whisper
 
 # 4. Start warm tier
 docker compose up -d f5tts liveportrait lipsync
 
-# 5. Verify
+# 5. (Optional) Start additional runtimes if configured
+# Fish Speech uses a compose image reference rather than a local Dockerfile.
+docker compose up -d fish_speech voxcpm2
+
+# 6. Verify
 python3 scripts/verify_dgx.py --smoke
 
-# 6. (Optional) Install idle manager systemd units
+# 7. (Optional) Install idle manager systemd units
 sudo cp systemd/ai-idle-manager.service /etc/systemd/system/
 sudo cp systemd/ai-idle-manager.timer /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -126,6 +149,16 @@ All requests go through `http://localhost:8080`.
 |--------|----------|---------|------|
 | POST | `/api/v1/whisper/transcribe` | Whisper | Light |
 | POST | `/api/v1/tts/synthesize` | F5-TTS | Medium |
+| POST | `/api/v1/voiceover/profiles` | Create reusable voice profile from WAV/MP3/M4A input | -- |
+| GET | `/api/v1/voiceover/profiles` | List saved voice profiles | -- |
+| DELETE | `/api/v1/voiceover/profiles/{profile_id}` | Delete saved voice profile | -- |
+| GET | `/api/v1/voiceover/profiles/{profile_id}/sample` | Download stored reference sample | -- |
+| GET | `/api/v1/voiceover/models` | List available voiceover backends | -- |
+| POST | `/api/v1/voiceover/jobs` | Queue long-form voiceover render | Medium |
+| GET | `/api/v1/voiceover/jobs/{job_id}` | Voiceover job status lookup | -- |
+| GET | `/api/v1/voiceover/outputs` | List recent voiceover outputs | -- |
+| GET | `/api/v1/voiceover/output/{job_id}` | Download finished voiceover output | -- |
+| DELETE | `/api/v1/voiceover/output/{job_id}` | Delete finished voiceover output | -- |
 | POST | `/api/v1/liveportrait/animate` | LivePortrait | Medium |
 | POST | `/api/v1/lipsync/sync` | Lip-sync | Medium |
 | POST | `/api/v1/wan21/generate` | Wan 2.1 | Heavy |
@@ -143,6 +176,19 @@ All requests go through `http://localhost:8080`.
 | GET | `/memory` | UMA memory status + thresholds | -- |
 | GET | `/services/status` | All service health | -- |
 | GET | `/jobs/{job_id}` | Job status lookup | -- |
+
+## Voiceover Studio
+
+Voiceover Studio is the isolated long-form narration path in NeonForge. It intentionally does not replace the older direct TTS flow in Voice Studio.
+
+- Voice profiles accept `.wav`, `.mp3`, and `.m4a` uploads.
+- Accepted profile uploads are normalized once with `ffmpeg` and stored as a PCM WAV master.
+- New saved reference profiles always persist as `.wav`; older saved MP3/WAV profiles remain compatible.
+- Ingest keeps a high-quality master reference instead of forcing `24 kHz` mono up front. Any runtime-specific conversion should happen in the model call path.
+- Reference clips longer than 30 seconds are rejected when duration tools are available.
+- The UI tracks active jobs across refreshes and keeps a recent-outputs list for playback, download, and cleanup.
+
+See [VOICEOVER_STUDIO.md](VOICEOVER_STUDIO.md) for the product-level notes and [gateway/voiceover/](gateway/voiceover) for the implementation.
 
 ## ComfyUI Templates
 
@@ -195,14 +241,23 @@ Each service exposes:
 ## Directory Layout
 
 ```
-dgx-ai-stack/
+neonforge/
   docker-compose.yml          # All services, volumes, networks
   .env.example                # Configuration template
+  ARCHITECTURE.md             # Service boundaries, ports, and mounts
   ACCEPTANCE_TESTS.md         # Step-by-step validation + benchmark matrix
   COMPATIBILITY_NOTES.md      # ARM64 / CUDA / DGX Spark risks per service
+  CURRENT_STATE.md            # Current product surfaces and practical guidance
   README.md                   # This file
+  VOICEOVER_STUDIO.md         # Notes for the isolated voiceover path
+  frontend/
+    app/                      # Next.js routes and studio pages
+    components/               # Shared UI, including Voiceover Studio
+    Dockerfile
   gateway/
     app.py                    # FastAPI gateway, job queue, memory gate
+    voiceover/                # Voice profiles, model registry, chunking, runner
+    templates/comfyui/        # Managed ComfyUI workflow manifests
     Dockerfile
     requirements.txt
   supervisor/
@@ -226,10 +281,18 @@ dgx-ai-stack/
       app.py                  # video-retalking/SadTalker, warm
       Dockerfile
       requirements.txt
+    voxcpm2/
+      app.py                  # Experimental local cloned-voice backend
+      Dockerfile
+      requirements.txt
     wan21/
       app.py                  # Wan 2.1, lazy singleton with true destroy
       Dockerfile
       requirements.txt
+  comfyUI/
+    Dockerfile                # Optional managed ComfyUI runtime
+  Wan2.2-Animate/
+    Dockerfile                # Optional wan-ui sidecar
   scripts/
     verify_dgx.py             # Health check, smoke tests, latency percentiles
     idle_manager.py            # Systemd-driven idle container stopper
@@ -245,6 +308,7 @@ dgx-ai-stack/
 | `/srv/ai/models` | `/models` | Model weights (persistent) |
 | `/srv/ai/cache/hf` | `/cache/hf` | HuggingFace download cache |
 | `/srv/ai/outputs` | `/outputs` | Generated files (audio, video) |
+| `/srv/ai/assets` | `/app/data/assets` | Voice profiles and uploaded workflow assets |
 | `/srv/ai/logs` | `/logs` | Service logs |
 
 ## Configuration
@@ -257,9 +321,13 @@ All configuration is via `.env`. Key settings:
 | `MEM_RESERVE_HEAVY_GB` | `40` | Min GB free to admit heavy jobs (Wan) |
 | `MEM_RESERVE_MEDIUM_GB` | `10` | Min GB free to admit medium jobs |
 | `MEM_RESERVE_LIGHT_GB` | `2` | Min GB free to admit light jobs |
+| `ASSETS_DIR` | `/srv/ai/assets` | Persistent reference audio and uploaded workflow assets |
 | `WAN21_MODEL_VARIANT` | `1.3B` | Wan model size (1.3B safe, 14B risky) |
 | `WAN21_IDLE_TIMEOUT` | `300` | Seconds before idle Wan container stops |
 | `F5TTS_IDLE_TIMEOUT` | `1800` | Seconds before F5-TTS model is destroyed |
+| `FISH_SPEECH_ENABLED` | `false` | Enables Fish Speech in Voiceover Studio |
+| `VOXCPM2_ENABLED` | `false` | Enables VoxCPM2 in Voiceover Studio |
+| `COMFYUI_MODEL_ROOTS` | `/models/comfyui,/opt/ComfyUI/custom_nodes/comfyui_controlnet_aux/ckpts` | Read-only model roots scanned for managed ComfyUI templates |
 | `LIPSYNC_BACKEND` | `video-retalking` | Lip-sync backend (or `sadtalker`) |
 
 ## Hardware Target
@@ -310,12 +378,15 @@ See [COMPATIBILITY_NOTES.md](COMPATIBILITY_NOTES.md) for the full assessment. To
 If you are an LLM reading this codebase:
 
 - **Architecture**: Microservices in Docker, one container per AI model. Gateway routes and queues. Supervisor manages container lifecycle.
+- **Docs to read first**: `CURRENT_STATE.md`, `ARCHITECTURE.md`, and `VOICEOVER_STUDIO.md`.
 - **State**: Redis stores job records and per-service activity timestamps. Models are stateless (weights loaded from `/models`, outputs written to `/outputs`).
 - **Memory model**: UMA (shared CPU+GPU). All memory checks use `/proc/meminfo`, never `nvidia-smi`. The gateway gates job admission at 80% UMA usage.
 - **Concurrency**: Single GPU. `gpu_heavy_sem=1`, `gpu_medium_sem=1`. Jobs within a tier serialize.
 - **Model lifecycle**: Warm services load on first request, truly destroy (not just cache-flush) after idle timeout. Lazy services (Wan) have their entire container stopped.
+- **Voiceover split**: `Voice Studio` and `Voiceover Studio` are intentionally separate. The long-form voiceover path lives in `gateway/voiceover/` and `frontend/components/VoiceoverStudio.tsx`.
+- **Voice profile ingest**: New voice profile uploads accept WAV/MP3/M4A and are normalized once to a PCM WAV master on ingest.
 - **Testing**: Run `python3 scripts/verify_dgx.py --smoke --json` for a machine-readable health report.
-- **Key files**: `docker-compose.yml` for topology, `gateway/app.py` for routing/scheduling, `supervisor/app.py` for container lifecycle, `.env.example` for all config knobs.
+- **Key files**: `docker-compose.yml` for topology, `gateway/app.py` for routing/scheduling, `gateway/voiceover/` for long-form narration, `supervisor/app.py` for container lifecycle, and `.env.example` for config knobs.
 
 ## License
 

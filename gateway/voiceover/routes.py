@@ -29,7 +29,9 @@ from .runner import run_voiceover_job
 
 router = APIRouter(prefix="/api/v1/voiceover", tags=["voiceover"])
 
-ALLOWED_AUDIO_EXTENSIONS = {".wav", ".mp3"}
+VOICEOVER_OUTPUT_EXTENSIONS = {".wav", ".mp3"}
+VOICE_PROFILE_INPUT_EXTENSIONS = {".wav", ".mp3", ".m4a"}
+REFERENCE_AUDIO_EXTENSION = ".wav"
 HOST_OUTPUTS_ROOT = Path("/srv/ai/outputs")
 CONTAINER_OUTPUTS_ROOT = Path(os.getenv("OUTPUTS_ROOT", "/outputs"))
 VOICEOVER_OUTPUTS_RELATIVE_DIR = Path("voiceover")
@@ -134,6 +136,38 @@ def _detect_duration(path: Path) -> float | None:
     return _duration_with_sox(path) or _duration_with_mutagen(path) or _duration_with_wave(path)
 
 
+def _normalize_reference_audio_to_wav(input_path: Path, output_path: Path) -> None:
+    if shutil.which("ffmpeg") is None:
+        raise HTTPException(503, "Reference audio normalization is unavailable because ffmpeg is not installed")
+
+    try:
+        # Keep a high-quality PCM WAV master at ingest time. If a specific
+        # runtime later needs a different layout, adapt it in the model path.
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                str(input_path),
+                "-vn",
+                "-c:a",
+                "pcm_s16le",
+                str(output_path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        raise HTTPException(503, "Reference audio normalization is unavailable because ffmpeg could not be started") from exc
+    except subprocess.CalledProcessError as exc:
+        raise HTTPException(422, "Audio file could not be decoded as WAV, MP3, or M4A") from exc
+
+
 def _serialize_profile(profile: VoiceProfile) -> dict[str, Any]:
     return asdict(profile)
 
@@ -164,7 +198,7 @@ def _find_voiceover_output(job_id: str) -> Path | None:
     for child in job_dir.iterdir():
         if not child.is_file():
             continue
-        if child.suffix.lower() not in ALLOWED_AUDIO_EXTENSIONS:
+        if child.suffix.lower() not in VOICEOVER_OUTPUT_EXTENSIONS:
             continue
         if child.name == "merged.wav" or child.name.startswith("chunk_") or child.name.startswith("pause_"):
             continue
@@ -205,27 +239,41 @@ async def create_voice_profile(
     audio_file: UploadFile = File(...),
 ):
     extension = Path(audio_file.filename or "").suffix.lower()
-    if extension not in ALLOWED_AUDIO_EXTENSIONS:
-        raise HTTPException(422, "Audio file must be a WAV or MP3")
+    if extension not in VOICE_PROFILE_INPUT_EXTENSIONS:
+        raise HTTPException(422, "Audio file must be a WAV, MP3, or M4A")
 
     audio_bytes = await audio_file.read()
     if not audio_bytes:
         raise HTTPException(422, "Audio file is empty")
 
-    temp_path: Path | None = None
+    temp_input_path: Path | None = None
+    temp_output_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=extension) as temp_file:
             temp_file.write(audio_bytes)
-            temp_path = Path(temp_file.name)
+            temp_input_path = Path(temp_file.name)
 
-        duration = _detect_duration(temp_path)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=REFERENCE_AUDIO_EXTENSION) as temp_file:
+            temp_output_path = Path(temp_file.name)
+
+        _normalize_reference_audio_to_wav(temp_input_path, temp_output_path)
+
+        duration = _detect_duration(temp_output_path) or _detect_duration(temp_input_path)
         if duration is not None and duration > 30:
             raise HTTPException(422, "Reference audio must be 30 seconds or shorter")
 
-        profile = save_profile(name=name, audio_bytes=audio_bytes, filename=audio_file.filename or "", notes=notes)
+        normalized_filename = f"{Path(audio_file.filename or 'reference').stem or 'reference'}{REFERENCE_AUDIO_EXTENSION}"
+        profile = save_profile(
+            name=name,
+            audio_bytes=temp_output_path.read_bytes(),
+            stored_filename=normalized_filename,
+            notes=notes,
+        )
     finally:
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
+        if temp_input_path is not None:
+            temp_input_path.unlink(missing_ok=True)
+        if temp_output_path is not None:
+            temp_output_path.unlink(missing_ok=True)
 
     return _serialize_profile(profile)
 

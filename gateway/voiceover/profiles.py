@@ -94,17 +94,17 @@ def load_registry() -> list[VoiceProfile]:
         return list(profiles)
 
 
-def save_profile(name: str, audio_bytes: bytes, filename: str, notes: str | None) -> VoiceProfile:
+def save_profile(name: str, audio_bytes: bytes, stored_filename: str, notes: str | None) -> VoiceProfile:
     cleaned_name = name.strip()
     if not cleaned_name:
         raise ValueError("Voice profile name is required")
 
     _ensure_storage_dirs()
     profile_id = str(uuid.uuid4())
-    extension = Path(filename or "").suffix.lower() or ".wav"
-    stored_filename = f"{profile_id}{extension}"
-    container_audio_path = CONTAINER_VOICE_PROFILES_DIR / stored_filename
-    host_audio_path = HOST_VOICE_PROFILES_DIR / stored_filename
+    extension = Path(stored_filename or "").suffix.lower() or ".wav"
+    persisted_filename = f"{profile_id}{extension}"
+    container_audio_path = CONTAINER_VOICE_PROFILES_DIR / persisted_filename
+    host_audio_path = HOST_VOICE_PROFILES_DIR / persisted_filename
 
     container_audio_path.write_bytes(audio_bytes)
 

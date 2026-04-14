@@ -691,8 +691,8 @@ export function VoiceoverStudio() {
                   <div className="space-y-2">
                     <Label>Reference Clip</Label>
                     <FileDropzone
-                      accept=".wav,.mp3,audio/wav,audio/mpeg"
-                      label="Drop a WAV or MP3 sample"
+                      accept=".wav,.mp3,.m4a,audio/wav,audio/mpeg,audio/mp4,audio/x-m4a"
+                      label="Drop a WAV, MP3, or M4A sample"
                       hint={profileFile?.name || '3-30 seconds recommended'}
                       file={profileFile}
                       onFileChange={setProfileFile}
@@ -733,7 +733,7 @@ export function VoiceoverStudio() {
                     {uploadingProfile ? <Loader2 className="h-4 w-4 animate-spin" /> : <UploadCloud className="h-4 w-4" />}
                     {uploadingProfile ? 'Uploading...' : 'Save Voice Profile'}
                   </Button>
-                  <p className="text-xs text-muted-foreground">WAV and MP3 are accepted. Clips longer than 30 seconds are rejected when duration tools are available.</p>
+                  <p className="text-xs text-muted-foreground">WAV, MP3, and M4A are accepted. Clips longer than 30 seconds are rejected when duration tools are available.</p>
                 </div>
               </div>
             )}

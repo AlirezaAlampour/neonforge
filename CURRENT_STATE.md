@@ -24,6 +24,7 @@ The older Creative Studio / Voice Studio F5-TTS flow remains separate from Voice
 Voiceover Studio currently supports:
 
 - reusable voice profiles
+- voice profile uploads from `.wav`, `.mp3`, and `.m4a`
 - long-form script rendering
 - sentence-boundary-first chunking
 - speed control
@@ -32,6 +33,15 @@ Voiceover Studio currently supports:
 - multiple tracked jobs in the UI
 - human-usable output naming:
   - `{model_id}_{voice_profile_name}_{YYYY-MM-DD_HHMMSS}.{ext}`
+
+## Voice profile ingest and storage
+
+- accepted voice profile uploads are decoded once with `ffmpeg` and saved as a PCM WAV master
+- new saved voice profiles always persist as `.wav`, even if the source upload was MP3 or M4A
+- ingest does **not** force `24 kHz` mono; keep the highest-quality practical master and do runtime-specific conversion later if needed
+- reference clips longer than 30 seconds are rejected when duration tools are available
+- older already-saved MP3/WAV profile assets should remain readable for backward compatibility
+- the gateway image now depends on `ffmpeg` for safe voice-profile ingest normalization
 
 ## Voiceover backends
 
@@ -60,6 +70,8 @@ Voiceover Studio currently supports:
 
 ## Environment/config currently relevant to voiceover
 
+- `ASSETS_DIR`
+- `OUTPUTS_DIR`
 - `FISH_SPEECH_ENABLED`
 - `FISH_SPEECH_INTERNAL_URL`
 - `VOXCPM2_ENABLED`
