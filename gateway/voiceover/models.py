@@ -52,6 +52,14 @@ def _resolve_output_path(path_value: str) -> Path:
     return CONTAINER_OUTPUTS_ROOT / path
 
 
+def _build_vox_text(text: str, style_text: str | None) -> str:
+    cleaned_text = text.strip()
+    cleaned_style = (style_text or "").strip()
+    if not cleaned_style:
+        return cleaned_text
+    return f"({cleaned_style}){cleaned_text}"
+
+
 class VoiceoverModel(ABC):
     @property
     @abstractmethod
@@ -298,9 +306,6 @@ class FishSpeechModel(_HTTPVoiceoverModel):
 
 
 class VoxCPM2Model(_HTTPVoiceoverModel):
-    def __init__(self) -> None:
-        self._reference_text_cache: dict[str, str] = {}
-
     @property
     def model_id(self) -> str:
         return "voxcpm2"
@@ -316,10 +321,6 @@ class VoxCPM2Model(_HTTPVoiceoverModel):
     @property
     def base_url(self) -> str:
         return os.getenv("VOXCPM2_INTERNAL_URL", "http://voxcpm2:8000")
-
-    @property
-    def whisper_url(self) -> str:
-        return os.getenv("WHISPER_URL", "http://whisper:8000")
 
     def is_available(self) -> bool:
         if os.getenv("VOXCPM2_ENABLED", "false").lower() != "true":
@@ -341,51 +342,38 @@ class VoxCPM2Model(_HTTPVoiceoverModel):
     def availability_error(self) -> str:
         return "VoxCPM2 is not enabled or the runtime is unreachable/unhealthy"
 
-    def _transcribe_reference_audio(self, audio_name: str, audio_bytes: bytes, media_type: str) -> str | None:
-        cache_key = f"{audio_name}:{len(audio_bytes)}"
-        cached = self._reference_text_cache.get(cache_key)
-        if cached:
-            return cached
-
-        try:
-            response = httpx.post(
-                f"{self.whisper_url.rstrip('/')}/transcribe",
-                files={"audio": (audio_name, audio_bytes, media_type)},
-                timeout=httpx.Timeout(180.0, connect=10.0),
-            )
-            response.raise_for_status()
-            payload = response.json()
-            text = str(payload.get("text") or "").strip()
-        except Exception:
-            return None
-
-        if not text:
-            return None
-
-        self._reference_text_cache[cache_key] = text
-        return text
-
     def synthesize(self, text: str, reference_audio_path: str | None, options: dict[str, Any]) -> bytes:
         if not self.is_available():
             raise ModelUnavailableError(self.availability_error())
 
-        data = {"text": text}
-        reference_bytes: bytes | None = None
-        audio_name: str | None = None
-        media_type: str | None = None
+        vox_mode = str(options.get("vox_mode") or "clone").strip().lower() or "clone"
+        prompt_text = str(options.get("prompt_text") or "").strip()
+        style_text = str(options.get("style_text") or "").strip()
 
-        if reference_audio_path:
+        data = {
+            "text": _build_vox_text(text, style_text if vox_mode != "continuation" else None),
+            "vox_mode": vox_mode,
+        }
+
+        files: dict[str, tuple[str, bytes, str]] = {}
+        if vox_mode == "design":
+            reference_audio_path = None
+        elif vox_mode in {"clone", "continuation"}:
+            if not reference_audio_path:
+                raise ModelUnavailableError(f"VoxCPM2 {vox_mode} mode requires a reference audio clip")
+
             container_audio_path = host_path_to_container(reference_audio_path)
             reference_bytes = container_audio_path.read_bytes()
             audio_name = container_audio_path.name
             media_type = mimetypes.guess_type(audio_name)[0] or "application/octet-stream"
-            prompt_text = self._transcribe_reference_audio(audio_name, reference_bytes, media_type)
-            if prompt_text:
-                data["prompt_text"] = prompt_text
-
-        files: dict[str, tuple[str, bytes, str]] = {}
-        if reference_bytes is not None and audio_name is not None and media_type is not None:
             files["reference_audio"] = (audio_name, reference_bytes, media_type)
+
+            if vox_mode == "continuation":
+                if not prompt_text:
+                    raise ModelUnavailableError("VoxCPM2 continuation mode requires the reference transcript")
+                data["prompt_text"] = prompt_text
+        else:
+            raise ModelUnavailableError(f"Unsupported VoxCPM2 mode: {vox_mode}")
 
         response = httpx.post(
             f"{self.base_url.rstrip('/')}/synthesize",

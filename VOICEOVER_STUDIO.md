@@ -11,13 +11,14 @@ The legacy TTS flow is useful for shorter direct generations. Voiceover Studio a
 ## Core workflow
 
 1. Create a **Voice Profile** from a short reference clip.
-2. Select a voice profile.
-3. Choose a voiceover backend.
-4. Paste a long-form script.
-5. Set output format and speed.
-6. Submit a voiceover job.
-7. Track active jobs in the page UI.
-8. Play, download, or delete completed outputs from Recent Voiceovers.
+2. Choose a voiceover backend.
+3. Select a voice profile when the chosen backend needs one.
+4. If VoxCPM2 is selected, choose the Vox mode that matches the job.
+5. Paste a long-form script.
+6. Set output format and speed.
+7. Submit a voiceover job.
+8. Track active jobs in the page UI.
+9. Play, download, or delete completed outputs from Recent Voiceovers.
 
 ## Reference audio ingest
 
@@ -43,14 +44,43 @@ The legacy TTS flow is useful for shorter direct generations. Voiceover Studio a
 
 ### voxcpm2
 - integrated and selectable
+- supports three explicit modes:
+  - `design`: no reference audio, optional style/control text
+  - `clone`: reference audio only, optional style/control text
+  - `continuation`: reference audio plus the exact transcript of that clip
+- defaults to normal `clone` behavior for backward compatibility
+- does **not** auto-transcribe the saved reference clip during normal cloning anymore
 - useful for experimentation and some medium-form tests
 - should still be treated as experimental for longer cloned narration quality
+
+## VoxCPM2 modes
+
+### Voice Design
+- no saved voice profile is required
+- Vox creates a voice from the text alone
+- optional style/control text is prepended as Vox-style natural-language guidance
+
+### Clone My Voice
+- requires a saved voice profile
+- uses `reference_wav_path` only
+- optional style/control text is allowed
+- this is the default Vox mode in Voiceover Studio
+
+### Continue From Reference
+- requires a saved voice profile
+- requires the exact transcript of that reference clip
+- uses Vox prompt semantics:
+  - `reference_wav_path`
+  - `prompt_wav_path`
+  - `prompt_text`
+- best when you want continuation-level nuance preservation from the reference clip
+- style/control text is intentionally hidden in this mode to avoid mixing mental models
 
 ## Current behavior
 
 - sentence-boundary-first chunking
 - paragraph-aware pause preservation
-- model-specific chunk tuning where needed
+- Vox prefers single-pass generation when the script is small enough and only falls back to larger semantic chunks when needed
 - voice profile preview/download from the stored normalized WAV master
 - speed control in the Voiceover Studio UI
 - recent outputs list with playback, download, and delete
