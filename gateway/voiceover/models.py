@@ -343,9 +343,6 @@ class VoxCPM2Model(_HTTPVoiceoverModel):
         return "VoxCPM2 is not enabled or the runtime is unreachable/unhealthy"
 
     def synthesize(self, text: str, reference_audio_path: str | None, options: dict[str, Any]) -> bytes:
-        if not self.is_available():
-            raise ModelUnavailableError(self.availability_error())
-
         vox_mode = str(options.get("vox_mode") or "clone").strip().lower() or "clone"
         prompt_text = str(options.get("prompt_text") or "").strip()
         style_text = str(options.get("style_text") or "").strip()
@@ -375,13 +372,17 @@ class VoxCPM2Model(_HTTPVoiceoverModel):
         else:
             raise ModelUnavailableError(f"Unsupported VoxCPM2 mode: {vox_mode}")
 
-        response = httpx.post(
-            f"{self.base_url.rstrip('/')}/synthesize",
-            data=data,
-            files=files or None,
-            timeout=httpx.Timeout(600.0, connect=10.0),
-        )
-        response.raise_for_status()
+        try:
+            response = httpx.post(
+                f"{self.base_url.rstrip('/')}/synthesize",
+                data=data,
+                files=files or None,
+                timeout=httpx.Timeout(600.0, connect=10.0),
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise ModelUnavailableError("VoxCPM2 synthesis failed") from exc
+
         return response.content
 
 

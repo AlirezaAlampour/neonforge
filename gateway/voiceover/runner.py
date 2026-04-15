@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import audioop
+import logging
 import os
 import re
 import shutil
@@ -35,6 +36,7 @@ VOX_EDGE_FADE_MS = 8
 VOX_CROSSFADE_MS = 12
 VOX_MIN_CLIP_MS = 150
 VOX_SILENCE_THRESHOLD_RATIO = 0.008
+log = logging.getLogger("voiceover.runner")
 
 
 def _container_output_dir(job_id: str) -> Path:
@@ -470,6 +472,15 @@ async def run_voiceover_job(
         chunks = _build_voiceover_chunks(script, model_id=model_id, vox_mode=effective_vox_mode)
         synthesis_chunks = [chunk for chunk in chunks if not chunk.get("is_pause")]
         total_chunks = len(synthesis_chunks)
+        if model_id == VOX_MODEL_ID:
+            log.info(
+                "Vox job %s: vox_mode=%s single_pass=%s chunk_count=%s continuation=%s",
+                job_id,
+                effective_vox_mode,
+                len(chunks) == 1 and total_chunks == 1,
+                total_chunks,
+                effective_vox_mode == VOX_MODE_CONTINUATION,
+            )
         if total_chunks == 0:
             await _update_job(redis_client, job_key, status="failed", error="Script did not produce any synthesis chunks")
             return
