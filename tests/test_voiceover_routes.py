@@ -181,3 +181,183 @@ def test_create_voice_profile_returns_clear_error_when_ffmpeg_is_unavailable(mon
 
     assert response.status_code == 503
     assert response.json()["detail"] == "Reference audio normalization is unavailable because ffmpeg is not installed"
+
+
+class _FakeRedis:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, str]]] = []
+
+    async def hset(self, key: str, mapping: dict[str, str]) -> None:
+        self.calls.append((key, mapping))
+
+
+class _FakeModel:
+    def __init__(self, model_id: str) -> None:
+        self.model_id = model_id
+        self.display_name = f"{model_id} (fake)"
+        self.supports_reference_audio = True
+
+    def is_available(self) -> bool:
+        return True
+
+    def availability_error(self) -> str:
+        return "unavailable"
+
+
+def _fake_profile(profile_id: str = "profile-1") -> profiles.VoiceProfile:
+    return profiles.VoiceProfile(
+        id=profile_id,
+        name="Narrator",
+        reference_audio_path=f"/tmp/{profile_id}.wav",
+        created_at="2026-01-01T00:00:00+00:00",
+        notes=None,
+        reference_transcript=None,
+    )
+
+
+def _configure_job_creation(monkeypatch, *, model_id: str):
+    fake_redis = _FakeRedis()
+    captured: dict[str, object] = {}
+
+    async def fake_run_voiceover_job(
+        job_id,
+        profile_id,
+        script,
+        requested_model_id,
+        output_format,
+        speed,
+        redis_client,
+        vox_mode=None,
+        prompt_text=None,
+        style_text=None,
+    ) -> None:
+        captured.update(
+            {
+                "job_id": job_id,
+                "profile_id": profile_id,
+                "script": script,
+                "model_id": requested_model_id,
+                "output_format": output_format,
+                "speed": speed,
+                "redis_client": redis_client,
+                "vox_mode": vox_mode,
+                "prompt_text": prompt_text,
+                "style_text": style_text,
+            }
+        )
+
+    monkeypatch.setattr(routes, "_get_redis_client", lambda: fake_redis)
+    monkeypatch.setattr(routes.ModelRegistry, "get_model", lambda requested_model_id: _FakeModel(requested_model_id))
+    monkeypatch.setattr(routes, "run_voiceover_job", fake_run_voiceover_job)
+    return fake_redis, captured
+
+
+def test_create_voiceover_job_defaults_vox_to_clone_mode(monkeypatch, tmp_path: Path):
+    _configure_voice_profile_storage(monkeypatch, tmp_path)
+    _, captured = _configure_job_creation(monkeypatch, model_id="voxcpm2")
+    profile = _fake_profile()
+    monkeypatch.setattr(routes, "get_profile", lambda profile_id: profile if profile_id == profile.id else None)
+    client = _build_client()
+
+    response = client.post(
+        "/api/v1/voiceover/jobs",
+        json={
+            "voice_profile_id": profile.id,
+            "script": "Render this normally.",
+            "model_id": "voxcpm2",
+            "output_format": "wav",
+            "speed": 1.0,
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["profile_id"] == profile.id
+    assert captured["vox_mode"] == routes.VOX_MODE_CLONE
+    assert captured["prompt_text"] is None
+    assert captured["style_text"] is None
+
+
+def test_create_voiceover_job_allows_vox_design_without_profile(monkeypatch, tmp_path: Path):
+    _configure_voice_profile_storage(monkeypatch, tmp_path)
+    _, captured = _configure_job_creation(monkeypatch, model_id="voxcpm2")
+    monkeypatch.setattr(routes, "get_profile", lambda profile_id: pytest.fail("Vox design mode should not look up a saved profile"))
+    client = _build_client()
+
+    response = client.post(
+        "/api/v1/voiceover/jobs",
+        json={
+            "script": "Invent a fresh announcer voice for this copy.",
+            "model_id": "voxcpm2",
+            "vox_mode": "design",
+            "style_text": "bright, modern, slightly cinematic",
+            "output_format": "wav",
+            "speed": 1.0,
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["profile_id"] is None
+    assert captured["vox_mode"] == routes.VOX_MODE_DESIGN
+    assert captured["style_text"] == "bright, modern, slightly cinematic"
+
+
+def test_create_voiceover_job_rejects_vox_clone_without_profile(monkeypatch, tmp_path: Path):
+    _configure_voice_profile_storage(monkeypatch, tmp_path)
+    _configure_job_creation(monkeypatch, model_id="voxcpm2")
+    client = _build_client()
+
+    response = client.post(
+        "/api/v1/voiceover/jobs",
+        json={
+            "script": "Clone this voice please.",
+            "model_id": "voxcpm2",
+            "vox_mode": "clone",
+            "output_format": "wav",
+            "speed": 1.0,
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Vox clone and continuation modes require a saved voice profile"
+
+
+def test_create_voiceover_job_rejects_vox_continuation_without_transcript(monkeypatch, tmp_path: Path):
+    _configure_voice_profile_storage(monkeypatch, tmp_path)
+    _configure_job_creation(monkeypatch, model_id="voxcpm2")
+    profile = _fake_profile()
+    monkeypatch.setattr(routes, "get_profile", lambda profile_id: profile if profile_id == profile.id else None)
+    client = _build_client()
+
+    response = client.post(
+        "/api/v1/voiceover/jobs",
+        json={
+            "voice_profile_id": profile.id,
+            "script": "Continue from the saved clip.",
+            "model_id": "voxcpm2",
+            "vox_mode": "continuation",
+            "output_format": "wav",
+            "speed": 1.0,
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Vox continuation mode requires the exact transcript of the reference clip"
+
+
+def test_create_voiceover_job_still_requires_profile_for_f5(monkeypatch, tmp_path: Path):
+    _configure_voice_profile_storage(monkeypatch, tmp_path)
+    _configure_job_creation(monkeypatch, model_id="f5tts")
+    client = _build_client()
+
+    response = client.post(
+        "/api/v1/voiceover/jobs",
+        json={
+            "script": "Plain F5 narration.",
+            "model_id": "f5tts",
+            "output_format": "wav",
+            "speed": 1.0,
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "This model requires a saved voice profile"

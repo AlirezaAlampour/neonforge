@@ -17,6 +17,10 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 MODEL_PATH = Path(os.getenv("VOXCPM2_MODEL_PATH", "/models/voxcpm2/openbmb/VoxCPM2"))
 CFG_VALUE = 2.0
 INFERENCE_TIMESTEPS = 10
+VOX_MODE_DESIGN = "design"
+VOX_MODE_CLONE = "clone"
+VOX_MODE_CONTINUATION = "continuation"
+VALID_VOX_MODES = {VOX_MODE_DESIGN, VOX_MODE_CLONE, VOX_MODE_CONTINUATION}
 
 logging.basicConfig(level=LOG_LEVEL)
 log = logging.getLogger("voxcpm2")
@@ -155,13 +159,16 @@ async def runtime_health():
     }
 
 
-async def _parse_synthesize_request(request: Request) -> tuple[str, str | None, float, tuple[str, bytes] | None]:
+async def _parse_synthesize_request(
+    request: Request,
+) -> tuple[str, str | None, float, tuple[str, bytes] | None, str | None]:
     content_type = request.headers.get("content-type", "")
 
     if "multipart/form-data" in content_type or "application/x-www-form-urlencoded" in content_type:
         form = await request.form()
         text = str(form.get("text") or "").strip()
         prompt_text = str(form.get("prompt_text") or "").strip() or None
+        vox_mode = str(form.get("vox_mode") or "").strip().lower() or None
 
         try:
             speed = float(form.get("speed", 1.0))
@@ -173,15 +180,16 @@ async def _parse_synthesize_request(request: Request) -> tuple[str, str | None, 
             reference_bytes = await reference_audio.read()
             if reference_bytes:
                 filename = getattr(reference_audio, "filename", "") or "reference.wav"
-                return text, prompt_text, speed, (filename, reference_bytes)
+                return text, prompt_text, speed, (filename, reference_bytes), vox_mode
 
-        return text, prompt_text, speed, None
+        return text, prompt_text, speed, None, vox_mode
 
     payload = await request.json()
     text = str(payload.get("text") or "").strip()
     prompt_text = str(payload.get("prompt_text") or "").strip() or None
     speed = float(payload.get("speed", 1.0))
-    return text, prompt_text, speed, None
+    vox_mode = str(payload.get("vox_mode") or "").strip().lower() or None
+    return text, prompt_text, speed, None, vox_mode
 
 
 @app.post("/synthesize")
@@ -189,12 +197,37 @@ async def synthesize(request: Request):
     if not model_loaded or model is None:
         raise HTTPException(503, load_error or "VoxCPM2 runtime is not ready")
 
-    text, prompt_text, speed, reference_audio = await _parse_synthesize_request(request)
+    text, prompt_text, speed, reference_audio, vox_mode = await _parse_synthesize_request(request)
     if not text:
         raise HTTPException(400, "Empty text")
 
-    if prompt_text and reference_audio is None:
-        raise HTTPException(400, "prompt_text requires reference_audio")
+    if vox_mode is not None and vox_mode not in VALID_VOX_MODES:
+        raise HTTPException(400, "vox_mode must be design, clone, or continuation")
+
+    effective_mode = vox_mode
+    if effective_mode is None:
+        if prompt_text:
+            effective_mode = VOX_MODE_CONTINUATION
+        elif reference_audio is not None:
+            effective_mode = VOX_MODE_CLONE
+        else:
+            effective_mode = VOX_MODE_DESIGN
+
+    if effective_mode == VOX_MODE_DESIGN:
+        if reference_audio is not None:
+            raise HTTPException(400, "design mode does not accept reference_audio")
+        if prompt_text:
+            raise HTTPException(400, "design mode does not accept prompt_text")
+    elif effective_mode == VOX_MODE_CLONE:
+        if reference_audio is None:
+            raise HTTPException(400, "clone mode requires reference_audio")
+        if prompt_text:
+            raise HTTPException(400, "clone mode does not accept prompt_text")
+    elif effective_mode == VOX_MODE_CONTINUATION:
+        if reference_audio is None:
+            raise HTTPException(400, "continuation mode requires reference_audio")
+        if not prompt_text:
+            raise HTTPException(400, "continuation mode requires prompt_text")
 
     if speed != 1.0:
         log.info("Ignoring unsupported VoxCPM2 speed override: %.2f", speed)
@@ -217,7 +250,7 @@ async def synthesize(request: Request):
                 tmp_audio_path = Path(temp_audio.name)
 
             generate_kwargs["reference_wav_path"] = str(tmp_audio_path)
-            if prompt_text:
+            if effective_mode == VOX_MODE_CONTINUATION and prompt_text:
                 generate_kwargs["prompt_wav_path"] = str(tmp_audio_path)
                 generate_kwargs["prompt_text"] = prompt_text
 
@@ -228,7 +261,7 @@ async def synthesize(request: Request):
 
         buffer = io.BytesIO()
         sf.write(buffer, wav, int(model.tts_model.sample_rate), format="WAV")
-        log.info("Synthesized %d chars in %.1fs", len(text), elapsed)
+        log.info("Synthesized %d chars in %.1fs (%s mode)", len(text), elapsed, effective_mode)
         return Response(content=buffer.getvalue(), media_type="audio/wav")
     except HTTPException:
         raise

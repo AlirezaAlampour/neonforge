@@ -27,6 +27,10 @@ Voiceover Studio currently supports:
 - voice profile uploads from `.wav`, `.mp3`, and `.m4a`
 - long-form script rendering
 - sentence-boundary-first chunking
+- VoxCPM2 mode selection:
+  - `design`
+  - `clone`
+  - `continuation`
 - speed control
 - recent outputs with play/download/delete
 - active job restore after refresh
@@ -58,6 +62,10 @@ Voiceover Studio currently supports:
 
 ### voxcpm2
 - integrated and selectable
+- default behavior is now normal `clone` mode, not prompt-style continuation
+- normal clone mode sends only reference audio
+- continuation mode is explicit and requires the exact transcript of the saved reference clip
+- voice design mode can run without a saved voice profile
 - usable for experimentation and some medium-form testing
 - should still be treated as experimental for longer cloned narration quality
 - do not oversell it as solved for all long scripts

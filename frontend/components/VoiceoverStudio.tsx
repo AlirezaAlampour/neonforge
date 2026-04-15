@@ -63,6 +63,9 @@ interface PersistedVoiceoverFormState {
   script?: string
   outputFormat?: 'wav' | 'mp3'
   speed?: number
+  voxMode?: VoxMode
+  voxPromptText?: string
+  voxStyleText?: string
 }
 
 interface PersistedActiveVoiceoverJob {
@@ -88,6 +91,37 @@ const MAX_SPEED = 1.25
 const SPEED_STEP = 0.05
 const VOICEOVER_FORM_STATE_KEY = 'neonforge-voiceover-form-state-v1'
 const VOICEOVER_ACTIVE_JOBS_KEY = 'neonforge-voiceover-active-jobs-v1'
+const VOX_MODEL_ID = 'voxcpm2'
+const VOX_MODE_DESIGN = 'design'
+const VOX_MODE_CLONE = 'clone'
+const VOX_MODE_CONTINUATION = 'continuation'
+const VOX_SINGLE_PASS_MAX_CHARS = 1200
+const VOX_CONTINUATION_SINGLE_PASS_MAX_CHARS = 1800
+const VOX_CHUNK_ESTIMATE_SIZE = 650
+
+type VoxMode = 'design' | 'clone' | 'continuation'
+
+const VOX_MODE_OPTIONS: Array<{
+  value: VoxMode
+  label: string
+  helper: string
+}> = [
+  {
+    value: VOX_MODE_DESIGN,
+    label: 'Voice Design',
+    helper: 'No reference audio. Create a new voice from text and optional control guidance.',
+  },
+  {
+    value: VOX_MODE_CLONE,
+    label: 'Clone My Voice',
+    helper: 'Use a saved reference clip. Optional control guidance can steer delivery and style.',
+  },
+  {
+    value: VOX_MODE_CONTINUATION,
+    label: 'Continue From Reference',
+    helper: 'Advanced. Requires the exact transcript of the reference clip for prompt-style continuation.',
+  },
+]
 
 function clampSpeed(value: number): number {
   if (!Number.isFinite(value)) return 1
@@ -273,6 +307,9 @@ export function VoiceoverStudio() {
   const [outputFormat, setOutputFormat] = useState<'wav' | 'mp3'>('wav')
   const [speed, setSpeed] = useState(1)
   const [speedInput, setSpeedInput] = useState('1.00')
+  const [voxMode, setVoxMode] = useState<VoxMode>(VOX_MODE_CLONE)
+  const [voxPromptText, setVoxPromptText] = useState('')
+  const [voxStyleText, setVoxStyleText] = useState('')
   const [trackedJobs, setTrackedJobs] = useState<TrackedVoiceoverJob[]>([])
   const [submittingJob, setSubmittingJob] = useState(false)
   const [deletingOutputId, setDeletingOutputId] = useState<string | null>(null)
@@ -347,6 +384,19 @@ export function VoiceoverStudio() {
             setSpeed(normalizedSpeed)
             setSpeedInput(normalizedSpeed.toFixed(2))
           }
+          if (
+            payload.voxMode === VOX_MODE_DESIGN ||
+            payload.voxMode === VOX_MODE_CLONE ||
+            payload.voxMode === VOX_MODE_CONTINUATION
+          ) {
+            setVoxMode(payload.voxMode)
+          }
+          if (typeof payload.voxPromptText === 'string') {
+            setVoxPromptText(payload.voxPromptText)
+          }
+          if (typeof payload.voxStyleText === 'string') {
+            setVoxStyleText(payload.voxStyleText)
+          }
         }
       } catch {
         restoredFormStateRef.current = null
@@ -397,10 +447,13 @@ export function VoiceoverStudio() {
       script,
       outputFormat,
       speed,
+      voxMode,
+      voxPromptText,
+      voxStyleText,
     }
 
     window.localStorage.setItem(VOICEOVER_FORM_STATE_KEY, JSON.stringify(payload))
-  }, [formStateRestored, outputFormat, script, selectedModelId, selectedProfileId, speed])
+  }, [formStateRestored, outputFormat, script, selectedModelId, selectedProfileId, speed, voxMode, voxPromptText, voxStyleText])
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -425,6 +478,10 @@ export function VoiceoverStudio() {
     () => profiles.find((profile) => profile.id === selectedProfileId) ?? null,
     [profiles, selectedProfileId],
   )
+  const isVoxModel = selectedModel?.model_id === VOX_MODEL_ID
+  const isVoxDesignMode = isVoxModel && voxMode === VOX_MODE_DESIGN
+  const isVoxContinuationMode = isVoxModel && voxMode === VOX_MODE_CONTINUATION
+  const requiresVoiceProfile = !isVoxDesignMode
   const availableModels = useMemo(() => models.filter((model) => model.available), [models])
   const activeJobs = useMemo(
     () => trackedJobs.filter((job) => !isTerminalJobStatus(job.status?.status)),
@@ -505,14 +562,26 @@ export function VoiceoverStudio() {
     }
   }, [activeJobsKey, refreshRecentVoiceovers])
 
-  const chunkEstimateSize = selectedModelId === 'voxcpm2' ? 120 : 150
-  const roughChunkEstimate = useMemo(
-    () => (script.length === 0 ? 0 : Math.ceil(script.length / chunkEstimateSize)),
-    [chunkEstimateSize, script.length],
-  )
+  const roughChunkEstimate = useMemo(() => {
+    const trimmedScript = script.trim()
+    if (trimmedScript.length === 0) return 0
+
+    if (selectedModelId === VOX_MODEL_ID) {
+      const singlePassLimit = voxMode === VOX_MODE_CONTINUATION ? VOX_CONTINUATION_SINGLE_PASS_MAX_CHARS : VOX_SINGLE_PASS_MAX_CHARS
+      if (trimmedScript.length <= singlePassLimit) {
+        return 1
+      }
+      return Math.ceil(trimmedScript.length / VOX_CHUNK_ESTIMATE_SIZE)
+    }
+
+    return Math.ceil(trimmedScript.length / 150)
+  }, [script, selectedModelId, voxMode])
+  const chunkEstimateLabel =
+    roughChunkEstimate === 1 && selectedModelId === VOX_MODEL_ID ? 'Estimated chunks: 1 (single pass)' : `Estimated chunks: ${roughChunkEstimate}`
   const canGenerate =
-    !!selectedProfileId &&
+    (!requiresVoiceProfile || !!selectedProfileId) &&
     !!script.trim() &&
+    (!isVoxContinuationMode || !!voxPromptText.trim()) &&
     !!selectedModel?.available &&
     !submittingJob
 
@@ -576,6 +645,9 @@ export function VoiceoverStudio() {
     if (!canGenerate || !selectedModel?.available) return
 
     const requestedSpeed = Number(clampSpeed(parseFloat(speedInput)).toFixed(2))
+    const trimmedScript = script.trim()
+    const trimmedVoxPromptText = voxPromptText.trim()
+    const trimmedVoxStyleText = voxStyleText.trim()
 
     setSubmittingJob(true)
     setGenerationError(null)
@@ -583,16 +655,31 @@ export function VoiceoverStudio() {
     setSpeedInput(requestedSpeed.toFixed(2))
 
     try {
+      const payload: Record<string, unknown> = {
+        script: trimmedScript,
+        model_id: selectedModel.model_id,
+        output_format: outputFormat,
+        speed: requestedSpeed,
+      }
+
+      if (requiresVoiceProfile && selectedProfileId) {
+        payload.voice_profile_id = selectedProfileId
+      }
+
+      if (isVoxModel) {
+        payload.vox_mode = voxMode
+        if (isVoxContinuationMode && trimmedVoxPromptText) {
+          payload.prompt_text = trimmedVoxPromptText
+        }
+        if (!isVoxContinuationMode && trimmedVoxStyleText) {
+          payload.style_text = trimmedVoxStyleText
+        }
+      }
+
       const response = await apiRequest<{ job_id: string; status: string }>('/api/v1/voiceover/jobs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          voice_profile_id: selectedProfileId,
-          script: script.trim(),
-          model_id: selectedModel.model_id,
-          output_format: outputFormat,
-          speed: requestedSpeed,
-        }),
+        body: JSON.stringify(payload),
       })
 
       setTrackedJobs((current) =>
@@ -600,8 +687,8 @@ export function VoiceoverStudio() {
           jobId: response.job_id,
           modelId: selectedModel.model_id,
           modelLabel: selectedModel.display_name,
-          profileId: selectedProfileId,
-          profileName: selectedProfile?.name ?? 'Voice',
+          profileId: selectedProfileId || 'voice-design',
+          profileName: requiresVoiceProfile ? selectedProfile?.name ?? 'Voice' : 'Voice Design',
           createdAt: new Date().toISOString(),
           status: { status: response.status, completed_chunks: 0, total_chunks: 0 },
         }),
@@ -813,19 +900,35 @@ export function VoiceoverStudio() {
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2">
                 <Label htmlFor="voice-profile-select">Voice Profile</Label>
-                <select
-                  id="voice-profile-select"
-                  value={selectedProfileId}
-                  onChange={(event) => setSelectedProfileId(event.target.value)}
-                  className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
-                >
-                  <option value="">Select a saved profile</option>
-                  {profiles.map((profile) => (
-                    <option key={profile.id} value={profile.id}>
-                      {profile.name}
-                    </option>
-                  ))}
-                </select>
+                {requiresVoiceProfile ? (
+                  <>
+                    <select
+                      id="voice-profile-select"
+                      value={selectedProfileId}
+                      onChange={(event) => setSelectedProfileId(event.target.value)}
+                      className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                    >
+                      <option value="">Select a saved profile</option>
+                      {profiles.map((profile) => (
+                        <option key={profile.id} value={profile.id}>
+                          {profile.name}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-muted-foreground">
+                      {isVoxModel
+                        ? 'Required for Clone My Voice and Continue From Reference.'
+                        : 'Choose the saved reference clip you want this runtime to use.'}
+                    </p>
+                  </>
+                ) : (
+                  <div className="rounded-xl bg-background/30 p-4 ring-1 ring-border/35">
+                    <p className="text-sm font-medium">Voice Design skips saved reference audio.</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Vox will design a voice from text alone. Your saved profiles stay available if you switch back to Clone My Voice or Continue From Reference.
+                    </p>
+                  </div>
+                )}
               </div>
 
               <div className="space-y-2">
@@ -853,21 +956,90 @@ export function VoiceoverStudio() {
               </div>
             </div>
 
+            {isVoxModel && (
+              <div className="space-y-3 rounded-xl bg-background/30 p-4 ring-1 ring-border/35">
+                <div>
+                  <p className="text-sm font-semibold">Vox Mode</p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Vox supports voice design, controllable cloning, and explicit transcript-guided continuation. Pick the mode that matches what you want it to do.
+                  </p>
+                </div>
+                <div className="grid gap-2 md:grid-cols-3">
+                  {VOX_MODE_OPTIONS.map((option) => {
+                    const isActive = voxMode === option.value
+                    return (
+                      <button
+                        key={option.value}
+                        type="button"
+                        aria-pressed={isActive}
+                        onClick={() => setVoxMode(option.value)}
+                        className={`rounded-xl border px-4 py-3 text-left transition-colors ${
+                          isActive
+                            ? 'border-primary bg-primary/10 text-foreground'
+                            : 'border-border/50 bg-background/40 text-muted-foreground hover:border-border hover:text-foreground'
+                        }`}
+                      >
+                        <p className="text-sm font-semibold">{option.label}</p>
+                        <p className="mt-1 text-xs leading-5">{option.helper}</p>
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+
             <div className="space-y-2 rounded-xl bg-background/30 p-4 ring-1 ring-border/35">
               <Label htmlFor="voiceover-script">Script</Label>
+              <p className="text-xs text-muted-foreground">
+                {isVoxContinuationMode
+                  ? 'Continuation works best when this script naturally follows the reference clip.'
+                  : 'Paste the voiceover script here. Longer scripts are chunked conservatively and stitched into one final file.'}
+              </p>
               <Textarea
                 id="voiceover-script"
                 value={script}
                 onChange={(event) => setScript(event.target.value)}
-                placeholder="Paste the voiceover script here. Longer scripts are chunked automatically and stitched into one final file."
+                placeholder="Paste the voiceover script here."
                 rows={10}
                 className="min-h-[220px]"
               />
               <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
                 <span>{script.length} characters</span>
-                <span>Estimated chunks: {roughChunkEstimate}</span>
+                <span>{chunkEstimateLabel}</span>
               </div>
             </div>
+
+            {isVoxModel && !isVoxContinuationMode && (
+              <div className="space-y-2 rounded-xl bg-background/30 p-4 ring-1 ring-border/35">
+                <Label htmlFor="vox-style-text">Style / Control</Label>
+                <p className="text-xs text-muted-foreground">
+                  Optional. Use a short natural-language hint like “warm, intimate, slightly slower” to steer delivery without switching into continuation mode.
+                </p>
+                <Textarea
+                  id="vox-style-text"
+                  value={voxStyleText}
+                  onChange={(event) => setVoxStyleText(event.target.value)}
+                  placeholder="Warm, confident, slightly slower, with a soft smile"
+                  rows={3}
+                />
+              </div>
+            )}
+
+            {isVoxContinuationMode && (
+              <div className="space-y-2 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4">
+                <Label htmlFor="vox-prompt-text">Reference Transcript</Label>
+                <p className="text-xs text-amber-100/80">
+                  Advanced mode. Paste the exact transcript of the reference clip so Vox can continue from it instead of treating it like normal voice cloning.
+                </p>
+                <Textarea
+                  id="vox-prompt-text"
+                  value={voxPromptText}
+                  onChange={(event) => setVoxPromptText(event.target.value)}
+                  placeholder="Paste the exact transcript of the saved reference clip."
+                  rows={4}
+                />
+              </div>
+            )}
 
             <div className="grid gap-4 md:grid-cols-[minmax(0,1fr),220px,1fr]">
               <div className="space-y-3 rounded-xl bg-background/30 p-4 ring-1 ring-border/35">

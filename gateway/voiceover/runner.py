@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import audioop
+import logging
 import os
 import re
 import shutil
@@ -21,8 +22,13 @@ CONTAINER_OUTPUTS_ROOT = Path(os.getenv("OUTPUTS_ROOT", "/outputs"))
 VOICEOVER_RELATIVE_DIR = Path("voiceover")
 FISH_MODEL_ID = "fish_speech"
 VOX_MODEL_ID = "voxcpm2"
-VOX_MAX_CHARS = 220
-VOX_TARGET_SENTENCES_PER_CHUNK = 2
+VOX_MODE_DESIGN = "design"
+VOX_MODE_CLONE = "clone"
+VOX_MODE_CONTINUATION = "continuation"
+VOX_MAX_CHARS = 650
+VOX_TARGET_SENTENCES_PER_CHUNK = 4
+VOX_SINGLE_PASS_MAX_CHARS = 1200
+VOX_CONTINUATION_SINGLE_PASS_MAX_CHARS = 1800
 VOX_SILENCE_WINDOW_MS = 10
 VOX_HEAD_GUARD_MS = 20
 VOX_TAIL_GUARD_MS = 60
@@ -30,6 +36,7 @@ VOX_EDGE_FADE_MS = 8
 VOX_CROSSFADE_MS = 12
 VOX_MIN_CLIP_MS = 150
 VOX_SILENCE_THRESHOLD_RATIO = 0.008
+log = logging.getLogger("voiceover.runner")
 
 
 def _container_output_dir(job_id: str) -> Path:
@@ -86,6 +93,33 @@ def _build_output_basename(model_id: str, profile_name: str) -> str:
 def _build_output_filename(output_basename: str, extension: str) -> str:
     normalized_extension = extension.lower().lstrip(".") or "wav"
     return f"{output_basename}.{normalized_extension}"
+
+
+def _single_chunk(text: str) -> list[dict]:
+    return [{"text": text.strip(), "pause_ms": 0, "is_pause": False, "soft_split": False}]
+
+
+def _build_voiceover_chunks(script: str, *, model_id: str, vox_mode: str | None = None) -> list[dict]:
+    if model_id != VOX_MODEL_ID:
+        return chunk_script(script)
+
+    normalized = script.strip()
+    if not normalized:
+        return []
+
+    single_pass_limit = (
+        VOX_CONTINUATION_SINGLE_PASS_MAX_CHARS
+        if vox_mode == VOX_MODE_CONTINUATION
+        else VOX_SINGLE_PASS_MAX_CHARS
+    )
+    if len(normalized) <= single_pass_limit:
+        return _single_chunk(normalized)
+
+    return chunk_script(
+        script,
+        max_chars=VOX_MAX_CHARS,
+        target_sentences_per_chunk=VOX_TARGET_SENTENCES_PER_CHUNK,
+    )
 
 
 def _read_wave_params(path: Path) -> tuple[int, int, int]:
@@ -405,13 +439,24 @@ def _convert_to_mp3_if_possible(final_wav_path: Path, final_mp3_path: Path) -> P
         return final_wav_path
 
 
-async def run_voiceover_job(job_id, profile_id, script, model_id, output_format, speed, redis_client) -> None:
+async def run_voiceover_job(
+    job_id,
+    profile_id,
+    script,
+    model_id,
+    output_format,
+    speed,
+    redis_client,
+    vox_mode: str | None = None,
+    prompt_text: str | None = None,
+    style_text: str | None = None,
+) -> None:
     job_key = f"voiceover:{job_id}"
     completed_chunks = 0
 
     try:
-        profile = get_profile(profile_id)
-        if profile is None:
+        profile = get_profile(profile_id) if profile_id else None
+        if profile_id and profile is None:
             await _update_job(redis_client, job_key, status="failed", error="Voice profile not found")
             return
 
@@ -420,16 +465,22 @@ async def run_voiceover_job(job_id, profile_id, script, model_id, output_format,
             await _update_job(redis_client, job_key, status="failed", error="Requested model was not found")
             return
 
-        chunk_options: dict[str, int] = {}
-        if model_id == VOX_MODEL_ID:
-            chunk_options = {
-                "max_chars": VOX_MAX_CHARS,
-                "target_sentences_per_chunk": VOX_TARGET_SENTENCES_PER_CHUNK,
-            }
+        effective_vox_mode = (vox_mode or VOX_MODE_CLONE).strip().lower() or VOX_MODE_CLONE
+        if model_id != VOX_MODEL_ID:
+            effective_vox_mode = VOX_MODE_CLONE
 
-        chunks = chunk_script(script, **chunk_options)
+        chunks = _build_voiceover_chunks(script, model_id=model_id, vox_mode=effective_vox_mode)
         synthesis_chunks = [chunk for chunk in chunks if not chunk.get("is_pause")]
         total_chunks = len(synthesis_chunks)
+        if model_id == VOX_MODEL_ID:
+            log.info(
+                "Vox job %s: vox_mode=%s single_pass=%s chunk_count=%s continuation=%s",
+                job_id,
+                effective_vox_mode,
+                len(chunks) == 1 and total_chunks == 1,
+                total_chunks,
+                effective_vox_mode == VOX_MODE_CONTINUATION,
+            )
         if total_chunks == 0:
             await _update_job(redis_client, job_key, status="failed", error="Script did not produce any synthesis chunks")
             return
@@ -447,10 +498,25 @@ async def run_voiceover_job(job_id, profile_id, script, model_id, output_format,
         )
 
         rendered_chunk_paths: list[Path] = []
-        reference_audio_path = profile.reference_audio_path
+        reference_audio_path = profile.reference_audio_path if profile else None
         model_options = {"speed": speed}
         if model_id == FISH_MODEL_ID:
+            if profile is None:
+                await _update_job(redis_client, job_key, status="failed", error="Voice profile not found")
+                return
             model_options["voice_profile_id"] = profile.id
+        elif model_id == VOX_MODEL_ID:
+            if effective_vox_mode == VOX_MODE_DESIGN:
+                reference_audio_path = None
+            model_options["vox_mode"] = effective_vox_mode
+
+            cleaned_prompt_text = (prompt_text or "").strip()
+            if effective_vox_mode == VOX_MODE_CONTINUATION and cleaned_prompt_text:
+                model_options["prompt_text"] = cleaned_prompt_text
+
+            cleaned_style_text = (style_text or "").strip()
+            if effective_vox_mode != VOX_MODE_CONTINUATION and cleaned_style_text:
+                model_options["style_text"] = cleaned_style_text
 
         for chunk_index, chunk in enumerate(chunks, start=1):
             if chunk.get("is_pause"):
@@ -489,7 +555,7 @@ async def run_voiceover_job(job_id, profile_id, script, model_id, output_format,
         await _update_job(redis_client, job_key, status="stitching")
 
         merged_path = work_dir / "merged.wav"
-        output_basename = _build_output_basename(model_id, profile.name)
+        output_basename = _build_output_basename(model_id, profile.name if profile else "voice_design")
         final_wav_path = work_dir / _build_output_filename(output_basename, "wav")
         final_mp3_path = work_dir / _build_output_filename(output_basename, "mp3")
 

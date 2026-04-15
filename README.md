@@ -187,6 +187,11 @@ Voiceover Studio is the isolated long-form narration path in NeonForge. It inten
 - Ingest keeps a high-quality master reference instead of forcing `24 kHz` mono up front. Any runtime-specific conversion should happen in the model call path.
 - Reference clips longer than 30 seconds are rejected when duration tools are available.
 - The UI tracks active jobs across refreshes and keeps a recent-outputs list for playback, download, and cleanup.
+- VoxCPM2 exposes three explicit modes in this surface:
+  - `design`: no reference audio, optional style/control text
+  - `clone`: reference audio only, optional style/control text
+  - `continuation`: reference audio plus the exact transcript of that clip
+- Vox now defaults to normal clone semantics instead of silently auto-entering continuation mode.
 
 See [VOICEOVER_STUDIO.md](VOICEOVER_STUDIO.md) for the product-level notes and [gateway/voiceover/](gateway/voiceover) for the implementation.
 

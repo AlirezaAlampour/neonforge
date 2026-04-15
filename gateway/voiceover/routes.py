@@ -35,14 +35,22 @@ REFERENCE_AUDIO_EXTENSION = ".wav"
 HOST_OUTPUTS_ROOT = Path("/srv/ai/outputs")
 CONTAINER_OUTPUTS_ROOT = Path(os.getenv("OUTPUTS_ROOT", "/outputs"))
 VOICEOVER_OUTPUTS_RELATIVE_DIR = Path("voiceover")
+VOX_MODEL_ID = "voxcpm2"
+VOX_MODE_DESIGN = "design"
+VOX_MODE_CLONE = "clone"
+VOX_MODE_CONTINUATION = "continuation"
+VALID_VOX_MODES = {VOX_MODE_DESIGN, VOX_MODE_CLONE, VOX_MODE_CONTINUATION}
 
 
 class CreateVoiceoverJobRequest(BaseModel):
-    voice_profile_id: str
+    voice_profile_id: str | None = None
     script: str
     model_id: str
     output_format: str = "wav"
     speed: float = 1.0
+    vox_mode: str | None = None
+    prompt_text: str | None = None
+    style_text: str | None = None
 
 
 def _now_iso() -> str:
@@ -351,15 +359,39 @@ async def create_voiceover_job(request: CreateVoiceoverJobRequest, background_ta
     if redis_client is None:
         raise HTTPException(503, "Redis is unavailable")
 
-    profile = get_profile(request.voice_profile_id)
-    if profile is None:
-        raise HTTPException(422, "Selected voice profile does not exist")
-
     model = ModelRegistry.get_model(request.model_id)
     if model is None:
         raise HTTPException(422, "Selected TTS model does not exist")
     if not model.is_available():
         raise HTTPException(422, model.availability_error())
+
+    is_vox_model = request.model_id == VOX_MODEL_ID
+    vox_mode = str(request.vox_mode or VOX_MODE_CLONE).strip().lower() or VOX_MODE_CLONE
+    if is_vox_model and vox_mode not in VALID_VOX_MODES:
+        raise HTTPException(422, "Vox mode must be design, clone, or continuation")
+
+    cleaned_prompt_text = str(request.prompt_text or "").strip() or None
+    cleaned_style_text = str(request.style_text or "").strip() or None
+
+    profile: VoiceProfile | None = None
+    if is_vox_model:
+        if vox_mode != VOX_MODE_DESIGN:
+            if not request.voice_profile_id:
+                raise HTTPException(422, "Vox clone and continuation modes require a saved voice profile")
+
+            profile = get_profile(request.voice_profile_id)
+            if profile is None:
+                raise HTTPException(422, "Selected voice profile does not exist")
+
+        if vox_mode == VOX_MODE_CONTINUATION and not cleaned_prompt_text:
+            raise HTTPException(422, "Vox continuation mode requires the exact transcript of the reference clip")
+    else:
+        if not request.voice_profile_id:
+            raise HTTPException(422, "This model requires a saved voice profile")
+
+        profile = get_profile(request.voice_profile_id)
+        if profile is None:
+            raise HTTPException(422, "Selected voice profile does not exist")
 
     script = request.script.strip()
     if not script:
@@ -391,12 +423,15 @@ async def create_voiceover_job(request: CreateVoiceoverJobRequest, background_ta
     background_tasks.add_task(
         run_voiceover_job,
         job_id,
-        request.voice_profile_id,
+        profile.id if profile else None,
         script,
         request.model_id,
         output_format,
         speed,
         redis_client,
+        vox_mode if is_vox_model else None,
+        cleaned_prompt_text if is_vox_model else None,
+        cleaned_style_text if is_vox_model else None,
     )
 
     return {"job_id": job_id, "status": "pending"}

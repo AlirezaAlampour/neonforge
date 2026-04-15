@@ -9,7 +9,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from gateway.voiceover.chunker import chunk_script
-from gateway.voiceover.models import FishSpeechModel
+from gateway.voiceover.models import FishSpeechModel, VoxCPM2Model
 from gateway.voiceover.profiles import get_profile, save_profile
 from gateway.voiceover import models, profiles, runner
 
@@ -118,16 +118,93 @@ def test_fish_reference_transcript_is_persisted_and_reused(monkeypatch, tmp_path
     assert get_profile(profile.id).reference_transcript == "This is the cached reference transcript."
 
 
-def test_vox_chunk_strategy_uses_two_sentence_groups():
-    chunks = chunk_script(
-        "First sentence. Second sentence! Third question? Fourth line.",
-        max_chars=runner.VOX_MAX_CHARS,
-        target_sentences_per_chunk=runner.VOX_TARGET_SENTENCES_PER_CHUNK,
+def test_vox_clone_mode_sends_reference_audio_without_prompt_text(monkeypatch, tmp_path: Path):
+    reference_wav = tmp_path / "reference.wav"
+    _write_pcm_wav(reference_wav, _tone_frames(300))
+
+    captured: dict[str, object] = {}
+
+    def fake_post(url: str, *args, **kwargs):
+        captured["url"] = url
+        captured["data"] = kwargs["data"]
+        captured["files"] = kwargs.get("files") or {}
+        return _FakeResponse(content=b"RIFFfake", headers={"content-type": "audio/wav"})
+
+    monkeypatch.setattr(VoxCPM2Model, "is_available", lambda self: True)
+    monkeypatch.setattr(models.httpx, "post", fake_post)
+
+    output = VoxCPM2Model().synthesize(
+        "This is a clean clone.",
+        str(reference_wav),
+        {"vox_mode": runner.VOX_MODE_CLONE, "style_text": "warm, steady delivery"},
+    )
+
+    assert output == b"RIFFfake"
+    assert captured["url"] == "http://voxcpm2:8000/synthesize"
+    assert captured["data"] == {
+        "text": "(warm, steady delivery)This is a clean clone.",
+        "vox_mode": runner.VOX_MODE_CLONE,
+    }
+    assert list((captured["files"] or {}).keys()) == ["reference_audio"]
+
+
+def test_vox_continuation_mode_sends_prompt_text_when_explicitly_requested(monkeypatch, tmp_path: Path):
+    reference_wav = tmp_path / "reference.wav"
+    _write_pcm_wav(reference_wav, _tone_frames(300))
+
+    captured: dict[str, object] = {}
+
+    def fake_post(url: str, *args, **kwargs):
+        captured["data"] = kwargs["data"]
+        captured["files"] = kwargs.get("files") or {}
+        return _FakeResponse(content=b"RIFFfake", headers={"content-type": "audio/wav"})
+
+    monkeypatch.setattr(VoxCPM2Model, "is_available", lambda self: True)
+    monkeypatch.setattr(models.httpx, "post", fake_post)
+
+    output = VoxCPM2Model().synthesize(
+        "Continue from the same thought.",
+        str(reference_wav),
+        {
+            "vox_mode": runner.VOX_MODE_CONTINUATION,
+            "prompt_text": "This is the exact transcript of the saved clip.",
+            "style_text": "should be ignored here",
+        },
+    )
+
+    assert output == b"RIFFfake"
+    assert captured["data"] == {
+        "text": "Continue from the same thought.",
+        "vox_mode": runner.VOX_MODE_CONTINUATION,
+        "prompt_text": "This is the exact transcript of the saved clip.",
+    }
+    assert list((captured["files"] or {}).keys()) == ["reference_audio"]
+
+
+def test_vox_chunk_strategy_prefers_single_pass_for_short_scripts():
+    script = "First sentence. Second sentence! Third question? Fourth line."
+
+    chunks = runner._build_voiceover_chunks(
+        script,
+        model_id=runner.VOX_MODEL_ID,
+        vox_mode=runner.VOX_MODE_CLONE,
+    )
+
+    assert chunks == [{"text": script, "pause_ms": 0, "is_pause": False, "soft_split": False}]
+
+
+def test_vox_chunk_strategy_uses_larger_semantic_groups_when_chunking_is_needed(monkeypatch):
+    monkeypatch.setattr(runner, "VOX_SINGLE_PASS_MAX_CHARS", 10)
+
+    chunks = runner._build_voiceover_chunks(
+        "One. Two. Three. Four. Five. Six.",
+        model_id=runner.VOX_MODEL_ID,
+        vox_mode=runner.VOX_MODE_CLONE,
     )
 
     assert [chunk["text"] for chunk in chunks] == [
-        "First sentence. Second sentence!",
-        "Third question? Fourth line.",
+        "One. Two. Three. Four.",
+        "Five. Six.",
     ]
 
 
