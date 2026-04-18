@@ -29,6 +29,12 @@ def _configure_voice_profile_storage(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(profiles, "REGISTRY_CONTAINER_PATH", registry_path)
 
 
+def _configure_voiceover_output_storage(monkeypatch, tmp_path: Path) -> None:
+    outputs_root = tmp_path / "outputs"
+    monkeypatch.setattr(routes, "HOST_OUTPUTS_ROOT", outputs_root)
+    monkeypatch.setattr(routes, "CONTAINER_OUTPUTS_ROOT", outputs_root)
+
+
 def _tone_frames(duration_ms: int, *, sample_rate: int = 24000, amplitude: int = 5000, frequency_hz: float = 220.0) -> bytes:
     frame_count = int(sample_rate * (duration_ms / 1000.0))
     payload = bytearray()
@@ -87,6 +93,16 @@ def _mock_ffmpeg_success(
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(routes.subprocess, "run", fake_run)
+
+
+def _mock_reference_transcription(monkeypatch, transcript: str = "This is the exact recorded transcript.") -> None:
+    async def fake_transcribe(audio_name: str, audio_bytes: bytes, media_type: str) -> str:
+        assert audio_name.endswith(".wav")
+        assert audio_bytes[:4] == b"RIFF"
+        assert media_type in {"audio/wav", "audio/x-wav"}
+        return transcript
+
+    monkeypatch.setattr(routes, "_transcribe_audio_with_whisper", fake_transcribe)
 
 
 @pytest.mark.parametrize("filename", ["reference.wav", "reference.mp3", "reference.m4a"])
@@ -183,6 +199,28 @@ def test_create_voice_profile_returns_clear_error_when_ffmpeg_is_unavailable(mon
     assert response.json()["detail"] == "Reference audio normalization is unavailable because ffmpeg is not installed"
 
 
+def test_create_temp_reference_normalizes_transcribes_and_stores_clip(monkeypatch, tmp_path: Path):
+    _configure_voiceover_output_storage(monkeypatch, tmp_path)
+    _mock_ffmpeg_success(monkeypatch, duration_ms=1200, sample_rate=48000, channels=2)
+    _mock_reference_transcription(monkeypatch, "Freshly recorded continuation prompt.")
+    client = _build_client()
+
+    response = client.post(
+        "/api/v1/voiceover/temp-reference",
+        files={"audio_file": ("recording.webm", b"uploaded-audio", "audio/webm")},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["transcript"] == "Freshly recorded continuation prompt."
+
+    stored_path = routes._get_temp_reference_path(payload["temp_reference_id"])
+    assert stored_path is not None
+    assert stored_path.exists()
+    assert stored_path.suffix == ".wav"
+    assert stored_path.read_bytes()[:4] == b"RIFF"
+
+
 class _FakeRedis:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, str]]] = []
@@ -230,6 +268,8 @@ def _configure_job_creation(monkeypatch, *, model_id: str):
         vox_mode=None,
         prompt_text=None,
         style_text=None,
+        reference_audio_path=None,
+        reference_label=None,
     ) -> None:
         captured.update(
             {
@@ -243,6 +283,8 @@ def _configure_job_creation(monkeypatch, *, model_id: str):
                 "vox_mode": vox_mode,
                 "prompt_text": prompt_text,
                 "style_text": style_text,
+                "reference_audio_path": reference_audio_path,
+                "reference_label": reference_label,
             }
         )
 
@@ -318,7 +360,28 @@ def test_create_voiceover_job_rejects_vox_clone_without_profile(monkeypatch, tmp
     )
 
     assert response.status_code == 422
-    assert response.json()["detail"] == "Vox clone and continuation modes require a saved voice profile"
+    assert response.json()["detail"] == "Vox clone mode requires a saved voice profile"
+
+
+def test_create_voiceover_job_rejects_vox_continuation_without_any_reference(monkeypatch, tmp_path: Path):
+    _configure_voice_profile_storage(monkeypatch, tmp_path)
+    _configure_job_creation(monkeypatch, model_id="voxcpm2")
+    client = _build_client()
+
+    response = client.post(
+        "/api/v1/voiceover/jobs",
+        json={
+            "script": "Continue from something fresh.",
+            "model_id": "voxcpm2",
+            "vox_mode": "continuation",
+            "prompt_text": "The transcript exists but there is no clip.",
+            "output_format": "wav",
+            "speed": 1.0,
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Vox continuation mode requires a saved voice profile or recorded reference clip"
 
 
 def test_create_voiceover_job_rejects_vox_continuation_without_transcript(monkeypatch, tmp_path: Path):
@@ -342,6 +405,70 @@ def test_create_voiceover_job_rejects_vox_continuation_without_transcript(monkey
 
     assert response.status_code == 422
     assert response.json()["detail"] == "Vox continuation mode requires the exact transcript of the reference clip"
+
+
+def test_create_voiceover_job_accepts_vox_continuation_with_temp_reference(monkeypatch, tmp_path: Path):
+    _configure_voice_profile_storage(monkeypatch, tmp_path)
+    _configure_voiceover_output_storage(monkeypatch, tmp_path)
+    _, captured = _configure_job_creation(monkeypatch, model_id="voxcpm2")
+
+    temp_reference_id = "recorded-reference-1"
+    temp_reference_path = routes._temp_reference_path(temp_reference_id)
+    temp_reference_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_reference_path.write_bytes(b"RIFFfake")
+
+    monkeypatch.setattr(routes, "get_profile", lambda profile_id: pytest.fail("Temp Vox continuation should not require a saved profile"))
+    client = _build_client()
+
+    response = client.post(
+        "/api/v1/voiceover/jobs",
+        json={
+            "temp_reference_id": temp_reference_id,
+            "script": "Continue directly from this fresh take.",
+            "model_id": "voxcpm2",
+            "vox_mode": "continuation",
+            "prompt_text": "Freshly recorded continuation prompt.",
+            "output_format": "wav",
+            "speed": 1.0,
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["profile_id"] is None
+    assert captured["vox_mode"] == routes.VOX_MODE_CONTINUATION
+    assert captured["prompt_text"] == "Freshly recorded continuation prompt."
+    assert captured["reference_audio_path"] != str(temp_reference_path)
+    assert Path(str(captured["reference_audio_path"])).name == "recorded_reference.wav"
+    assert captured["job_id"] in str(captured["reference_audio_path"])
+    assert captured["reference_label"] == "Recorded Reference"
+
+
+def test_create_voiceover_job_keeps_saved_profile_vox_continuation_flow(monkeypatch, tmp_path: Path):
+    _configure_voice_profile_storage(monkeypatch, tmp_path)
+    _, captured = _configure_job_creation(monkeypatch, model_id="voxcpm2")
+    profile = _fake_profile()
+    monkeypatch.setattr(routes, "get_profile", lambda profile_id: profile if profile_id == profile.id else None)
+    client = _build_client()
+
+    response = client.post(
+        "/api/v1/voiceover/jobs",
+        json={
+            "voice_profile_id": profile.id,
+            "script": "Continue from the saved profile clip.",
+            "model_id": "voxcpm2",
+            "vox_mode": "continuation",
+            "prompt_text": "This is the exact transcript of the saved clip.",
+            "output_format": "wav",
+            "speed": 1.0,
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["profile_id"] == profile.id
+    assert captured["reference_audio_path"] is None
+    assert captured["reference_label"] is None
+    assert captured["vox_mode"] == routes.VOX_MODE_CONTINUATION
+    assert captured["prompt_text"] == "This is the exact transcript of the saved clip."
 
 
 def test_create_voiceover_job_still_requires_profile_for_f5(monkeypatch, tmp_path: Path):

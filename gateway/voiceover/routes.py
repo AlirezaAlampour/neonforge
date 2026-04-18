@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -31,10 +32,12 @@ router = APIRouter(prefix="/api/v1/voiceover", tags=["voiceover"])
 
 VOICEOVER_OUTPUT_EXTENSIONS = {".wav", ".mp3"}
 VOICE_PROFILE_INPUT_EXTENSIONS = {".wav", ".mp3", ".m4a"}
+TEMP_REFERENCE_INPUT_EXTENSIONS = VOICE_PROFILE_INPUT_EXTENSIONS | {".webm"}
 REFERENCE_AUDIO_EXTENSION = ".wav"
 HOST_OUTPUTS_ROOT = Path("/srv/ai/outputs")
 CONTAINER_OUTPUTS_ROOT = Path(os.getenv("OUTPUTS_ROOT", "/outputs"))
 VOICEOVER_OUTPUTS_RELATIVE_DIR = Path("voiceover")
+VOICEOVER_TEMP_REFERENCE_RELATIVE_DIR = Path("voiceover_temp_references")
 VOX_MODEL_ID = "voxcpm2"
 VOX_MODE_DESIGN = "design"
 VOX_MODE_CLONE = "clone"
@@ -44,6 +47,7 @@ VALID_VOX_MODES = {VOX_MODE_DESIGN, VOX_MODE_CLONE, VOX_MODE_CONTINUATION}
 
 class CreateVoiceoverJobRequest(BaseModel):
     voice_profile_id: str | None = None
+    temp_reference_id: str | None = None
     script: str
     model_id: str
     output_format: str = "wav"
@@ -184,6 +188,29 @@ def _voiceover_output_dir() -> Path:
     return CONTAINER_OUTPUTS_ROOT / VOICEOVER_OUTPUTS_RELATIVE_DIR
 
 
+def _voiceover_temp_reference_dir() -> Path:
+    path = CONTAINER_OUTPUTS_ROOT / VOICEOVER_TEMP_REFERENCE_RELATIVE_DIR
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _temp_reference_path(reference_id: str) -> Path:
+    cleaned_reference_id = reference_id.strip()
+    if not cleaned_reference_id or Path(cleaned_reference_id).name != cleaned_reference_id:
+        raise HTTPException(422, "Temporary reference id is invalid")
+    return _voiceover_temp_reference_dir() / f"{cleaned_reference_id}{REFERENCE_AUDIO_EXTENSION}"
+
+
+def _get_temp_reference_path(reference_id: str | None) -> Path | None:
+    if not reference_id:
+        return None
+
+    candidate = _temp_reference_path(reference_id)
+    if not candidate.exists() or not candidate.is_file():
+        return None
+    return candidate
+
+
 def _container_output_path_to_host(path_value: str | Path) -> Path:
     path = Path(path_value)
     if not path.is_absolute():
@@ -219,36 +246,15 @@ def _find_voiceover_output(job_id: str) -> Path | None:
     return None
 
 
-def _resolve_job_output_path(job_id: str, job: dict[str, Any] | None = None) -> Path | None:
-    if job and job.get("output_path"):
-        output_path = _output_host_path_to_container(str(job["output_path"]))
-        if output_path.exists() and output_path.is_file():
-            return output_path
-
-    return _find_voiceover_output(job_id)
-
-
-def _serialize_recent_voiceover(job_id: str, output_path: Path) -> dict[str, Any]:
-    created_at = datetime.fromtimestamp(output_path.stat().st_mtime, tz=timezone.utc).isoformat()
-    host_output_path = _container_output_path_to_host(output_path)
-    return {
-        "job_id": job_id,
-        "filename": output_path.name,
-        "created_at": created_at,
-        "output_path": str(host_output_path),
-        "output_url": f"/api/v1/voiceover/output/{job_id}",
-    }
-
-
-@router.post("/profiles")
-async def create_voice_profile(
-    name: str = Form(...),
-    notes: str = Form(""),
-    audio_file: UploadFile = File(...),
-):
+async def _prepare_reference_audio_upload(
+    audio_file: UploadFile,
+    *,
+    allowed_extensions: set[str],
+    unsupported_extension_message: str,
+) -> tuple[bytes, str]:
     extension = Path(audio_file.filename or "").suffix.lower()
-    if extension not in VOICE_PROFILE_INPUT_EXTENSIONS:
-        raise HTTPException(422, "Audio file must be a WAV, MP3, or M4A")
+    if extension not in allowed_extensions:
+        raise HTTPException(422, unsupported_extension_message)
 
     audio_bytes = await audio_file.read()
     if not audio_bytes:
@@ -271,19 +277,112 @@ async def create_voice_profile(
             raise HTTPException(422, "Reference audio must be 30 seconds or shorter")
 
         normalized_filename = f"{Path(audio_file.filename or 'reference').stem or 'reference'}{REFERENCE_AUDIO_EXTENSION}"
-        profile = save_profile(
-            name=name,
-            audio_bytes=temp_output_path.read_bytes(),
-            stored_filename=normalized_filename,
-            notes=notes,
-        )
+        return temp_output_path.read_bytes(), normalized_filename
     finally:
         if temp_input_path is not None:
             temp_input_path.unlink(missing_ok=True)
         if temp_output_path is not None:
             temp_output_path.unlink(missing_ok=True)
 
+
+async def _transcribe_audio_with_whisper(audio_name: str, audio_bytes: bytes, media_type: str) -> str:
+    whisper_url = os.getenv("WHISPER_URL", "http://whisper:8000").rstrip("/")
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=10.0)) as client:
+            response = await client.post(
+                f"{whisper_url}/transcribe",
+                files={"audio": (audio_name, audio_bytes, media_type)},
+            )
+            response.raise_for_status()
+            payload = response.json()
+    except Exception as exc:
+        raise HTTPException(503, "Reference audio transcription is unavailable right now") from exc
+
+    transcript = str(payload.get("text") or "").strip()
+    if not transcript:
+        raise HTTPException(422, "Reference audio could not be transcribed")
+    return transcript
+
+
+def _resolve_job_output_path(job_id: str, job: dict[str, Any] | None = None) -> Path | None:
+    if job and job.get("output_path"):
+        output_path = _output_host_path_to_container(str(job["output_path"]))
+        if output_path.exists() and output_path.is_file():
+            return output_path
+
+    return _find_voiceover_output(job_id)
+
+
+def _stage_temp_reference_for_job(job_id: str, temp_reference_path: Path) -> Path:
+    staged_dir = _voiceover_output_dir() / job_id / "inputs"
+    staged_dir.mkdir(parents=True, exist_ok=True)
+    staged_path = staged_dir / "recorded_reference.wav"
+    shutil.copyfile(temp_reference_path, staged_path)
+    return staged_path
+
+
+def _serialize_recent_voiceover(job_id: str, output_path: Path) -> dict[str, Any]:
+    created_at = datetime.fromtimestamp(output_path.stat().st_mtime, tz=timezone.utc).isoformat()
+    host_output_path = _container_output_path_to_host(output_path)
+    return {
+        "job_id": job_id,
+        "filename": output_path.name,
+        "created_at": created_at,
+        "output_path": str(host_output_path),
+        "output_url": f"/api/v1/voiceover/output/{job_id}",
+    }
+
+
+@router.post("/profiles")
+async def create_voice_profile(
+    name: str = Form(...),
+    notes: str = Form(""),
+    audio_file: UploadFile = File(...),
+):
+    normalized_audio_bytes, normalized_filename = await _prepare_reference_audio_upload(
+        audio_file,
+        allowed_extensions=VOICE_PROFILE_INPUT_EXTENSIONS,
+        unsupported_extension_message="Audio file must be a WAV, MP3, or M4A",
+    )
+    profile = save_profile(
+        name=name,
+        audio_bytes=normalized_audio_bytes,
+        stored_filename=normalized_filename,
+        notes=notes,
+    )
+
     return _serialize_profile(profile)
+
+
+@router.post("/temp-reference")
+async def create_temp_reference(audio_file: UploadFile = File(...)):
+    normalized_audio_bytes, normalized_filename = await _prepare_reference_audio_upload(
+        audio_file,
+        allowed_extensions=TEMP_REFERENCE_INPUT_EXTENSIONS,
+        unsupported_extension_message="Audio file must be a WAV, MP3, M4A, or WebM",
+    )
+    media_type = mimetypes.guess_type(normalized_filename)[0] or "audio/wav"
+    transcript = await _transcribe_audio_with_whisper(normalized_filename, normalized_audio_bytes, media_type)
+
+    temp_reference_id = str(uuid.uuid4())
+    temp_reference_path = _temp_reference_path(temp_reference_id)
+    temp_reference_path.write_bytes(normalized_audio_bytes)
+
+    return {
+        "temp_reference_id": temp_reference_id,
+        "transcript": transcript,
+    }
+
+
+@router.delete("/temp-reference/{temp_reference_id}")
+async def delete_temp_reference(temp_reference_id: str):
+    temp_reference_path = _get_temp_reference_path(temp_reference_id)
+    if temp_reference_path is None:
+        raise HTTPException(404, "Temporary reference clip not found")
+
+    temp_reference_path.unlink(missing_ok=True)
+    return {"deleted": True}
 
 
 @router.get("/profiles")
@@ -369,15 +468,28 @@ async def create_voiceover_job(request: CreateVoiceoverJobRequest, background_ta
     vox_mode = str(request.vox_mode or VOX_MODE_CLONE).strip().lower() or VOX_MODE_CLONE
     if is_vox_model and vox_mode not in VALID_VOX_MODES:
         raise HTTPException(422, "Vox mode must be design, clone, or continuation")
+    if request.temp_reference_id and (not is_vox_model or vox_mode != VOX_MODE_CONTINUATION):
+        raise HTTPException(422, "Temporary recorded references are only supported for Vox continuation mode")
 
     cleaned_prompt_text = str(request.prompt_text or "").strip() or None
     cleaned_style_text = str(request.style_text or "").strip() or None
 
     profile: VoiceProfile | None = None
+    temp_reference_path = _get_temp_reference_path(request.temp_reference_id)
+    if request.temp_reference_id and temp_reference_path is None:
+        raise HTTPException(422, "Recorded reference clip does not exist")
+
     if is_vox_model:
-        if vox_mode != VOX_MODE_DESIGN:
+        if vox_mode == VOX_MODE_CLONE:
             if not request.voice_profile_id:
-                raise HTTPException(422, "Vox clone and continuation modes require a saved voice profile")
+                raise HTTPException(422, "Vox clone mode requires a saved voice profile")
+
+            profile = get_profile(request.voice_profile_id)
+            if profile is None:
+                raise HTTPException(422, "Selected voice profile does not exist")
+        elif vox_mode == VOX_MODE_CONTINUATION and temp_reference_path is None:
+            if not request.voice_profile_id:
+                raise HTTPException(422, "Vox continuation mode requires a saved voice profile or recorded reference clip")
 
             profile = get_profile(request.voice_profile_id)
             if profile is None:
@@ -408,6 +520,7 @@ async def create_voiceover_job(request: CreateVoiceoverJobRequest, background_ta
         raise HTTPException(422, "Speed must be between 0.8 and 1.25")
 
     job_id = str(uuid.uuid4())
+    staged_reference_path = _stage_temp_reference_for_job(job_id, temp_reference_path) if temp_reference_path is not None else None
     await redis_client.hset(
         f"voiceover:{job_id}",
         mapping={
@@ -432,6 +545,8 @@ async def create_voiceover_job(request: CreateVoiceoverJobRequest, background_ta
         vox_mode if is_vox_model else None,
         cleaned_prompt_text if is_vox_model else None,
         cleaned_style_text if is_vox_model else None,
+        str(staged_reference_path) if staged_reference_path is not None else None,
+        "Recorded Reference" if temp_reference_path is not None else None,
     )
 
     return {"job_id": job_id, "status": "pending"}

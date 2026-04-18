@@ -450,6 +450,8 @@ async def run_voiceover_job(
     vox_mode: str | None = None,
     prompt_text: str | None = None,
     style_text: str | None = None,
+    reference_audio_path: str | None = None,
+    reference_label: str | None = None,
 ) -> None:
     job_key = f"voiceover:{job_id}"
     completed_chunks = 0
@@ -498,7 +500,7 @@ async def run_voiceover_job(
         )
 
         rendered_chunk_paths: list[Path] = []
-        reference_audio_path = profile.reference_audio_path if profile else None
+        resolved_reference_audio_path = reference_audio_path or (profile.reference_audio_path if profile else None)
         model_options = {"speed": speed}
         if model_id == FISH_MODEL_ID:
             if profile is None:
@@ -507,7 +509,7 @@ async def run_voiceover_job(
             model_options["voice_profile_id"] = profile.id
         elif model_id == VOX_MODEL_ID:
             if effective_vox_mode == VOX_MODE_DESIGN:
-                reference_audio_path = None
+                resolved_reference_audio_path = None
             model_options["vox_mode"] = effective_vox_mode
 
             cleaned_prompt_text = (prompt_text or "").strip()
@@ -527,7 +529,7 @@ async def run_voiceover_job(
                 wav_bytes = await asyncio.to_thread(
                     model.synthesize,
                     str(chunk.get("text", "")),
-                    reference_audio_path,
+                    resolved_reference_audio_path,
                     model_options,
                 )
             except Exception as exc:
@@ -555,7 +557,7 @@ async def run_voiceover_job(
         await _update_job(redis_client, job_key, status="stitching")
 
         merged_path = work_dir / "merged.wav"
-        output_basename = _build_output_basename(model_id, profile.name if profile else "voice_design")
+        output_basename = _build_output_basename(model_id, reference_label or (profile.name if profile else "voice_design"))
         final_wav_path = work_dir / _build_output_filename(output_basename, "wav")
         final_mp3_path = work_dir / _build_output_filename(output_basename, "mp3")
 

@@ -2,12 +2,14 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  AlertTriangle,
   ChevronDown,
   ChevronUp,
   Download,
   History,
   Loader2,
   Mic2,
+  Square,
   Play,
   RefreshCw,
   Trash2,
@@ -15,6 +17,8 @@ import {
   Wand2,
 } from 'lucide-react'
 import { FileDropzone } from '@/components/file-dropzone'
+import { useMediaRecorder } from '@/hooks/use-media-recorder'
+import { formatDuration } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -64,6 +68,7 @@ interface PersistedVoiceoverFormState {
   outputFormat?: 'wav' | 'mp3'
   speed?: number
   voxMode?: VoxMode
+  voxContinuationReferenceSource?: VoxContinuationReferenceSource
   voxPromptText?: string
   voxStyleText?: string
 }
@@ -100,6 +105,12 @@ const VOX_CONTINUATION_SINGLE_PASS_MAX_CHARS = 1800
 const VOX_CHUNK_ESTIMATE_SIZE = 650
 
 type VoxMode = 'design' | 'clone' | 'continuation'
+type VoxContinuationReferenceSource = 'profile' | 'record'
+
+interface TemporaryReferenceUploadResponse {
+  temp_reference_id: string
+  transcript: string
+}
 
 const VOX_MODE_OPTIONS: Array<{
   value: VoxMode
@@ -283,6 +294,9 @@ function uploadVoiceProfile(formData: FormData, onProgress: (value: number) => v
 export function VoiceoverStudio() {
   const restoredFormStateRef = useRef<PersistedVoiceoverFormState | null>(null)
   const activeJobsRef = useRef<TrackedVoiceoverJob[]>([])
+  const voxRecordedReferenceTokenRef = useRef(0)
+  const voxProcessedRecordingRef = useRef<Blob | null>(null)
+  const voxRecorder = useMediaRecorder()
   const [profiles, setProfiles] = useState<VoiceProfile[]>([])
   const [models, setModels] = useState<VoiceoverModelSummary[]>([])
   const [recentVoiceovers, setRecentVoiceovers] = useState<RecentVoiceover[]>([])
@@ -308,6 +322,10 @@ export function VoiceoverStudio() {
   const [speed, setSpeed] = useState(1)
   const [speedInput, setSpeedInput] = useState('1.00')
   const [voxMode, setVoxMode] = useState<VoxMode>(VOX_MODE_CLONE)
+  const [voxContinuationReferenceSource, setVoxContinuationReferenceSource] = useState<VoxContinuationReferenceSource>('profile')
+  const [voxRecordedReferenceId, setVoxRecordedReferenceId] = useState('')
+  const [voxRecordedReferencePending, setVoxRecordedReferencePending] = useState(false)
+  const [voxRecordedReferenceError, setVoxRecordedReferenceError] = useState<string | null>(null)
   const [voxPromptText, setVoxPromptText] = useState('')
   const [voxStyleText, setVoxStyleText] = useState('')
   const [trackedJobs, setTrackedJobs] = useState<TrackedVoiceoverJob[]>([])
@@ -391,6 +409,12 @@ export function VoiceoverStudio() {
           ) {
             setVoxMode(payload.voxMode)
           }
+          if (
+            payload.voxContinuationReferenceSource === 'profile' ||
+            payload.voxContinuationReferenceSource === 'record'
+          ) {
+            setVoxContinuationReferenceSource(payload.voxContinuationReferenceSource)
+          }
           if (typeof payload.voxPromptText === 'string') {
             setVoxPromptText(payload.voxPromptText)
           }
@@ -448,12 +472,13 @@ export function VoiceoverStudio() {
       outputFormat,
       speed,
       voxMode,
+      voxContinuationReferenceSource,
       voxPromptText,
       voxStyleText,
     }
 
     window.localStorage.setItem(VOICEOVER_FORM_STATE_KEY, JSON.stringify(payload))
-  }, [formStateRestored, outputFormat, script, selectedModelId, selectedProfileId, speed, voxMode, voxPromptText, voxStyleText])
+  }, [formStateRestored, outputFormat, script, selectedModelId, selectedProfileId, speed, voxMode, voxContinuationReferenceSource, voxPromptText, voxStyleText])
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -481,7 +506,8 @@ export function VoiceoverStudio() {
   const isVoxModel = selectedModel?.model_id === VOX_MODEL_ID
   const isVoxDesignMode = isVoxModel && voxMode === VOX_MODE_DESIGN
   const isVoxContinuationMode = isVoxModel && voxMode === VOX_MODE_CONTINUATION
-  const requiresVoiceProfile = !isVoxDesignMode
+  const voxContinuationUsesRecordedReference = isVoxContinuationMode && voxContinuationReferenceSource === 'record'
+  const requiresSavedVoiceProfile = !isVoxDesignMode && !voxContinuationUsesRecordedReference
   const availableModels = useMemo(() => models.filter((model) => model.available), [models])
   const activeJobs = useMemo(
     () => trackedJobs.filter((job) => !isTerminalJobStatus(job.status?.status)),
@@ -562,6 +588,73 @@ export function VoiceoverStudio() {
     }
   }, [activeJobsKey, refreshRecentVoiceovers])
 
+  const deleteTempReference = useCallback(async (referenceId: string) => {
+    try {
+      await apiRequest<{ deleted: boolean }>(`/api/v1/voiceover/temp-reference/${referenceId}`, {
+        method: 'DELETE',
+      })
+    } catch {
+      return
+    }
+  }, [])
+
+  const clearRecordedReference = useCallback((options?: { clearTranscript?: boolean }) => {
+    voxRecordedReferenceTokenRef.current += 1
+    voxProcessedRecordingRef.current = null
+    if (voxRecordedReferenceId) {
+      void deleteTempReference(voxRecordedReferenceId)
+    }
+    setVoxRecordedReferenceId('')
+    setVoxRecordedReferencePending(false)
+    setVoxRecordedReferenceError(null)
+    if (options?.clearTranscript !== false) {
+      setVoxPromptText('')
+    }
+    voxRecorder.clearRecording()
+  }, [deleteTempReference, voxRecordedReferenceId, voxRecorder.clearRecording])
+
+  const uploadRecordedReference = useCallback(async (recordedBlob: Blob) => {
+    const requestToken = ++voxRecordedReferenceTokenRef.current
+    setVoxRecordedReferencePending(true)
+    setVoxRecordedReferenceError(null)
+
+    try {
+      const formData = new FormData()
+      formData.append('audio_file', recordedBlob, `vox-continuation-reference-${Date.now()}.webm`)
+
+      const response = await apiRequest<TemporaryReferenceUploadResponse>('/api/v1/voiceover/temp-reference', {
+        method: 'POST',
+        body: formData,
+      })
+
+      if (requestToken !== voxRecordedReferenceTokenRef.current) {
+        void deleteTempReference(response.temp_reference_id)
+        return
+      }
+
+      setVoxRecordedReferenceId(response.temp_reference_id)
+      setVoxPromptText(response.transcript)
+    } catch (error: unknown) {
+      if (requestToken !== voxRecordedReferenceTokenRef.current) {
+        return
+      }
+      setVoxRecordedReferenceId('')
+      setVoxRecordedReferenceError(error instanceof Error ? error.message : 'Failed to prepare the recorded reference clip')
+    } finally {
+      if (requestToken === voxRecordedReferenceTokenRef.current) {
+        setVoxRecordedReferencePending(false)
+      }
+    }
+  }, [deleteTempReference])
+
+  useEffect(() => {
+    if (!voxContinuationUsesRecordedReference || !voxRecorder.audioBlob) return
+    if (voxRecorder.audioBlob === voxProcessedRecordingRef.current) return
+
+    voxProcessedRecordingRef.current = voxRecorder.audioBlob
+    void uploadRecordedReference(voxRecorder.audioBlob)
+  }, [uploadRecordedReference, voxContinuationUsesRecordedReference, voxRecorder.audioBlob])
+
   const roughChunkEstimate = useMemo(() => {
     const trimmedScript = script.trim()
     if (trimmedScript.length === 0) return 0
@@ -578,11 +671,13 @@ export function VoiceoverStudio() {
   }, [script, selectedModelId, voxMode])
   const chunkEstimateLabel =
     roughChunkEstimate === 1 && selectedModelId === VOX_MODEL_ID ? 'Estimated chunks: 1 (single pass)' : `Estimated chunks: ${roughChunkEstimate}`
+  const hasRequiredReference = isVoxDesignMode ? true : voxContinuationUsesRecordedReference ? !!voxRecordedReferenceId : !!selectedProfileId
   const canGenerate =
-    (!requiresVoiceProfile || !!selectedProfileId) &&
+    hasRequiredReference &&
     !!script.trim() &&
     (!isVoxContinuationMode || !!voxPromptText.trim()) &&
     !!selectedModel?.available &&
+    (!voxContinuationUsesRecordedReference || !voxRecordedReferencePending) &&
     !submittingJob
 
   const updateSpeed = (nextValue: number) => {
@@ -641,6 +736,23 @@ export function VoiceoverStudio() {
     setPreviewUrl(`/api/v1/voiceover/profiles/${profile.id}/sample?v=${Date.now()}`)
   }
 
+  const handleUseSavedVoiceProfile = () => {
+    if (voxContinuationReferenceSource === 'record') {
+      clearRecordedReference()
+    }
+    setVoxContinuationReferenceSource('profile')
+  }
+
+  const handleRecordReferenceNow = () => {
+    setVoxContinuationReferenceSource('record')
+    setVoxRecordedReferenceError(null)
+  }
+
+  const handleStartRecordedReference = async () => {
+    clearRecordedReference()
+    await voxRecorder.startRecording()
+  }
+
   const handleGenerate = async () => {
     if (!canGenerate || !selectedModel?.available) return
 
@@ -662,8 +774,11 @@ export function VoiceoverStudio() {
         speed: requestedSpeed,
       }
 
-      if (requiresVoiceProfile && selectedProfileId) {
+      if (requiresSavedVoiceProfile && selectedProfileId) {
         payload.voice_profile_id = selectedProfileId
+      }
+      if (voxContinuationUsesRecordedReference && voxRecordedReferenceId) {
+        payload.temp_reference_id = voxRecordedReferenceId
       }
 
       if (isVoxModel) {
@@ -687,8 +802,8 @@ export function VoiceoverStudio() {
           jobId: response.job_id,
           modelId: selectedModel.model_id,
           modelLabel: selectedModel.display_name,
-          profileId: selectedProfileId || 'voice-design',
-          profileName: requiresVoiceProfile ? selectedProfile?.name ?? 'Voice' : 'Voice Design',
+          profileId: voxContinuationUsesRecordedReference ? voxRecordedReferenceId || 'recorded-reference' : selectedProfileId || 'voice-design',
+          profileName: isVoxDesignMode ? 'Voice Design' : voxContinuationUsesRecordedReference ? 'Recorded Reference' : selectedProfile?.name ?? 'Voice',
           createdAt: new Date().toISOString(),
           status: { status: response.status, completed_chunks: 0, total_chunks: 0 },
         }),
@@ -866,7 +981,7 @@ export function VoiceoverStudio() {
 
               {!profilesLoading && profiles.length === 0 && (
                 <div className="rounded-xl border border-dashed border-border/50 p-6 text-center text-sm text-muted-foreground">
-                  Save your first voice profile to unlock generation.
+                  Save your first voice profile to reuse references later. Vox Voice Design and recorded continuation can still run without one.
                 </div>
               )}
             </div>
@@ -900,7 +1015,7 @@ export function VoiceoverStudio() {
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2">
                 <Label htmlFor="voice-profile-select">Voice Profile</Label>
-                {requiresVoiceProfile ? (
+                {requiresSavedVoiceProfile ? (
                   <>
                     <select
                       id="voice-profile-select"
@@ -917,10 +1032,17 @@ export function VoiceoverStudio() {
                     </select>
                     <p className="text-xs text-muted-foreground">
                       {isVoxModel
-                        ? 'Required for Clone My Voice and Continue From Reference.'
+                        ? 'Required for Clone My Voice, or for continuation when you choose Use Saved Voice Profile.'
                         : 'Choose the saved reference clip you want this runtime to use.'}
                     </p>
                   </>
+                ) : isVoxContinuationMode ? (
+                  <div className="rounded-xl bg-background/30 p-4 ring-1 ring-border/35">
+                    <p className="text-sm font-medium">Recorded reference clips can drive this continuation run.</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Record a fresh clip below and Vox will use it directly without creating a permanent voice profile first.
+                    </p>
+                  </div>
                 ) : (
                   <div className="rounded-xl bg-background/30 p-4 ring-1 ring-border/35">
                     <p className="text-sm font-medium">Voice Design skips saved reference audio.</p>
@@ -1026,18 +1148,124 @@ export function VoiceoverStudio() {
             )}
 
             {isVoxContinuationMode && (
-              <div className="space-y-2 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4">
-                <Label htmlFor="vox-prompt-text">Reference Transcript</Label>
-                <p className="text-xs text-amber-100/80">
-                  Advanced mode. Paste the exact transcript of the reference clip so Vox can continue from it instead of treating it like normal voice cloning.
-                </p>
-                <Textarea
-                  id="vox-prompt-text"
-                  value={voxPromptText}
-                  onChange={(event) => setVoxPromptText(event.target.value)}
-                  placeholder="Paste the exact transcript of the saved reference clip."
-                  rows={4}
-                />
+              <div className="space-y-4 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4">
+                <div className="space-y-3">
+                  <div>
+                    <p className="text-sm font-semibold">Continuation Reference</p>
+                    <p className="mt-1 text-xs text-amber-100/80">
+                      Pick an existing saved profile, or record a fresh reference clip right here and let ASR pre-fill the transcript for you.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap rounded-lg border border-amber-500/20 bg-background/25 p-1">
+                    <button
+                      type="button"
+                      onClick={handleUseSavedVoiceProfile}
+                      className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                        voxContinuationReferenceSource === 'profile'
+                          ? 'bg-amber-500/15 text-foreground'
+                          : 'text-amber-100/75 hover:text-foreground'
+                      }`}
+                    >
+                      Use Saved Voice Profile
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleRecordReferenceNow}
+                      className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                        voxContinuationReferenceSource === 'record'
+                          ? 'bg-amber-500/15 text-foreground'
+                          : 'text-amber-100/75 hover:text-foreground'
+                      }`}
+                    >
+                      Record Reference Now
+                    </button>
+                  </div>
+                </div>
+
+                {voxContinuationUsesRecordedReference && (
+                  <div className="space-y-3 rounded-xl bg-background/25 p-4 ring-1 ring-amber-500/15">
+                    <div className="flex flex-wrap items-center gap-3">
+                      {!voxRecorder.isRecording ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="gap-2"
+                          onClick={() => void handleStartRecordedReference()}
+                        >
+                          <Mic2 className="h-4 w-4" />
+                          Start Recording
+                        </Button>
+                      ) : (
+                        <Button type="button" variant="destructive" className="gap-2" onClick={voxRecorder.stopRecording}>
+                          <Square className="h-3.5 w-3.5" />
+                          Stop Recording
+                        </Button>
+                      )}
+
+                      {voxRecorder.isRecording && (
+                        <div className="flex items-center gap-2 text-sm text-amber-50/90">
+                          <span className="h-2.5 w-2.5 rounded-full bg-red-500 animate-pulse" />
+                          <span className="font-mono tabular-nums">{formatDuration(voxRecorder.duration)}</span>
+                        </div>
+                      )}
+
+                      {(voxRecorder.audioUrl || voxRecordedReferenceId || voxRecordedReferencePending) && !voxRecorder.isRecording && (
+                        <Button type="button" variant="ghost" className="gap-2" onClick={() => clearRecordedReference()}>
+                          <Trash2 className="h-4 w-4" />
+                          Discard / Re-record
+                        </Button>
+                      )}
+                    </div>
+
+                    {voxRecorder.audioUrl && !voxRecorder.isRecording && (
+                      <audio controls className="w-full" src={voxRecorder.audioUrl}>
+                        Your browser does not support audio playback.
+                      </audio>
+                    )}
+
+                    {voxRecordedReferencePending && (
+                      <div className="flex items-center gap-2 rounded-lg border border-amber-500/20 bg-background/35 px-3 py-2 text-sm text-amber-50/90">
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        Uploading and transcribing your recorded reference clip...
+                      </div>
+                    )}
+
+                    {voxRecordedReferenceId && !voxRecordedReferencePending && (
+                      <div className="rounded-lg border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-100">
+                        Recorded reference ready. Vox will use this clip for continuation, and the transcript below is fully editable.
+                      </div>
+                    )}
+
+                    {voxRecordedReferenceError && (
+                      <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+                        {voxRecordedReferenceError}
+                      </div>
+                    )}
+
+                    {voxRecorder.error && (
+                      <div className="flex items-start gap-2 rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
+                        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
+                        <span>{voxRecorder.error}</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="space-y-2">
+                  <Label htmlFor="vox-prompt-text">Reference Transcript</Label>
+                  <p className="text-xs text-amber-100/80">
+                    {voxContinuationUsesRecordedReference
+                      ? 'ASR will auto-fill this after recording. You can edit the transcript before you generate.'
+                      : 'Paste the exact transcript of the saved reference clip so Vox can continue from it instead of treating it like normal voice cloning.'}
+                  </p>
+                  <Textarea
+                    id="vox-prompt-text"
+                    value={voxPromptText}
+                    onChange={(event) => setVoxPromptText(event.target.value)}
+                    placeholder={voxContinuationUsesRecordedReference ? 'ASR will fill this after you stop recording.' : 'Paste the exact transcript of the saved reference clip.'}
+                    rows={4}
+                  />
+                </div>
               </div>
             )}
 
