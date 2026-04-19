@@ -18,7 +18,7 @@ import {
 } from 'lucide-react'
 import { FileDropzone } from '@/components/file-dropzone'
 import { useMediaRecorder } from '@/hooks/use-media-recorder'
-import { formatDuration } from '@/lib/utils'
+import { cn, formatDuration } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -96,6 +96,8 @@ const MAX_SPEED = 1.25
 const SPEED_STEP = 0.05
 const VOICEOVER_FORM_STATE_KEY = 'neonforge-voiceover-form-state-v1'
 const VOICEOVER_ACTIVE_JOBS_KEY = 'neonforge-voiceover-active-jobs-v1'
+const VOICE_PROFILE_INPUT_DEVICE_KEY = 'neonforge-voice-profile-input-device-v1'
+const VOICE_PROFILE_CAPTURE_MODE_KEY = 'neonforge-voice-profile-capture-mode-v1'
 const VOX_MODEL_ID = 'voxcpm2'
 const VOX_MODE_DESIGN = 'design'
 const VOX_MODE_CLONE = 'clone'
@@ -103,9 +105,12 @@ const VOX_MODE_CONTINUATION = 'continuation'
 const VOX_SINGLE_PASS_MAX_CHARS = 1200
 const VOX_CONTINUATION_SINGLE_PASS_MAX_CHARS = 1800
 const VOX_CHUNK_ESTIMATE_SIZE = 650
+const BROWSER_RECORDED_PROFILE_SOURCE = 'browser-recording'
 
 type VoxMode = 'design' | 'clone' | 'continuation'
 type VoxContinuationReferenceSource = 'profile' | 'record'
+type VoiceProfileReferenceSource = 'upload' | 'record'
+type VoiceProfileCaptureMode = 'raw' | 'enhanced'
 
 interface TemporaryReferenceUploadResponse {
   temp_reference_id: string
@@ -141,6 +146,14 @@ function clampSpeed(value: number): number {
 
 function isOutputFormat(value: unknown): value is 'wav' | 'mp3' {
   return value === 'wav' || value === 'mp3'
+}
+
+function isVoiceProfileCaptureMode(value: unknown): value is VoiceProfileCaptureMode {
+  return value === 'raw' || value === 'enhanced'
+}
+
+function getAudioInputDeviceLabel(device: MediaDeviceInfo, index: number): string {
+  return device.label.trim() || `Microphone ${index + 1}`
 }
 
 function isTerminalJobStatus(status: string | null | undefined): boolean {
@@ -294,9 +307,9 @@ function uploadVoiceProfile(formData: FormData, onProgress: (value: number) => v
 export function VoiceoverStudio() {
   const restoredFormStateRef = useRef<PersistedVoiceoverFormState | null>(null)
   const activeJobsRef = useRef<TrackedVoiceoverJob[]>([])
+  const storedProfileInputDeviceIdRef = useRef('')
   const voxRecordedReferenceTokenRef = useRef(0)
   const voxProcessedRecordingRef = useRef<Blob | null>(null)
-  const voxRecorder = useMediaRecorder()
   const [profiles, setProfiles] = useState<VoiceProfile[]>([])
   const [models, setModels] = useState<VoiceoverModelSummary[]>([])
   const [recentVoiceovers, setRecentVoiceovers] = useState<RecentVoiceover[]>([])
@@ -312,6 +325,10 @@ export function VoiceoverStudio() {
   const [showProfileForm, setShowProfileForm] = useState(false)
   const [profileName, setProfileName] = useState('')
   const [profileNotes, setProfileNotes] = useState('')
+  const [profileReferenceSource, setProfileReferenceSource] = useState<VoiceProfileReferenceSource>('upload')
+  const [profileCaptureMode, setProfileCaptureMode] = useState<VoiceProfileCaptureMode>('raw')
+  const [profileInputDeviceId, setProfileInputDeviceId] = useState('')
+  const [profileInputDevices, setProfileInputDevices] = useState<MediaDeviceInfo[]>([])
   const [profileFile, setProfileFile] = useState<File | null>(null)
   const [uploadingProfile, setUploadingProfile] = useState(false)
   const [uploadProgress, setUploadProgress] = useState(0)
@@ -334,15 +351,30 @@ export function VoiceoverStudio() {
   const [previewProfileId, setPreviewProfileId] = useState<string | null>(null)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [formStateRestored, setFormStateRestored] = useState(false)
+  const [profileRecordingPrefsRestored, setProfileRecordingPrefsRestored] = useState(false)
+  const profileRecorderAudioConstraints = useMemo<MediaTrackConstraints>(() => {
+    const enhancedCapture = profileCaptureMode === 'enhanced'
 
-  const refreshProfiles = useCallback(async () => {
+    return {
+      autoGainControl: enhancedCapture,
+      echoCancellation: enhancedCapture,
+      noiseSuppression: enhancedCapture,
+      ...(profileInputDeviceId ? { deviceId: { exact: profileInputDeviceId } } : {}),
+    }
+  }, [profileCaptureMode, profileInputDeviceId])
+  const profileRecorder = useMediaRecorder({
+    audioConstraints: profileRecorderAudioConstraints,
+  })
+  const voxRecorder = useMediaRecorder()
+
+  const refreshProfiles = useCallback(async (preferredSelectedId?: string) => {
     setProfilesLoading(true)
     try {
       const data = await apiRequest<VoiceProfile[]>('/api/v1/voiceover/profiles')
       setProfiles(data)
       setProfileError(null)
       setSelectedProfileId((current) => {
-        const preferredId = current || restoredFormStateRef.current?.selectedProfileId || ''
+        const preferredId = preferredSelectedId || current || restoredFormStateRef.current?.selectedProfileId || ''
         if (data.length === 0) return ''
         if (preferredId && data.some((profile) => profile.id === preferredId)) return preferredId
         return data[0].id
@@ -374,6 +406,25 @@ export function VoiceoverStudio() {
       setGenerationError(error instanceof Error ? error.message : 'Failed to load voiceover models')
     } finally {
       setModelsLoading(false)
+    }
+  }, [])
+
+  const refreshProfileInputDevices = useCallback(async () => {
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.enumerateDevices) {
+      return
+    }
+
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices()
+      const inputs = devices.filter((device) => device.kind === 'audioinput')
+      setProfileInputDevices(inputs)
+      setProfileInputDeviceId((current) => {
+        const preferredId = current || storedProfileInputDeviceIdRef.current
+        if (!preferredId) return ''
+        return inputs.some((device) => device.deviceId === preferredId) ? preferredId : ''
+      })
+    } catch {
+      setProfileInputDevices([])
     }
   }, [])
 
@@ -432,6 +483,22 @@ export function VoiceoverStudio() {
     setFormStateRestored(true)
   }, [])
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+
+    const savedProfileInputDeviceId = window.localStorage.getItem(VOICE_PROFILE_INPUT_DEVICE_KEY) ?? ''
+    const savedProfileCaptureMode = window.localStorage.getItem(VOICE_PROFILE_CAPTURE_MODE_KEY)
+
+    storedProfileInputDeviceIdRef.current = savedProfileInputDeviceId
+    if (savedProfileInputDeviceId) {
+      setProfileInputDeviceId(savedProfileInputDeviceId)
+    }
+    if (isVoiceProfileCaptureMode(savedProfileCaptureMode)) {
+      setProfileCaptureMode(savedProfileCaptureMode)
+    }
+    setProfileRecordingPrefsRestored(true)
+  }, [])
+
   const refreshRecentVoiceovers = useCallback(async () => {
     setRecentLoading(true)
     try {
@@ -450,6 +517,23 @@ export function VoiceoverStudio() {
     void refreshModels()
     void refreshRecentVoiceovers()
   }, [refreshModels, refreshProfiles, refreshRecentVoiceovers])
+
+  useEffect(() => {
+    void refreshProfileInputDevices()
+
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.addEventListener) {
+      return
+    }
+
+    const handleDeviceChange = () => {
+      void refreshProfileInputDevices()
+    }
+
+    navigator.mediaDevices.addEventListener('devicechange', handleDeviceChange)
+    return () => {
+      navigator.mediaDevices.removeEventListener('devicechange', handleDeviceChange)
+    }
+  }, [refreshProfileInputDevices])
 
   useEffect(() => {
     const handleWindowFocus = () => {
@@ -479,6 +563,23 @@ export function VoiceoverStudio() {
 
     window.localStorage.setItem(VOICEOVER_FORM_STATE_KEY, JSON.stringify(payload))
   }, [formStateRestored, outputFormat, script, selectedModelId, selectedProfileId, speed, voxMode, voxContinuationReferenceSource, voxPromptText, voxStyleText])
+
+  useEffect(() => {
+    if (!profileRecordingPrefsRestored || typeof window === 'undefined') return
+
+    storedProfileInputDeviceIdRef.current = profileInputDeviceId
+    if (profileInputDeviceId) {
+      window.localStorage.setItem(VOICE_PROFILE_INPUT_DEVICE_KEY, profileInputDeviceId)
+      return
+    }
+
+    window.localStorage.removeItem(VOICE_PROFILE_INPUT_DEVICE_KEY)
+  }, [profileInputDeviceId, profileRecordingPrefsRestored])
+
+  useEffect(() => {
+    if (!profileRecordingPrefsRestored || typeof window === 'undefined') return
+    window.localStorage.setItem(VOICE_PROFILE_CAPTURE_MODE_KEY, profileCaptureMode)
+  }, [profileCaptureMode, profileRecordingPrefsRestored])
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -620,7 +721,11 @@ export function VoiceoverStudio() {
 
     try {
       const formData = new FormData()
-      formData.append('audio_file', recordedBlob, `vox-continuation-reference-${Date.now()}.webm`)
+      formData.append(
+        'audio_file',
+        recordedBlob,
+        `vox-continuation-reference-${Date.now()}.${voxRecorder.fileExtension}`,
+      )
 
       const response = await apiRequest<TemporaryReferenceUploadResponse>('/api/v1/voiceover/temp-reference', {
         method: 'POST',
@@ -645,7 +750,7 @@ export function VoiceoverStudio() {
         setVoxRecordedReferencePending(false)
       }
     }
-  }, [deleteTempReference])
+  }, [deleteTempReference, voxRecorder.fileExtension])
 
   useEffect(() => {
     if (!voxContinuationUsesRecordedReference || !voxRecorder.audioBlob) return
@@ -672,6 +777,47 @@ export function VoiceoverStudio() {
   const chunkEstimateLabel =
     roughChunkEstimate === 1 && selectedModelId === VOX_MODEL_ID ? 'Estimated chunks: 1 (single pass)' : `Estimated chunks: ${roughChunkEstimate}`
   const hasRequiredReference = isVoxDesignMode ? true : voxContinuationUsesRecordedReference ? !!voxRecordedReferenceId : !!selectedProfileId
+  const profileInputLevelPercent = Math.round(profileRecorder.inputLevel * 100)
+  const profileInputMeterState = useMemo(() => {
+    if (!profileRecorder.isRecording) {
+      return {
+        barClassName: 'bg-muted-foreground/30',
+        helper: 'The meter activates while recording so you can spot a quiet or clipping mic.',
+        label: 'Stand by',
+        toneClassName: 'text-muted-foreground',
+      }
+    }
+
+    if (profileRecorder.inputLevel >= 0.85) {
+      return {
+        barClassName: 'bg-amber-500',
+        helper: 'Back off the mic slightly or lower the input if peaks keep slamming the end of the bar.',
+        label: 'Clipping risk',
+        toneClassName: 'text-amber-300',
+      }
+    }
+
+    if (profileRecorder.inputLevel >= 0.18) {
+      return {
+        barClassName: 'bg-emerald-500',
+        helper: 'This looks healthy for a clean reference take.',
+        label: 'Healthy',
+        toneClassName: 'text-emerald-300',
+      }
+    }
+
+    return {
+      barClassName: 'bg-sky-500',
+      helper: 'Move closer to the mic or pick a different input if the voice still sounds distant.',
+      label: 'Too quiet',
+      toneClassName: 'text-sky-300',
+    }
+  }, [profileRecorder.inputLevel, profileRecorder.isRecording])
+  const canSaveProfile =
+    !!profileName.trim() &&
+    (profileReferenceSource === 'upload' ? !!profileFile : !!profileRecorder.audioBlob) &&
+    !uploadingProfile &&
+    !profileRecorder.isRecording
   const canGenerate =
     hasRequiredReference &&
     !!script.trim() &&
@@ -686,8 +832,20 @@ export function VoiceoverStudio() {
     setSpeedInput(normalized.toFixed(2))
   }
 
+  const handleStartProfileRecording = async () => {
+    setProfileError(null)
+    profileRecorder.clearRecording()
+    await profileRecorder.startRecording()
+    void refreshProfileInputDevices()
+  }
+
   const handleCreateProfile = async () => {
-    if (!profileName.trim() || !profileFile) return
+    const trimmedProfileName = profileName.trim()
+    const trimmedProfileNotes = profileNotes.trim()
+    const useRecordedReference = profileReferenceSource === 'record'
+    const selectedReference = useRecordedReference ? profileRecorder.audioBlob : profileFile
+
+    if (!trimmedProfileName || !selectedReference) return
 
     setUploadingProfile(true)
     setUploadProgress(0)
@@ -695,16 +853,27 @@ export function VoiceoverStudio() {
 
     try {
       const formData = new FormData()
-      formData.append('name', profileName.trim())
-      formData.append('notes', profileNotes.trim())
-      formData.append('audio_file', profileFile)
+      formData.append('name', trimmedProfileName)
+      formData.append('notes', trimmedProfileNotes)
+      if (useRecordedReference) {
+        formData.append('recording_source', BROWSER_RECORDED_PROFILE_SOURCE)
+        formData.append(
+          'audio_file',
+          selectedReference,
+          `voice-profile-reference-${Date.now()}.${profileRecorder.fileExtension}`,
+        )
+      } else {
+        formData.append('audio_file', selectedReference)
+      }
 
-      await uploadVoiceProfile(formData, setUploadProgress)
+      const createdProfile = await uploadVoiceProfile(formData, setUploadProgress)
       setProfileName('')
       setProfileNotes('')
       setProfileFile(null)
+      profileRecorder.clearRecording()
+      setUploadProgress(0)
       setShowProfileForm(false)
-      await refreshProfiles()
+      await refreshProfiles(createdProfile.id)
     } catch (error: unknown) {
       setProfileError(error instanceof Error ? error.message : 'Failed to save voice profile')
     } finally {
@@ -860,7 +1029,7 @@ export function VoiceoverStudio() {
               <p className="text-lg font-semibold tracking-tight">Voice Profiles</p>
               <p className="mt-1 text-[11px] font-medium uppercase tracking-[0.18em] text-primary/75">Reusable References</p>
               <p className="mt-2 text-sm text-muted-foreground">
-                Upload a short reference clip once, then reuse it for future voiceover jobs.
+                Upload or record a short reference clip once, then reuse it for future voiceover jobs.
               </p>
             </div>
           </div>
@@ -891,17 +1060,224 @@ export function VoiceoverStudio() {
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label>Reference Clip</Label>
+                    <Label>Reference Source</Label>
+                    <div className="flex flex-wrap rounded-lg border border-border/50 bg-background/35 p-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setProfileReferenceSource('upload')
+                          setProfileError(null)
+                        }}
+                        className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                          profileReferenceSource === 'upload'
+                            ? 'bg-primary/10 text-foreground'
+                            : 'text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        Upload Reference Clip
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setProfileReferenceSource('record')
+                          setProfileError(null)
+                        }}
+                        className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                          profileReferenceSource === 'record'
+                            ? 'bg-primary/10 text-foreground'
+                            : 'text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        Record Reference Now
+                      </button>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Use a quiet room and close mic placement for the cleanest take. NeonForge stores a high-quality
+                      WAV master when you save.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Reference Clip</Label>
+                  {profileReferenceSource === 'upload' ? (
                     <FileDropzone
                       accept=".wav,.mp3,.m4a,audio/wav,audio/mpeg,audio/mp4,audio/x-m4a"
                       label="Drop a WAV, MP3, or M4A sample"
                       hint={profileFile?.name || '3-30 seconds recommended'}
                       file={profileFile}
-                      onFileChange={setProfileFile}
+                      onFileChange={(file) => {
+                        setProfileFile(file)
+                        setProfileError(null)
+                      }}
                       maxSizeMB={25}
                       icon="audio"
                     />
-                  </div>
+                  ) : (
+                    <div className="space-y-3 rounded-xl bg-background/30 p-4 ring-1 ring-border/35">
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <div className="space-y-2">
+                          <Label htmlFor="voice-profile-input-device">Microphone Input</Label>
+                          <select
+                            id="voice-profile-input-device"
+                            value={profileInputDeviceId}
+                            onChange={(event) => {
+                              setProfileInputDeviceId(event.target.value)
+                              setProfileError(null)
+                            }}
+                            className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                          >
+                            <option value="">Browser default microphone</option>
+                            {profileInputDevices.map((device, index) => (
+                              <option key={device.deviceId} value={device.deviceId}>
+                                {getAudioInputDeviceLabel(device, index)}
+                              </option>
+                            ))}
+                          </select>
+                          <p className="text-xs text-muted-foreground">
+                            Choose the exact mic if the browser default is not the one you want. Device names appear
+                            after microphone permission is granted.
+                          </p>
+                        </div>
+
+                        <div className="space-y-2">
+                          <Label>Recording Mode</Label>
+                          <div className="grid gap-2 sm:grid-cols-2">
+                            <button
+                              type="button"
+                              aria-pressed={profileCaptureMode === 'raw'}
+                              onClick={() => setProfileCaptureMode('raw')}
+                              className={`rounded-xl border px-3 py-3 text-left transition-colors ${
+                                profileCaptureMode === 'raw'
+                                  ? 'border-primary bg-primary/10 text-foreground'
+                                  : 'border-border/50 bg-background/40 text-muted-foreground hover:border-border hover:text-foreground'
+                              }`}
+                            >
+                              <p className="text-sm font-semibold">Raw Reference Capture</p>
+                              <p className="mt-1 text-xs leading-5">
+                                Better for accurate voice capture and cloning quality.
+                              </p>
+                            </button>
+                            <button
+                              type="button"
+                              aria-pressed={profileCaptureMode === 'enhanced'}
+                              onClick={() => setProfileCaptureMode('enhanced')}
+                              className={`rounded-xl border px-3 py-3 text-left transition-colors ${
+                                profileCaptureMode === 'enhanced'
+                                  ? 'border-primary bg-primary/10 text-foreground'
+                                  : 'border-border/50 bg-background/40 text-muted-foreground hover:border-border hover:text-foreground'
+                              }`}
+                            >
+                              <p className="text-sm font-semibold">Enhanced Reference Capture</p>
+                              <p className="mt-1 text-xs leading-5">
+                                Can sound closer and more polished in untreated rooms.
+                              </p>
+                            </button>
+                          </div>
+                          <p className="text-xs text-muted-foreground">
+                            Raw = better for accurate voice capture / cloning. Enhanced = can sound closer and more
+                            polished in untreated rooms.
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-3">
+                        {!profileRecorder.isRecording ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className="gap-2"
+                            onClick={() => void handleStartProfileRecording()}
+                          >
+                            <Mic2 className="h-4 w-4" />
+                            Start Recording
+                          </Button>
+                        ) : (
+                          <Button
+                            type="button"
+                            variant="destructive"
+                            className="gap-2"
+                            onClick={profileRecorder.stopRecording}
+                          >
+                            <Square className="h-3.5 w-3.5" />
+                            Stop Recording
+                          </Button>
+                        )}
+
+                        {profileRecorder.isRecording && (
+                          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                            <span className="h-2.5 w-2.5 rounded-full bg-red-500 animate-pulse" />
+                            <span className="font-mono tabular-nums">{formatDuration(profileRecorder.duration)}</span>
+                          </div>
+                        )}
+
+                        {profileRecorder.audioUrl && !profileRecorder.isRecording && (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            className="gap-2"
+                            onClick={() => {
+                              profileRecorder.clearRecording()
+                              setProfileError(null)
+                            }}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                            Discard / Re-record
+                          </Button>
+                        )}
+                      </div>
+
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between gap-3 text-xs">
+                          <span className="text-muted-foreground">Live Input Level</span>
+                          <span className={cn('font-medium', profileInputMeterState.toneClassName)}>
+                            {profileInputMeterState.label}
+                            {profileRecorder.isRecording ? ` · ${profileInputLevelPercent}%` : ''}
+                          </span>
+                        </div>
+                        <div className="h-2.5 overflow-hidden rounded-full bg-secondary/80">
+                          <div
+                            className={cn(
+                              'h-full rounded-full transition-[width] duration-100 ease-out',
+                              profileInputMeterState.barClassName,
+                            )}
+                            style={{
+                              width: `${Math.max(
+                                profileRecorder.isRecording && profileInputLevelPercent > 0 ? 2 : 0,
+                                profileInputLevelPercent,
+                              )}%`,
+                            }}
+                          />
+                        </div>
+                        <p className="text-[11px] text-muted-foreground">{profileInputMeterState.helper}</p>
+                      </div>
+
+                      <p className="text-xs text-muted-foreground">
+                        Browser capture format depends on runtime support. NeonForge keeps a high-quality WAV master
+                        after upload.
+                      </p>
+
+                      {profileRecorder.audioUrl && !profileRecorder.isRecording && (
+                        <audio controls className="w-full" src={profileRecorder.audioUrl}>
+                          Your browser does not support audio playback.
+                        </audio>
+                      )}
+
+                      {profileRecorder.audioUrl && !profileRecorder.isRecording && (
+                        <div className="rounded-lg border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-100">
+                          Recording ready to save as a reusable voice profile.
+                          {profileRecorder.mimeType ? ` Captured as ${profileRecorder.mimeType}.` : ''}
+                        </div>
+                      )}
+
+                      {profileRecorder.error && (
+                        <div className="flex items-start gap-2 rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
+                          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
+                          <span>{profileRecorder.error}</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 <div className="space-y-2">
@@ -930,12 +1306,16 @@ export function VoiceoverStudio() {
                     type="button"
                     className="gap-2"
                     onClick={handleCreateProfile}
-                    disabled={!profileName.trim() || !profileFile || uploadingProfile}
+                    disabled={!canSaveProfile}
                   >
                     {uploadingProfile ? <Loader2 className="h-4 w-4 animate-spin" /> : <UploadCloud className="h-4 w-4" />}
                     {uploadingProfile ? 'Uploading...' : 'Save Voice Profile'}
                   </Button>
-                  <p className="text-xs text-muted-foreground">WAV, MP3, and M4A are accepted. Clips longer than 30 seconds are rejected when duration tools are available.</p>
+                  <p className="text-xs text-muted-foreground">
+                    {profileReferenceSource === 'upload'
+                      ? 'WAV, MP3, and M4A are accepted. Clips longer than 30 seconds are rejected when duration tools are available.'
+                      : 'Record 3-30 seconds, preview the take, and save it as a reusable voice profile.'}
+                  </p>
                 </div>
               </div>
             )}

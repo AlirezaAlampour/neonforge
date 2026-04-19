@@ -133,14 +133,46 @@ def test_create_voice_profile_normalizes_supported_uploads_to_wav(monkeypatch, t
         assert wav_file.getframerate() == 48000
 
 
-def test_create_voice_profile_rejects_unsupported_extensions(monkeypatch, tmp_path: Path):
+def test_create_voice_profile_accepts_browser_recording_and_stores_a_reusable_wav_profile(monkeypatch, tmp_path: Path):
+    _configure_voice_profile_storage(monkeypatch, tmp_path)
+    _mock_ffmpeg_success(monkeypatch, duration_ms=1800, sample_rate=48000, channels=2)
+    client = _build_client()
+
+    response = client.post(
+        "/api/v1/voiceover/profiles",
+        data={
+            "name": "Recorded Narrator",
+            "notes": "Quiet booth take",
+            "recording_source": routes.BROWSER_RECORDED_PROFILE_SOURCE,
+        },
+        files={"audio_file": ("reference.webm", b"browser-recorded-audio", "audio/webm")},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["name"] == "Recorded Narrator"
+    assert payload["notes"] == "Quiet booth take"
+    assert payload["reference_audio_path"].endswith(".wav")
+
+    stored_path = profiles.host_path_to_container(payload["reference_audio_path"])
+    assert stored_path.exists()
+    with wave.open(str(stored_path), "rb") as wav_file:
+        assert wav_file.getnchannels() == 2
+        assert wav_file.getframerate() == 48000
+
+    registry_profiles = profiles.load_registry()
+    assert [profile.id for profile in registry_profiles] == [payload["id"]]
+
+
+@pytest.mark.parametrize("filename, media_type", [("reference.ogg", "audio/ogg"), ("reference.webm", "audio/webm")])
+def test_create_voice_profile_rejects_unsupported_extensions(monkeypatch, tmp_path: Path, filename: str, media_type: str):
     _configure_voice_profile_storage(monkeypatch, tmp_path)
     client = _build_client()
 
     response = client.post(
         "/api/v1/voiceover/profiles",
         data={"name": "Narrator"},
-        files={"audio_file": ("reference.ogg", b"uploaded-audio", "audio/ogg")},
+        files={"audio_file": (filename, b"uploaded-audio", media_type)},
     )
 
     assert response.status_code == 422
@@ -199,7 +231,20 @@ def test_create_voice_profile_returns_clear_error_when_ffmpeg_is_unavailable(mon
     assert response.json()["detail"] == "Reference audio normalization is unavailable because ffmpeg is not installed"
 
 
-def test_create_temp_reference_normalizes_transcribes_and_stores_clip(monkeypatch, tmp_path: Path):
+@pytest.mark.parametrize(
+    "filename, media_type",
+    [
+        ("recording.webm", "audio/webm"),
+        ("recording.ogg", "audio/ogg"),
+        ("recording.m4a", "audio/mp4"),
+    ],
+)
+def test_create_temp_reference_normalizes_transcribes_and_stores_clip(
+    monkeypatch,
+    tmp_path: Path,
+    filename: str,
+    media_type: str,
+):
     _configure_voiceover_output_storage(monkeypatch, tmp_path)
     _mock_ffmpeg_success(monkeypatch, duration_ms=1200, sample_rate=48000, channels=2)
     _mock_reference_transcription(monkeypatch, "Freshly recorded continuation prompt.")
@@ -207,7 +252,7 @@ def test_create_temp_reference_normalizes_transcribes_and_stores_clip(monkeypatc
 
     response = client.post(
         "/api/v1/voiceover/temp-reference",
-        files={"audio_file": ("recording.webm", b"uploaded-audio", "audio/webm")},
+        files={"audio_file": (filename, b"uploaded-audio", media_type)},
     )
 
     assert response.status_code == 200

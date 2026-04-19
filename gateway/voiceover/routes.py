@@ -32,7 +32,8 @@ router = APIRouter(prefix="/api/v1/voiceover", tags=["voiceover"])
 
 VOICEOVER_OUTPUT_EXTENSIONS = {".wav", ".mp3"}
 VOICE_PROFILE_INPUT_EXTENSIONS = {".wav", ".mp3", ".m4a"}
-TEMP_REFERENCE_INPUT_EXTENSIONS = VOICE_PROFILE_INPUT_EXTENSIONS | {".webm"}
+RECORDED_VOICE_PROFILE_INPUT_EXTENSIONS = VOICE_PROFILE_INPUT_EXTENSIONS | {".webm", ".ogg", ".mp4"}
+TEMP_REFERENCE_INPUT_EXTENSIONS = VOICE_PROFILE_INPUT_EXTENSIONS | {".webm", ".ogg", ".mp4"}
 REFERENCE_AUDIO_EXTENSION = ".wav"
 HOST_OUTPUTS_ROOT = Path("/srv/ai/outputs")
 CONTAINER_OUTPUTS_ROOT = Path(os.getenv("OUTPUTS_ROOT", "/outputs"))
@@ -43,6 +44,7 @@ VOX_MODE_DESIGN = "design"
 VOX_MODE_CLONE = "clone"
 VOX_MODE_CONTINUATION = "continuation"
 VALID_VOX_MODES = {VOX_MODE_DESIGN, VOX_MODE_CLONE, VOX_MODE_CONTINUATION}
+BROWSER_RECORDED_PROFILE_SOURCE = "browser-recording"
 
 
 class CreateVoiceoverJobRequest(BaseModel):
@@ -148,7 +150,7 @@ def _detect_duration(path: Path) -> float | None:
     return _duration_with_sox(path) or _duration_with_mutagen(path) or _duration_with_wave(path)
 
 
-def _normalize_reference_audio_to_wav(input_path: Path, output_path: Path) -> None:
+def _normalize_reference_audio_to_wav(input_path: Path, output_path: Path, *, decode_error_message: str) -> None:
     if shutil.which("ffmpeg") is None:
         raise HTTPException(503, "Reference audio normalization is unavailable because ffmpeg is not installed")
 
@@ -177,7 +179,7 @@ def _normalize_reference_audio_to_wav(input_path: Path, output_path: Path) -> No
     except OSError as exc:
         raise HTTPException(503, "Reference audio normalization is unavailable because ffmpeg could not be started") from exc
     except subprocess.CalledProcessError as exc:
-        raise HTTPException(422, "Audio file could not be decoded as WAV, MP3, or M4A") from exc
+        raise HTTPException(422, decode_error_message) from exc
 
 
 def _serialize_profile(profile: VoiceProfile) -> dict[str, Any]:
@@ -251,6 +253,7 @@ async def _prepare_reference_audio_upload(
     *,
     allowed_extensions: set[str],
     unsupported_extension_message: str,
+    decode_error_message: str,
 ) -> tuple[bytes, str]:
     extension = Path(audio_file.filename or "").suffix.lower()
     if extension not in allowed_extensions:
@@ -270,7 +273,11 @@ async def _prepare_reference_audio_upload(
         with tempfile.NamedTemporaryFile(delete=False, suffix=REFERENCE_AUDIO_EXTENSION) as temp_file:
             temp_output_path = Path(temp_file.name)
 
-        _normalize_reference_audio_to_wav(temp_input_path, temp_output_path)
+        _normalize_reference_audio_to_wav(
+            temp_input_path,
+            temp_output_path,
+            decode_error_message=decode_error_message,
+        )
 
         duration = _detect_duration(temp_output_path) or _detect_duration(temp_input_path)
         if duration is not None and duration > 30:
@@ -338,12 +345,26 @@ def _serialize_recent_voiceover(job_id: str, output_path: Path) -> dict[str, Any
 async def create_voice_profile(
     name: str = Form(...),
     notes: str = Form(""),
+    recording_source: str = Form("upload"),
     audio_file: UploadFile = File(...),
 ):
+    cleaned_recording_source = recording_source.strip().lower() or "upload"
+    if cleaned_recording_source == BROWSER_RECORDED_PROFILE_SOURCE:
+        allowed_extensions = RECORDED_VOICE_PROFILE_INPUT_EXTENSIONS
+        unsupported_extension_message = "Recorded audio must be a WAV, MP3, M4A, MP4, OGG, or WebM"
+        decode_error_message = "Recorded audio could not be decoded as WAV, MP3, M4A, MP4, OGG, or WebM"
+    elif cleaned_recording_source == "upload":
+        allowed_extensions = VOICE_PROFILE_INPUT_EXTENSIONS
+        unsupported_extension_message = "Audio file must be a WAV, MP3, or M4A"
+        decode_error_message = "Audio file could not be decoded as WAV, MP3, or M4A"
+    else:
+        raise HTTPException(422, "Recording source is invalid")
+
     normalized_audio_bytes, normalized_filename = await _prepare_reference_audio_upload(
         audio_file,
-        allowed_extensions=VOICE_PROFILE_INPUT_EXTENSIONS,
-        unsupported_extension_message="Audio file must be a WAV, MP3, or M4A",
+        allowed_extensions=allowed_extensions,
+        unsupported_extension_message=unsupported_extension_message,
+        decode_error_message=decode_error_message,
     )
     profile = save_profile(
         name=name,
@@ -360,7 +381,8 @@ async def create_temp_reference(audio_file: UploadFile = File(...)):
     normalized_audio_bytes, normalized_filename = await _prepare_reference_audio_upload(
         audio_file,
         allowed_extensions=TEMP_REFERENCE_INPUT_EXTENSIONS,
-        unsupported_extension_message="Audio file must be a WAV, MP3, M4A, or WebM",
+        unsupported_extension_message="Audio file must be a WAV, MP3, M4A, MP4, OGG, or WebM",
+        decode_error_message="Audio file could not be decoded as WAV, MP3, M4A, MP4, OGG, or WebM",
     )
     media_type = mimetypes.guess_type(normalized_filename)[0] or "audio/wav"
     transcript = await _transcribe_audio_with_whisper(normalized_filename, normalized_audio_bytes, media_type)
