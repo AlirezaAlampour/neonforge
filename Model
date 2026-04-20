@@ -1,0 +1,4 @@
+frontend/components/VoiceoverStudio.tsx:353:                <p className="mt-1 text-[11px] font-medium uppercase tracking-[0.18em] text-primary/75">
+frontend/components/VoiceoverStudio.tsx:440:                Start a voiceover and this rail will keep tracking it, even if you refresh the page.
+frontend/components/VoiceoverStudio.tsx:446:                <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-primary/75">Latest Output</p>
+frontend/components/VoiceoverStudio.tsx:1642:                    <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-primary/75">Reference Transcript</p>

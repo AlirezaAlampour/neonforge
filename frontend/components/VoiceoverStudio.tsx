@@ -434,12 +434,7 @@ function VoiceoverJobsPanel({
           </div>
         ) : (
           <div className="space-y-4 rounded-xl border border-dashed border-border/50 p-6 text-center">
-            <div className="space-y-2">
-              <p className="text-sm font-medium text-foreground">No live jobs right now</p>
-              <p className="text-sm text-muted-foreground">
-                Start a voiceover and this rail will keep tracking it, even if you refresh the page.
-              </p>
-            </div>
+            <p className="text-sm font-medium text-foreground">No live jobs right now</p>
 
             {latestRecentVoiceover ? (
               <div className="rounded-xl bg-background/45 p-4 text-left ring-1 ring-border/35">
@@ -1823,31 +1818,9 @@ export function VoiceoverStudio() {
 
   const renderGeneratePanel = () => {
     const latestRecentVoiceover = recentVoiceovers[0] ?? null
-    const activeVoxModeOption = VOX_MODE_OPTIONS.find((option) => option.value === voxMode) ?? null
     const hasSelectedModel = !!selectedModel
     const showVoiceProfileSelection = hasSelectedModel && !isVoxContinuationMode && requiresSavedVoiceProfile
     const selectedProfileTranscript = getProfileTranscriptSeed(selectedProfile)
-    const referenceSummary = isVoxDesignMode
-      ? 'No reference required'
-      : voxContinuationUsesRecordedReference
-        ? voxRecordedReferenceId
-          ? 'Recorded temp clip ready'
-          : 'Record a temp clip'
-        : selectedProfile?.name ?? 'Choose a saved profile'
-    const activitySummary =
-      activeJobs.length > 0
-        ? `${activeJobs.length} active job${activeJobs.length === 1 ? '' : 's'}`
-        : trackedJobs.length > 0
-          ? `${trackedJobs.length} tracked job${trackedJobs.length === 1 ? '' : 's'}`
-          : 'Ready for the next render'
-    const workspaceStatusNote =
-      activeJobs.length > 0
-        ? 'Job Activity updates live on the right.'
-        : latestRecentVoiceover
-          ? `Latest output: ${latestRecentVoiceover.filename}`
-          : hasSelectedModel
-            ? 'Choose the remaining fields, then render.'
-            : 'Choose a model to start.'
     const scriptLabel = isVoxContinuationMode ? 'New Script' : 'Script'
     const scriptHelper = isVoxContinuationMode
       ? 'Write the narration that should follow the reference clip.'
@@ -1878,48 +1851,22 @@ export function VoiceoverStudio() {
     return (
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1.7fr),320px] 2xl:grid-cols-[minmax(0,1.85fr),340px]">
         <div className="space-y-6">
-          <div className="rounded-2xl border border-border/70 bg-card p-4 shadow-sm">
-            <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
-              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                <div className="rounded-xl bg-background/65 px-3 py-2 ring-1 ring-border/55">
-                  <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-primary/75">Model</p>
-                  <p className="mt-1 text-sm font-semibold">{selectedModel?.display_name ?? 'Select a model'}</p>
+          <Card className="overflow-hidden border-border/70 bg-card shadow-sm">
+            <div className="border-b border-border/50 bg-muted/15 px-6 py-5">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                <div className="flex items-start gap-3">
+                  <div className="rounded-xl bg-primary/12 p-2.5 text-primary">
+                    <Wand2 className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <p className="text-lg font-semibold tracking-tight">Generate Voiceover</p>
+                  </div>
                 </div>
-                <div className="rounded-xl bg-background/65 px-3 py-2 ring-1 ring-border/55">
-                  <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-primary/75">
-                    {isVoxModel ? 'Mode' : 'Reference'}
-                  </p>
-                  <p className="mt-1 text-sm font-semibold">
-                    {isVoxModel ? activeVoxModeOption?.shortLabel ?? 'Choose a mode' : referenceSummary}
-                  </p>
-                </div>
-                <div className="rounded-xl bg-background/65 px-3 py-2 ring-1 ring-border/55">
-                  <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-primary/75">Activity</p>
-                  <p className="mt-1 text-sm font-semibold">{activitySummary}</p>
-                </div>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-2 xl:justify-end">
-                <p className="text-xs text-muted-foreground">{workspaceStatusNote}</p>
                 {recentVoiceovers.length > 0 && (
                   <Button type="button" variant="outline" size="sm" onClick={() => setActiveWorkspaceTab('outputs')}>
                     Open Outputs
                   </Button>
                 )}
-              </div>
-            </div>
-          </div>
-
-          <Card className="overflow-hidden border-border/70 bg-card shadow-sm">
-            <div className="border-b border-border/50 bg-muted/15 px-6 py-5">
-              <div className="flex items-start gap-3">
-                <div className="rounded-xl bg-primary/12 p-2.5 text-primary">
-                  <Wand2 className="h-5 w-5" />
-                </div>
-                <div>
-                  <p className="text-lg font-semibold tracking-tight">Generate Voiceover</p>
-                  <p className="mt-2 text-sm text-muted-foreground">Choose a path, fill the relevant fields, then render.</p>
-                </div>
               </div>
             </div>
 
@@ -1940,13 +1887,11 @@ export function VoiceoverStudio() {
                     </option>
                   ))}
                 </select>
-                <p className="text-xs text-muted-foreground">
-                  {modelsLoading
-                    ? 'Loading model list...'
-                    : availableModels.length > 0
-                      ? 'Unavailable runtimes stay listed but cannot be selected.'
-                      : 'No runnable voice models are currently available.'}
-                </p>
+                {modelsLoading ? (
+                  <p className="text-xs text-muted-foreground">Loading model list...</p>
+                ) : availableModels.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">No runnable voice models are currently available.</p>
+                ) : null}
               </div>
 
               {!hasSelectedModel && (
@@ -1957,10 +1902,7 @@ export function VoiceoverStudio() {
 
               {hasSelectedModel && isVoxModel && (
                 <div className="space-y-3 rounded-xl bg-background/55 p-4 ring-1 ring-border/55">
-                  <div>
-                    <p className="text-sm font-semibold">2. Voice Mode</p>
-                    <p className="mt-1 text-xs text-muted-foreground">Pick the Vox path that matches this render.</p>
-                  </div>
+                  <p className="text-sm font-semibold">2. Voice Mode</p>
                   <div className="grid gap-2 md:grid-cols-3">
                     {VOX_MODE_OPTIONS.map((option) => {
                       const isActive = voxMode === option.value
@@ -2029,17 +1971,7 @@ export function VoiceoverStudio() {
 
               {hasSelectedModel && isVoxContinuationMode && (
                 <div className="space-y-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4 sm:p-5">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-semibold">Vox Continuation Workspace</p>
-                      <p className="mt-1 text-xs text-amber-100/80">Source, reference, transcript, then new script.</p>
-                    </div>
-                    <div className="flex flex-wrap gap-2 text-[11px] font-medium uppercase tracking-[0.16em] text-amber-100/70">
-                      <span className="rounded-full border border-amber-500/20 px-2.5 py-1">1 Source</span>
-                      <span className="rounded-full border border-amber-500/20 px-2.5 py-1">2 Reference</span>
-                      <span className="rounded-full border border-amber-500/20 px-2.5 py-1">3 Transcript</span>
-                    </div>
-                  </div>
+                  <p className="text-sm font-semibold">Vox Continuation Workspace</p>
 
                   <div className="space-y-4">
                     <div className="space-y-4 rounded-xl bg-background/25 p-4 ring-1 ring-amber-500/15">
@@ -2295,19 +2227,16 @@ export function VoiceoverStudio() {
 
               {hasSelectedModel && (
                 <div className="space-y-4 rounded-xl bg-background/55 p-4 ring-1 ring-border/55">
-                <div>
                   <p className="text-sm font-semibold">{isVoxContinuationMode ? '4. Render' : isVoxModel ? '4. Render' : '3. Render'}</p>
-                  <p className="mt-1 text-xs text-muted-foreground">Output controls come last.</p>
-                </div>
-                <div className="grid gap-4 md:grid-cols-[minmax(0,1fr),220px,auto] md:items-end">
-                  <div className="space-y-3 rounded-xl bg-background/70 p-4 ring-1 ring-border/45">
-                    <div className="flex items-center justify-between gap-3">
-                      <Label htmlFor="voiceover-speed">Speed</Label>
-                      <Input
-                        id="voiceover-speed"
-                        type="number"
-                        min={MIN_SPEED}
-                        max={MAX_SPEED}
+                  <div className="grid gap-4 md:grid-cols-[minmax(0,1fr),220px,auto] md:items-end">
+                    <div className="space-y-3 rounded-xl bg-background/70 p-4 ring-1 ring-border/45">
+                      <div className="flex items-center justify-between gap-3">
+                        <Label htmlFor="voiceover-speed">Speed</Label>
+                        <Input
+                          id="voiceover-speed"
+                          type="number"
+                          min={MIN_SPEED}
+                          max={MAX_SPEED}
                         step={SPEED_STEP}
                         value={speedInput}
                         onChange={(event) => setSpeedInput(event.target.value)}
