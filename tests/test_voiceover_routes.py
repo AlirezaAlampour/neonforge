@@ -133,6 +133,44 @@ def test_create_voice_profile_normalizes_supported_uploads_to_wav(monkeypatch, t
         assert wav_file.getframerate() == 48000
 
 
+@pytest.mark.parametrize(
+    "recording_source, filename, media_type",
+    [
+        ("upload", "reference.mp3", "audio/mpeg"),
+        (routes.BROWSER_RECORDED_PROFILE_SOURCE, "reference.webm", "audio/webm"),
+    ],
+)
+def test_create_voice_profile_persists_reference_transcript_when_transcription_succeeds(
+    monkeypatch,
+    tmp_path: Path,
+    recording_source: str,
+    filename: str,
+    media_type: str,
+):
+    _configure_voice_profile_storage(monkeypatch, tmp_path)
+    _mock_ffmpeg_success(monkeypatch, duration_ms=1500, sample_rate=48000, channels=2)
+    _mock_reference_transcription(monkeypatch, "Reference clip transcript.")
+    client = _build_client()
+
+    response = client.post(
+        "/api/v1/voiceover/profiles",
+        data={
+            "name": "Narrator",
+            "notes": "Warm delivery",
+            "recording_source": recording_source,
+        },
+        files={"audio_file": (filename, b"uploaded-audio", media_type)},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["reference_transcript"] == "Reference clip transcript."
+
+    registry_profiles = profiles.load_registry()
+    assert len(registry_profiles) == 1
+    assert registry_profiles[0].reference_transcript == "Reference clip transcript."
+
+
 def test_create_voice_profile_accepts_browser_recording_and_stores_a_reusable_wav_profile(monkeypatch, tmp_path: Path):
     _configure_voice_profile_storage(monkeypatch, tmp_path)
     _mock_ffmpeg_success(monkeypatch, duration_ms=1800, sample_rate=48000, channels=2)

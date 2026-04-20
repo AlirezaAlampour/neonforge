@@ -366,11 +366,23 @@ async def create_voice_profile(
         unsupported_extension_message=unsupported_extension_message,
         decode_error_message=decode_error_message,
     )
+    media_type = mimetypes.guess_type(normalized_filename)[0] or "audio/wav"
+    reference_transcript: str | None = None
+    try:
+        reference_transcript = await _transcribe_audio_with_whisper(
+            normalized_filename,
+            normalized_audio_bytes,
+            media_type,
+        )
+    except HTTPException:
+        reference_transcript = None
+
     profile = save_profile(
         name=name,
         audio_bytes=normalized_audio_bytes,
         stored_filename=normalized_filename,
         notes=notes,
+        reference_transcript=reference_transcript,
     )
 
     return _serialize_profile(profile)

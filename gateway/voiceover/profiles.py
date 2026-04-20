@@ -94,7 +94,13 @@ def load_registry() -> list[VoiceProfile]:
         return list(profiles)
 
 
-def save_profile(name: str, audio_bytes: bytes, stored_filename: str, notes: str | None) -> VoiceProfile:
+def save_profile(
+    name: str,
+    audio_bytes: bytes,
+    stored_filename: str,
+    notes: str | None,
+    reference_transcript: str | None = None,
+) -> VoiceProfile:
     cleaned_name = name.strip()
     if not cleaned_name:
         raise ValueError("Voice profile name is required")
@@ -114,6 +120,7 @@ def save_profile(name: str, audio_bytes: bytes, stored_filename: str, notes: str
         reference_audio_path=str(host_audio_path),
         created_at=_now_iso(),
         notes=notes.strip() if notes and notes.strip() else None,
+        reference_transcript=reference_transcript.strip() if reference_transcript and reference_transcript.strip() else None,
     )
 
     try:
