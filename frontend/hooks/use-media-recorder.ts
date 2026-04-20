@@ -112,7 +112,7 @@ export function useMediaRecorder(options?: MediaRecorderOptions): MediaRecorderS
   const meterAudioContextRef = useRef<AudioContext | null>(null)
   const meterAnalyserRef = useRef<AnalyserNode | null>(null)
   const meterSourceRef = useRef<MediaStreamAudioSourceNode | null>(null)
-  const meterBufferRef = useRef<Uint8Array | null>(null)
+  const meterBufferRef = useRef<Uint8Array<ArrayBuffer> | null>(null)
 
   const clearTimer = useCallback(() => {
     if (timerRef.current) {
@@ -152,7 +152,7 @@ export function useMediaRecorder(options?: MediaRecorderOptions): MediaRecorderS
       const audioContext = new window.AudioContext()
       const analyser = audioContext.createAnalyser()
       const source = audioContext.createMediaStreamSource(stream)
-      const data = new Uint8Array(1024)
+      const data = new Uint8Array(new ArrayBuffer(1024))
 
       analyser.fftSize = 1024
       analyser.smoothingTimeConstant = 0.8
@@ -178,8 +178,8 @@ export function useMediaRecorder(options?: MediaRecorderOptions): MediaRecorderS
         activeAnalyser.getByteTimeDomainData(activeBuffer)
 
         let sumSquares = 0
-        for (const sample of activeBuffer) {
-          const normalized = (sample - 128) / 128
+        for (let index = 0; index < activeBuffer.length; index += 1) {
+          const normalized = (activeBuffer[index] - 128) / 128
           sumSquares += normalized * normalized
         }
 
