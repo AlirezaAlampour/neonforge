@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
+import json
 import mimetypes
 import os
 import shutil
@@ -15,7 +17,7 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from .models import ModelRegistry
@@ -45,6 +47,8 @@ VOX_MODE_CLONE = "clone"
 VOX_MODE_CONTINUATION = "continuation"
 VALID_VOX_MODES = {VOX_MODE_DESIGN, VOX_MODE_CLONE, VOX_MODE_CONTINUATION}
 BROWSER_RECORDED_PROFILE_SOURCE = "browser-recording"
+_voiceover_render_lock: asyncio.Lock | None = None
+_voiceover_render_lock_loop: asyncio.AbstractEventLoop | None = None
 
 
 class CreateVoiceoverJobRequest(BaseModel):
@@ -82,6 +86,39 @@ def _get_redis_client():
     return gateway_app.rdb
 
 
+def _get_voiceover_render_lock() -> asyncio.Lock:
+    global _voiceover_render_lock, _voiceover_render_lock_loop
+
+    loop = asyncio.get_running_loop()
+    if _voiceover_render_lock is None or _voiceover_render_lock_loop is not loop:
+        _voiceover_render_lock = asyncio.Lock()
+        _voiceover_render_lock_loop = loop
+    return _voiceover_render_lock
+
+
+async def _write_job_fields(redis_client, job_id: str, **fields: Any) -> None:
+    if redis_client is None or not fields:
+        return
+
+    await redis_client.hset(
+        f"voiceover:{job_id}",
+        mapping={key: "" if value is None else str(value) for key, value in fields.items()},
+    )
+
+
+async def _run_voiceover_job_serialized(*args: Any, **kwargs: Any) -> None:
+    job_id = str(args[0])
+    redis_client = args[6]
+    lock = _get_voiceover_render_lock()
+
+    if lock.locked():
+        await _write_job_fields(redis_client, job_id, status="queued")
+
+    async with lock:
+        await _write_job_fields(redis_client, job_id, status="pending")
+        await run_voiceover_job(*args, **kwargs)
+
+
 async def _read_job(job_id: str) -> dict[str, Any] | None:
     redis_client = _get_redis_client()
     if redis_client is None:
@@ -98,6 +135,13 @@ async def _read_job(job_id: str) -> dict[str, Any] | None:
     if data.get("output_path"):
         data["filename"] = Path(str(data["output_path"])).name
         data["output_url"] = f"/api/v1/voiceover/output/{job_id}"
+        output_path = _output_host_path_to_container(str(data["output_path"]))
+        metadata_path = _find_voiceover_metadata(job_id, output_path if output_path.exists() else None)
+        if metadata_path is not None:
+            data["metadata_url"] = f"/api/v1/voiceover/output/{job_id}/metadata"
+            metadata = _read_output_metadata(metadata_path)
+            if _metadata_has_script_text(metadata):
+                data["script_text_url"] = f"/api/v1/voiceover/output/{job_id}/script-text"
     return data
 
 
@@ -248,6 +292,43 @@ def _find_voiceover_output(job_id: str) -> Path | None:
     return None
 
 
+def _metadata_path_for_output(output_path: Path) -> Path:
+    return output_path.with_suffix(".json")
+
+
+def _find_voiceover_metadata(job_id: str, output_path: Path | None = None) -> Path | None:
+    if output_path is not None:
+        candidate = _metadata_path_for_output(output_path)
+        if candidate.exists() and candidate.is_file():
+            return candidate
+
+    job_dir = _voiceover_output_dir() / job_id
+    if not job_dir.exists() or not job_dir.is_dir():
+        return None
+
+    candidates = [path for path in job_dir.glob("*.json") if path.is_file()]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    return candidates[0]
+
+
+def _read_output_metadata(metadata_path: Path | None) -> dict[str, Any] | None:
+    if metadata_path is None:
+        return None
+
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    return payload if isinstance(payload, dict) else None
+
+
+def _metadata_has_script_text(metadata: dict[str, Any] | None) -> bool:
+    return bool(str((metadata or {}).get("script_text") or "").strip())
+
+
 async def _prepare_reference_audio_upload(
     audio_file: UploadFile,
     *,
@@ -332,12 +413,21 @@ def _stage_temp_reference_for_job(job_id: str, temp_reference_path: Path) -> Pat
 def _serialize_recent_voiceover(job_id: str, output_path: Path) -> dict[str, Any]:
     created_at = datetime.fromtimestamp(output_path.stat().st_mtime, tz=timezone.utc).isoformat()
     host_output_path = _container_output_path_to_host(output_path)
+    metadata_path = _find_voiceover_metadata(job_id, output_path)
+    metadata = _read_output_metadata(metadata_path)
+    duration_seconds = metadata.get("duration_seconds") if metadata else None
     return {
         "job_id": job_id,
         "filename": output_path.name,
-        "created_at": created_at,
+        "created_at": str(metadata.get("created_at") or created_at) if metadata else created_at,
         "output_path": str(host_output_path),
         "output_url": f"/api/v1/voiceover/output/{job_id}",
+        "has_metadata": metadata_path is not None,
+        "metadata_url": f"/api/v1/voiceover/output/{job_id}/metadata" if metadata_path is not None else None,
+        "has_script_text": _metadata_has_script_text(metadata),
+        "script_text_url": f"/api/v1/voiceover/output/{job_id}/script-text" if _metadata_has_script_text(metadata) else None,
+        "duration_seconds": duration_seconds if isinstance(duration_seconds, (int, float)) else None,
+        "reference_source_type": str(metadata.get("reference_source_type") or "") if metadata else None,
     }
 
 
@@ -558,17 +648,18 @@ async def create_voiceover_job(request: CreateVoiceoverJobRequest, background_ta
     await redis_client.hset(
         f"voiceover:{job_id}",
         mapping={
-            "status": "pending",
+            "status": "queued",
             "total_chunks": "0",
             "completed_chunks": "0",
             "error": "",
             "output_path": "",
+            "metadata_path": "",
             "created_at": _now_iso(),
         },
     )
 
     background_tasks.add_task(
-        run_voiceover_job,
+        _run_voiceover_job_serialized,
         job_id,
         profile.id if profile else None,
         script,
@@ -583,7 +674,7 @@ async def create_voiceover_job(request: CreateVoiceoverJobRequest, background_ta
         "Recorded Reference" if temp_reference_path is not None else None,
     )
 
-    return {"job_id": job_id, "status": "pending"}
+    return {"job_id": job_id, "status": "queued"}
 
 
 @router.get("/jobs/{job_id}")
@@ -597,20 +688,59 @@ async def get_voiceover_job(job_id: str):
 @router.delete("/output/{job_id}")
 async def delete_voiceover_output(job_id: str):
     job_dir = _voiceover_output_dir() / job_id
-    output_path = _find_voiceover_output(job_id)
-    if output_path is None or not job_dir.exists() or not job_dir.is_dir():
+    job = await _read_job(job_id)
+    output_path = _resolve_job_output_path(job_id, job)
+    job_dir_exists = job_dir.exists() and job_dir.is_dir()
+
+    if job is None and not job_dir_exists:
         raise HTTPException(404, "Voiceover output not found")
 
-    try:
-        shutil.rmtree(job_dir)
-    except OSError as exc:
-        raise HTTPException(500, f"Failed to delete voiceover output: {exc}") from exc
+    if job_dir_exists:
+        try:
+            shutil.rmtree(job_dir)
+        except OSError as exc:
+            raise HTTPException(500, f"Failed to delete voiceover output: {exc}") from exc
 
     redis_client = _get_redis_client()
     if redis_client is not None:
         await redis_client.delete(f"voiceover:{job_id}")
 
-    return {"deleted": True}
+    return {"deleted": True, "file_deleted": output_path is not None}
+
+
+@router.get("/output/{job_id}/metadata")
+async def download_voiceover_metadata(job_id: str):
+    job = await _read_job(job_id)
+    output_path = _resolve_job_output_path(job_id, job)
+    if output_path is None:
+        raise HTTPException(404, "Voiceover output not found")
+
+    metadata_path = _find_voiceover_metadata(job_id, output_path)
+    if metadata_path is None:
+        raise HTTPException(404, "Voiceover metadata not found")
+
+    return FileResponse(metadata_path, filename=metadata_path.name, media_type="application/json")
+
+
+@router.get("/output/{job_id}/script-text")
+async def download_voiceover_script_text(job_id: str):
+    job = await _read_job(job_id)
+    output_path = _resolve_job_output_path(job_id, job)
+    if output_path is None:
+        raise HTTPException(404, "Voiceover output not found")
+
+    metadata_path = _find_voiceover_metadata(job_id, output_path)
+    metadata = _read_output_metadata(metadata_path)
+    script_text = str((metadata or {}).get("script_text") or "").strip()
+    if not script_text:
+        raise HTTPException(404, "Voiceover script text not found")
+
+    filename = f"{output_path.stem}.txt"
+    return Response(
+        script_text + "\n",
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/output/{job_id}")

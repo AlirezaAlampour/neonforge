@@ -2,6 +2,8 @@ import math
 import struct
 import sys
 import wave
+import asyncio
+import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +27,12 @@ def _configure_voice_profile_storage(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(profiles, "CONTAINER_VOICE_PROFILES_DIR", voice_profiles_dir)
     monkeypatch.setattr(profiles, "REGISTRY_HOST_PATH", registry_path)
     monkeypatch.setattr(profiles, "REGISTRY_CONTAINER_PATH", registry_path)
+
+
+def _configure_voiceover_output_storage(monkeypatch, tmp_path: Path) -> None:
+    outputs_root = tmp_path / "outputs"
+    monkeypatch.setattr(runner, "HOST_OUTPUTS_ROOT", outputs_root)
+    monkeypatch.setattr(runner, "CONTAINER_OUTPUTS_ROOT", outputs_root)
 
 
 def _tone_frames(duration_ms: int, *, sample_rate: int = 24000, amplitude: int = 5000, frequency_hz: float = 220.0) -> bytes:
@@ -65,6 +73,35 @@ class _FakeResponse:
 
     def json(self):
         return self._payload
+
+
+class _FakeRedis:
+    def __init__(self) -> None:
+        self.store: dict[str, dict[str, str]] = {}
+
+    async def hset(self, key: str, mapping: dict[str, str]) -> None:
+        self.store.setdefault(key, {}).update(mapping)
+
+
+class _FakeVoxModel:
+    model_id = runner.VOX_MODEL_ID
+    display_name = "Vox fake"
+    supports_reference_audio = True
+
+    def synthesize(self, text: str, reference_audio_path: str | None, options: dict) -> bytes:
+        output = Path(options.get("_test_output", "")) if options.get("_test_output") else None
+        if output:
+            return output.read_bytes()
+
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
+            temp_path = Path(handle.name)
+        try:
+            _write_pcm_wav(temp_path, _tone_frames(250))
+            return temp_path.read_bytes()
+        finally:
+            temp_path.unlink(missing_ok=True)
 
 
 def test_fish_reference_transcript_is_persisted_and_reused(monkeypatch, tmp_path: Path):
@@ -116,6 +153,50 @@ def test_fish_reference_transcript_is_persisted_and_reused(monkeypatch, tmp_path
     assert synth_payloads[0]["references"][0]["text"] == "This is the cached reference transcript."
     assert synth_payloads[1]["references"][0]["text"] == "This is the cached reference transcript."
     assert get_profile(profile.id).reference_transcript == "This is the cached reference transcript."
+
+
+def test_run_voiceover_job_writes_metadata_and_script_slug_filename(monkeypatch, tmp_path: Path):
+    _configure_voiceover_output_storage(monkeypatch, tmp_path)
+    fake_redis = _FakeRedis()
+    monkeypatch.setattr(runner.ModelRegistry, "get_model", lambda model_id: _FakeVoxModel())
+
+    script = "AI training, four versions for launch review with a much longer trailing clause."
+
+    asyncio.run(
+        runner.run_voiceover_job(
+            "job-1",
+            None,
+            script,
+            runner.VOX_MODEL_ID,
+            "wav",
+            1.15,
+            fake_redis,
+            runner.VOX_MODE_DESIGN,
+            None,
+            "warm",
+        )
+    )
+
+    job = fake_redis.store["voiceover:job-1"]
+    assert job["status"] == "done"
+    output_path = Path(job["output_path"])
+    container_output_path = runner._host_output_path_to_container(output_path)
+    assert container_output_path.exists()
+    assert "ai_training_four_versions_for_launch_review_with" in container_output_path.name
+    assert container_output_path.name.endswith(".wav")
+
+    metadata_path = container_output_path.with_suffix(".json")
+    assert metadata_path.exists()
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata["output_filename"] == container_output_path.name
+    assert metadata["model_id"] == runner.VOX_MODEL_ID
+    assert metadata["provider"] == "local"
+    assert metadata["voice_mode"] == runner.VOX_MODE_DESIGN
+    assert metadata["reference_source_type"] == "none"
+    assert metadata["script_text"] == script
+    assert metadata["generation_params"] == {"format": "wav"}
+    assert metadata["chunk_count"] == 1
+    assert metadata["duration_seconds"] is not None
 
 
 def test_vox_clone_mode_sends_reference_audio_without_prompt_text(monkeypatch, tmp_path: Path):

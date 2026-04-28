@@ -25,23 +25,23 @@
   }
 
   .dark {
-    --background: 229 72% 6%;
+    --background: 230 29% 3%;
     --foreground: 210 40% 98%;
-    --card: 228 44% 10%;
+    --card: 225 29% 7%;
     --card-foreground: 210 40% 98%;
-    --primary: 217 91% 60%;
+    --primary: 220 100% 62%;
     --primary-foreground: 222 47% 11%;
-    --secondary: 224 24% 18%;
+    --secondary: 228 23% 12%;
     --secondary-foreground: 210 40% 98%;
-    --muted: 224 24% 18%;
-    --muted-foreground: 215 18% 74%;
-    --accent: 224 24% 18%;
+    --muted: 228 23% 12%;
+    --muted-foreground: 224 14% 66%;
+    --accent: 228 23% 12%;
     --accent-foreground: 210 40% 98%;
     --destructive: 0 63% 31%;
     --destructive-foreground: 210 40% 98%;
-    --border: 223 22% 25%;
-    --input: 223 22% 25%;
-    --ring: 217 91% 64%;
+    --border: 225 16% 18%;
+    --input: 225 16% 18%;
+    --ring: 220 100% 64%;
   }
 }
 
@@ -52,6 +52,32 @@
 
   body {
     @apply bg-background text-foreground;
+  }
+
+  select {
+    color-scheme: dark;
+  }
+}
+
+@layer components {
+  .nf-surface {
+    @apply rounded-lg border border-white/[0.06] bg-[#0f1218] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)];
+  }
+
+  .nf-surface-raised {
+    @apply rounded-lg border border-white/[0.08] bg-[#151823] shadow-sm;
+  }
+
+  .nf-control {
+    @apply h-9 rounded-md border border-white/[0.08] bg-[#151823] px-3 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 focus:border-primary/60 focus:ring-2 focus:ring-primary/20;
+  }
+
+  .nf-divider-list {
+    @apply overflow-hidden rounded-lg border border-white/[0.06] bg-[#0f1218];
+  }
+
+  .nf-row {
+    @apply border-t border-white/[0.05] first:border-t-0;
   }
 }
 

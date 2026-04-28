@@ -17,7 +17,7 @@ export function MainShell({ children }: MainShellProps) {
       <div
         className={cn(
           'mx-auto px-6 py-8 lg:px-8',
-          isVoiceoverStudio ? 'max-w-[104rem] 2xl:max-w-[112rem]' : 'max-w-5xl',
+          isVoiceoverStudio ? 'max-w-7xl' : 'max-w-5xl',
         )}
       >
         {children}

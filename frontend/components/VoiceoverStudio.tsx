@@ -1,12 +1,14 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle,
   Download,
+  FileText,
   History,
   Loader2,
   Mic2,
+  MoreHorizontal,
   Square,
   Play,
   RefreshCw,
@@ -58,6 +60,12 @@ interface RecentVoiceover {
   created_at: string
   output_path: string
   output_url: string
+  has_script_text?: boolean
+  has_metadata?: boolean
+  script_text_url?: string | null
+  metadata_url?: string | null
+  duration_seconds?: number | null
+  reference_source_type?: string | null
 }
 
 interface PersistedVoiceoverFormState {
@@ -88,6 +96,11 @@ interface TrackedVoiceoverJob extends PersistedActiveVoiceoverJob {
 const dateFormatter = new Intl.DateTimeFormat('en-US', {
   dateStyle: 'medium',
   timeStyle: 'short',
+})
+
+const compactDateFormatter = new Intl.DateTimeFormat('en-US', {
+  month: 'short',
+  day: 'numeric',
 })
 
 const MIN_SPEED = 0.8
@@ -125,21 +138,21 @@ const VOX_MODE_OPTIONS: Array<{
 }> = [
   {
     value: VOX_MODE_DESIGN,
-    label: 'Voice Design',
+    label: 'Design',
     shortLabel: 'Design',
-    helper: 'Text-only voice.',
+    helper: 'No reference.',
   },
   {
     value: VOX_MODE_CLONE,
-    label: 'Clone My Voice',
+    label: 'Clone',
     shortLabel: 'Clone',
-    helper: 'Uses a saved reference.',
+    helper: 'Saved profile.',
   },
   {
     value: VOX_MODE_CONTINUATION,
-    label: 'Continue From Reference',
+    label: 'Continue',
     shortLabel: 'Continue',
-    helper: 'Needs the exact transcript.',
+    helper: 'Reference transcript.',
   },
 ]
 
@@ -233,7 +246,7 @@ function getTrackedJobFilename(job: TrackedVoiceoverJob): string | null {
 
 function getProfileTranscriptSeed(profile: VoiceProfile | null): string {
   if (!profile) return ''
-  return profile.reference_transcript?.trim() || profile.notes?.trim() || ''
+  return profile.reference_transcript?.trim() || ''
 }
 
 function truncateText(value: string | null | undefined, maxLength: number): string {
@@ -265,6 +278,20 @@ function extractErrorMessage(payload: unknown, fallback: string): string {
   }
 
   return fallback
+}
+
+function getJobStatusLabel(status: string | null | undefined): string {
+  if (status === 'processing' || status === 'stitching') return 'running'
+  if (status === 'pending') return 'queued'
+  return status ?? 'restoring'
+}
+
+function getReferenceSourceLabel(source: string | null | undefined): string {
+  if (source === 'saved_profile') return 'saved profile'
+  if (source === 'temp_recording') return 'temp recording'
+  if (source === 'upload') return 'upload'
+  if (source === 'none') return 'no reference'
+  return ''
 }
 
 async function readErrorMessage(response: Response): Promise<string> {
@@ -320,6 +347,33 @@ function uploadVoiceProfile(formData: FormData, onProgress: (value: number) => v
   })
 }
 
+function FlowStep({
+  number,
+  title,
+  aside,
+  children,
+}: {
+  number: number
+  title: string
+  aside?: ReactNode
+  children: ReactNode
+}) {
+  return (
+    <section className="grid gap-4 border-t border-white/[0.06] pt-6 first:border-t-0 first:pt-0 sm:grid-cols-[44px,minmax(0,1fr)]">
+      <div className="pt-0.5 font-mono text-[12px] font-medium tabular-nums text-muted-foreground">
+        {String(number).padStart(2, '0')}
+      </div>
+      <div className="min-w-0 space-y-3">
+        <div className="flex min-h-7 flex-wrap items-center justify-between gap-2">
+          <h3 className="text-sm font-semibold tracking-tight text-foreground">{title}</h3>
+          {aside}
+        </div>
+        {children}
+      </div>
+    </section>
+  )
+}
+
 interface VoiceoverJobsPanelProps {
   activeJobsCount: number
   trackedJobs: TrackedVoiceoverJob[]
@@ -340,69 +394,60 @@ function VoiceoverJobsPanel({
   const hasTrackedJobs = trackedJobs.length > 0
 
   return (
-    <Card className={cn('overflow-hidden border-border/60 bg-card/80 shadow-sm', className)}>
-      <div className={cn('border-b border-border/35 bg-muted/10', hasTrackedJobs ? 'px-6 py-5' : 'px-5 py-4')}>
-        <div className="flex items-start gap-3">
-          <div className="rounded-xl bg-primary/10 p-2.5 text-primary">
-            <History className="h-5 w-5" />
+    <Card className={cn('overflow-hidden border-white/[0.06] bg-[#0f1218] shadow-sm', className)}>
+      <div className="border-b border-white/[0.05] px-4 py-3">
+        <div className="flex items-start gap-2.5">
+          <div className="rounded-md bg-primary/10 p-1.5 text-primary">
+            <History className="h-4 w-4" />
           </div>
           <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="flex flex-wrap items-start justify-between gap-2">
               <div>
-                <p className="text-lg font-semibold tracking-tight">Job Activity</p>
-                <p className="mt-1 text-[11px] font-medium uppercase tracking-[0.18em] text-primary/75">
-                  {hasTrackedJobs ? 'Live Render Progress' : 'Ready Queue'}
-                </p>
-                <p className="mt-2 text-sm text-muted-foreground">
-                  {hasTrackedJobs
-                    ? 'Progress stays visible beside Generate.'
-                    : recentVoiceoversCount > 0
-                      ? 'Idle for now. Latest outputs stay one click away.'
-                      : 'Start a render and track it here.'}
-                </p>
+                <p className="text-sm font-semibold tracking-tight">Job Activity</p>
               </div>
-              <p className="text-xs text-muted-foreground">
-                {activeJobsCount} active, {trackedJobs.length} tracked
-                {recentVoiceoversCount > 0 ? `, ${recentVoiceoversCount} recent` : ''}
+              <p className="font-mono text-[11px] text-muted-foreground">
+                {activeJobsCount} active
+                {recentVoiceoversCount > 0 ? `, ${recentVoiceoversCount} outputs` : ''}
               </p>
             </div>
           </div>
         </div>
       </div>
 
-      <CardContent className={cn('space-y-4 xl:max-h-[calc(100vh-12rem)] xl:overflow-y-auto', hasTrackedJobs ? 'pt-6' : 'pt-4')}>
+      <CardContent className={cn('space-y-3 p-3 xl:max-h-[calc(100vh-10rem)] xl:overflow-y-auto')}>
         {hasTrackedJobs ? (
           <div className="space-y-3">
-            {trackedJobs.map((job) => {
+            <div className="space-y-2">
+              {trackedJobs.map((job) => {
               const currentStatus = job.status
               const progressValue = getJobProgressValue(currentStatus)
               const jobFilename = getTrackedJobFilename(job)
               const isIndeterminate =
-                !currentStatus || currentStatus.status === 'pending' || currentStatus.status === 'stitching'
+                !currentStatus || currentStatus.status === 'queued' || currentStatus.status === 'pending' || currentStatus.status === 'stitching'
 
               return (
-                <div key={job.jobId} className="rounded-xl bg-background/45 p-4 ring-1 ring-border/35">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
+                <div key={job.jobId} className="rounded-lg border border-white/[0.06] bg-primary/[0.06] p-3">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
                     <div className="min-w-0">
                       <p className="text-sm font-semibold">{job.modelLabel}</p>
                       <p className="mt-1 text-xs text-muted-foreground">
-                        {job.profileName} • Started {dateFormatter.format(new Date(job.createdAt))}
+                        {job.profileName} · {dateFormatter.format(new Date(job.createdAt))}
                       </p>
                       <p className="mt-1 text-xs font-mono text-muted-foreground">{job.jobId}</p>
-                      {jobFilename && <p className="mt-2 text-xs text-muted-foreground">Output: {jobFilename}</p>}
+                      {jobFilename && <p className="mt-2 truncate text-xs text-muted-foreground">{jobFilename}</p>}
                     </div>
-                    <div className="rounded-full border border-border/50 px-2.5 py-1 text-xs font-medium text-muted-foreground">
-                      {currentStatus?.status ?? 'restoring'}
+                    <div className="rounded-full border border-primary/20 bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
+                      {getJobStatusLabel(currentStatus?.status)}
                     </div>
                   </div>
 
-                  <div className="mt-4 space-y-2">
-                    <Progress value={progressValue} indeterminate={isIndeterminate} />
+                  <div className="mt-3 space-y-2">
+                    <Progress value={progressValue} indeterminate={isIndeterminate} className="h-1" />
                     <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
                       <span>
                         {currentStatus?.completed_chunks ?? 0} / {currentStatus?.total_chunks ?? 0} chunks complete
                       </span>
-                      {currentStatus?.status === 'stitching' && <span>Finalizing audio...</span>}
+                      {currentStatus?.status === 'stitching' && <span>Finalizing</span>}
                       {!currentStatus && <span>Restoring job state...</span>}
                     </div>
                   </div>
@@ -412,7 +457,7 @@ function VoiceoverJobsPanel({
                   )}
 
                   {currentStatus?.status === 'done' && currentStatus.output_url && (
-                    <div className="mt-4 space-y-3">
+                    <div className="mt-3 space-y-3">
                       <audio
                         controls
                         className="w-full"
@@ -430,24 +475,46 @@ function VoiceoverJobsPanel({
                   )}
                 </div>
               )
-            })}
+              })}
+            </div>
+            {latestRecentVoiceover && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <p className="text-[11px] font-medium uppercase tracking-[0.12em] text-muted-foreground">Recent</p>
+                  <button
+                    type="button"
+                    className="text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+                    onClick={onOpenOutputs}
+                  >
+                    All
+                  </button>
+                </div>
+                <div className="rounded-md border border-white/[0.06] bg-[#151823] p-3">
+                  <p className="truncate text-sm font-medium">{latestRecentVoiceover.filename}</p>
+                  <p className="mt-1 font-mono text-[11px] text-muted-foreground">
+                    {typeof latestRecentVoiceover.duration_seconds === 'number'
+                      ? `${formatDuration(Math.round(latestRecentVoiceover.duration_seconds))} · `
+                      : ''}
+                    {dateFormatter.format(new Date(latestRecentVoiceover.created_at))}
+                  </p>
+                </div>
+              </div>
+            )}
           </div>
         ) : (
-          <div className="space-y-4 rounded-xl border border-dashed border-border/50 p-6 text-center">
-            <p className="text-sm font-medium text-foreground">No live jobs right now</p>
+          <div className="space-y-3 rounded-lg border border-dashed border-white/[0.08] p-4 text-center">
+            <p className="text-sm font-medium text-foreground">No live jobs</p>
 
             {latestRecentVoiceover ? (
-              <div className="rounded-xl bg-background/45 p-4 text-left ring-1 ring-border/35">
-                <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-primary/75">Latest Output</p>
+              <div className="rounded-md border border-white/[0.06] bg-[#151823] p-3 text-left">
+                <p className="text-[11px] font-medium uppercase tracking-[0.12em] text-primary/75">Latest</p>
                 <p className="mt-2 truncate text-sm font-semibold">{latestRecentVoiceover.filename}</p>
                 <p className="mt-1 text-xs text-muted-foreground">
                   Saved {dateFormatter.format(new Date(latestRecentVoiceover.created_at))}
                 </p>
               </div>
             ) : (
-              <p className="text-xs text-muted-foreground">
-                Choose a model, set up the reference flow, and submit a render to populate this panel.
-              </p>
+              <p className="text-xs text-muted-foreground">Renders will appear here.</p>
             )}
 
             {recentVoiceoversCount > 0 && (
@@ -765,6 +832,7 @@ export function VoiceoverStudio() {
     [profiles, selectedProfileId],
   )
   const isVoxModel = selectedModel?.model_id === VOX_MODEL_ID
+  const supportsSpeedControl = selectedModel?.model_id === 'f5tts'
   const isVoxDesignMode = isVoxModel && voxMode === VOX_MODE_DESIGN
   const isVoxContinuationMode = isVoxModel && voxMode === VOX_MODE_CONTINUATION
   const voxContinuationUsesRecordedReference = isVoxContinuationMode && voxContinuationReferenceSource === 'record'
@@ -916,6 +984,7 @@ export function VoiceoverStudio() {
         return
       }
       setVoxRecordedReferenceId('')
+      setVoxPromptText('')
       setVoxRecordedReferenceError(error instanceof Error ? error.message : 'Failed to prepare the recorded reference clip')
     } finally {
       if (requestToken === voxRecordedReferenceTokenRef.current) {
@@ -1105,6 +1174,7 @@ export function VoiceoverStudio() {
   }
 
   const handleRecordReferenceNow = () => {
+    clearRecordedReference()
     setVoxContinuationReferenceSource('record')
     setVoxRecordedReferenceError(null)
   }
@@ -1117,7 +1187,7 @@ export function VoiceoverStudio() {
   const handleGenerate = async () => {
     if (!canGenerate || !selectedModel?.available) return
 
-    const requestedSpeed = Number(clampSpeed(parseFloat(speedInput)).toFixed(2))
+    const requestedSpeed = supportsSpeedControl ? Number(clampSpeed(parseFloat(speedInput)).toFixed(2)) : 1
     const trimmedScript = script.trim()
     const trimmedVoxPromptText = voxPromptText.trim()
     const trimmedVoxStyleText = voxStyleText.trim()
@@ -1176,12 +1246,15 @@ export function VoiceoverStudio() {
     }
   }
 
-  const deleteRecentVoiceoverById = async (jobId: string) => {
+  const deleteRecentVoiceoverById = async (jobId: string, options?: { refresh?: boolean }) => {
     await apiRequest<{ deleted: boolean }>(`/api/v1/voiceover/output/${jobId}`, {
       method: 'DELETE',
     })
     setTrackedJobs((current) => current.filter((job) => job.jobId !== jobId))
     setRecentVoiceovers((current) => current.filter((voiceover) => voiceover.job_id !== jobId))
+    if (options?.refresh !== false) {
+      await refreshRecentVoiceovers()
+    }
   }
 
   const handleDeleteRecentVoiceover = async (item: RecentVoiceover) => {
@@ -1246,7 +1319,7 @@ export function VoiceoverStudio() {
     setRecentError(null)
 
     const results = await Promise.allSettled(
-      selectedRecentVoiceovers.map((item) => deleteRecentVoiceoverById(item.job_id)),
+      selectedRecentVoiceovers.map((item) => deleteRecentVoiceoverById(item.job_id, { refresh: false })),
     )
 
     const failedCount = results.filter((result) => result.status === 'rejected').length
@@ -1259,6 +1332,7 @@ export function VoiceoverStudio() {
     setSelectedOutputIds((current) =>
       current.filter((jobId) => results.some((result, index) => result.status === 'rejected' && selectedRecentVoiceovers[index]?.job_id === jobId)),
     )
+    await refreshRecentVoiceovers()
     setBulkDeletingOutputs(false)
   }
 
@@ -1293,40 +1367,26 @@ export function VoiceoverStudio() {
   ]
 
   const renderProfilesPanel = () => (
-    <Card className="overflow-hidden border-border/70 bg-card shadow-sm">
-      <div className="border-b border-border/50 bg-muted/15 px-6 py-5">
-        <div className="flex items-start gap-3">
-          <div className="rounded-xl bg-primary/12 p-2.5 text-primary">
-            <Mic2 className="h-5 w-5" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <p className="text-lg font-semibold tracking-tight">Voice Profiles</p>
-                <p className="mt-2 text-sm text-muted-foreground">Save a reusable reference once, then use it everywhere.</p>
-              </div>
-              <p className="text-xs text-muted-foreground">{profilesLoading ? 'Loading...' : `${profiles.length} saved`}</p>
-            </div>
-          </div>
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold tracking-tight">Voice Profiles</p>
+          <p className="mt-1 font-mono text-[11px] text-muted-foreground">
+            {profilesLoading ? 'Loading...' : `${profiles.length} saved`}
+          </p>
         </div>
+        <Button
+          type="button"
+          variant={showProfileForm ? 'secondary' : 'outline'}
+          size="sm"
+          onClick={() => setShowProfileForm((current) => !current)}
+        >
+          {showProfileForm ? 'Close' : 'Add Profile'}
+        </Button>
       </div>
 
-      <CardContent className="space-y-5 pt-6">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="text-sm text-muted-foreground">
-            {profilesLoading ? 'Loading profiles...' : `${profiles.length} saved voice profile${profiles.length === 1 ? '' : 's'}`}
-          </div>
-          <Button
-            type="button"
-            variant={showProfileForm ? 'secondary' : 'outline'}
-            onClick={() => setShowProfileForm((current) => !current)}
-          >
-            {showProfileForm ? 'Close' : 'Add Profile'}
-          </Button>
-        </div>
-
         {showProfileForm && (
-          <div className="space-y-4 rounded-xl bg-background/55 p-4 ring-1 ring-border/60">
+          <div className="space-y-4 rounded-lg border border-white/[0.06] bg-[#151823] p-4">
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2">
                 <Label htmlFor="voice-profile-name">Profile Name</Label>
@@ -1339,7 +1399,7 @@ export function VoiceoverStudio() {
               </div>
               <div className="space-y-2">
                 <Label>Reference Source</Label>
-                <div className="flex flex-wrap rounded-lg border border-border/70 bg-background/60 p-1">
+                <div className="flex w-fit flex-wrap rounded-lg border border-white/[0.06] bg-[#0f1218] p-1">
                   <button
                     type="button"
                     onClick={() => {
@@ -1348,11 +1408,11 @@ export function VoiceoverStudio() {
                     }}
                     className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
                       profileReferenceSource === 'upload'
-                        ? 'bg-primary text-primary-foreground'
-                        : 'text-muted-foreground hover:bg-background/80 hover:text-foreground'
+                        ? 'bg-[#1c1f2c] text-foreground'
+                        : 'text-muted-foreground hover:text-foreground'
                     }`}
                   >
-                    Upload Reference Clip
+                    Upload
                   </button>
                   <button
                     type="button"
@@ -1362,16 +1422,14 @@ export function VoiceoverStudio() {
                     }}
                     className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
                       profileReferenceSource === 'record'
-                        ? 'bg-primary text-primary-foreground'
-                        : 'text-muted-foreground hover:bg-background/80 hover:text-foreground'
+                        ? 'bg-[#1c1f2c] text-foreground'
+                        : 'text-muted-foreground hover:text-foreground'
                     }`}
                   >
-                    Record Reference Now
+                    Record
                   </button>
                 </div>
-                <p className="text-xs text-muted-foreground">
-                  Use a quiet room and close mic placement. NeonForge stores a high-quality WAV master.
-                </p>
+                <p className="text-xs text-muted-foreground">Short, clean reference clips work best.</p>
               </div>
             </div>
 
@@ -1391,7 +1449,7 @@ export function VoiceoverStudio() {
                   icon="audio"
                 />
               ) : (
-                <div className="space-y-3 rounded-xl bg-background/60 p-4 ring-1 ring-border/55">
+                <div className="space-y-3 rounded-lg bg-background/60 p-4 ring-1 ring-border/55">
                   <div className="grid gap-4 md:grid-cols-2">
                     <div className="space-y-2">
                       <Label htmlFor="voice-profile-input-device">Microphone Input</Label>
@@ -1411,9 +1469,7 @@ export function VoiceoverStudio() {
                           </option>
                         ))}
                       </select>
-                      <p className="text-xs text-muted-foreground">
-                        Choose the exact mic if the browser default is not the one you want.
-                      </p>
+                      <p className="text-xs text-muted-foreground">Pick a mic when the default is wrong.</p>
                     </div>
 
                     <div className="space-y-2">
@@ -1429,8 +1485,8 @@ export function VoiceoverStudio() {
                               : 'border-border/60 bg-background/60 text-muted-foreground hover:border-border hover:text-foreground'
                           }`}
                         >
-                          <p className="text-sm font-semibold">Raw Reference Capture</p>
-                          <p className="mt-1 text-xs leading-5">Better for accurate voice capture and cloning quality.</p>
+                          <p className="text-sm font-semibold">Raw</p>
+                          <p className="mt-1 text-xs leading-5">Best clone source.</p>
                         </button>
                         <button
                           type="button"
@@ -1442,13 +1498,11 @@ export function VoiceoverStudio() {
                               : 'border-border/60 bg-background/60 text-muted-foreground hover:border-border hover:text-foreground'
                           }`}
                         >
-                          <p className="text-sm font-semibold">Enhanced Reference Capture</p>
-                          <p className="mt-1 text-xs leading-5">Can sound closer and more polished in untreated rooms.</p>
+                          <p className="text-sm font-semibold">Enhanced</p>
+                          <p className="mt-1 text-xs leading-5">Cleaner room sound.</p>
                         </button>
                       </div>
-                      <p className="text-xs text-muted-foreground">
-                        Raw = better for accurate voice capture / cloning. Enhanced = can sound closer and more polished in untreated rooms.
-                      </p>
+                      <p className="text-xs text-muted-foreground">Raw is most faithful; enhanced is cleaner.</p>
                     </div>
                   </div>
 
@@ -1493,7 +1547,7 @@ export function VoiceoverStudio() {
                         }}
                       >
                         <Trash2 className="h-4 w-4" />
-                        Discard / Re-record
+                        Re-record
                       </Button>
                     )}
                   </div>
@@ -1531,7 +1585,7 @@ export function VoiceoverStudio() {
 
                   {profileRecorder.audioUrl && !profileRecorder.isRecording && (
                     <div className="rounded-lg border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-100">
-                      Recording ready to save as a reusable voice profile.
+                      Recording ready.
                       {profileRecorder.mimeType ? ` Captured as ${profileRecorder.mimeType}.` : ''}
                     </div>
                   )}
@@ -1554,9 +1608,9 @@ export function VoiceoverStudio() {
                 onChange={(event) => setProfileNotes(event.target.value)}
                 placeholder="Optional context, tone, or pronunciation notes"
                 rows={3}
-                className="bg-background/80"
+                className="border-white/[0.08] bg-[#0f1218]"
               />
-              <p className="text-xs text-muted-foreground">Transcript is captured automatically after save.</p>
+              <p className="text-xs text-muted-foreground">Transcript is added when STT is available.</p>
             </div>
 
             {uploadingProfile && (
@@ -1572,11 +1626,9 @@ export function VoiceoverStudio() {
             <div className="flex flex-wrap items-center gap-3">
               <Button type="button" className="gap-2" onClick={handleCreateProfile} disabled={!canSaveProfile}>
                 {uploadingProfile ? <Loader2 className="h-4 w-4 animate-spin" /> : <UploadCloud className="h-4 w-4" />}
-                {uploadingProfile ? 'Uploading...' : 'Save Profile'}
+                {uploadingProfile ? 'Uploading...' : 'Save'}
               </Button>
-              <p className="text-xs text-muted-foreground">
-                {profileReferenceSource === 'upload' ? 'WAV, MP3, and M4A are accepted.' : 'Record a short clip, preview it, then save it.'}
-              </p>
+              <p className="text-xs text-muted-foreground">{profileReferenceSource === 'upload' ? 'WAV, MP3, M4A.' : 'Preview before saving.'}</p>
             </div>
           </div>
         )}
@@ -1587,99 +1639,75 @@ export function VoiceoverStudio() {
           </div>
         )}
 
-        <div className="space-y-3">
+        <div className="nf-divider-list">
           {profiles.map((profile) => {
             const isPreviewing = previewProfileId === profile.id && previewUrl
             const transcriptPreview = truncateText(profile.reference_transcript, 180)
             const notesPreview =
               profile.notes && profile.notes !== profile.reference_transcript ? truncateText(profile.notes, 140) : ''
+            const rowDetail = notesPreview || transcriptPreview || 'No notes'
 
             return (
-              <div key={profile.id} className="rounded-xl bg-background/55 p-4 ring-1 ring-border/55">
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <p className="text-sm font-semibold">{profile.name}</p>
-                      {profile.reference_transcript && (
-                        <span className="rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-200">
-                          Transcript ready
-                        </span>
-                      )}
-                    </div>
-                    <p className="mt-1 text-xs text-muted-foreground">Saved {dateFormatter.format(new Date(profile.created_at))}</p>
-                  </div>
-                  <div className="flex gap-2">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="gap-2"
-                      onClick={() => handlePlayProfile(profile)}
-                    >
-                      <Play className="h-3.5 w-3.5" />
-                      Play
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="gap-2"
-                      onClick={() => void handleDeleteProfile(profile)}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                      Delete
-                    </Button>
-                  </div>
+              <div key={profile.id} className="border-b border-white/10 last:border-b-0">
+                <div className="grid grid-cols-[auto,minmax(0,max-content),auto,minmax(0,1fr),auto,auto] items-center gap-3 px-3 py-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-8 w-8 shrink-0 px-0"
+                    title="Play"
+                    onClick={() => handlePlayProfile(profile)}
+                  >
+                    <Play className="h-3.5 w-3.5" />
+                  </Button>
+                  <p className="min-w-0 truncate text-sm font-semibold">{profile.name}</p>
+                  <span aria-hidden="true" className="block w-0 shrink-0" />
+                  <p className="min-w-0 truncate text-sm text-muted-foreground">{rowDetail}</p>
+                  <p className="shrink-0 text-[11px] text-muted-foreground">
+                    {compactDateFormatter.format(new Date(profile.created_at))}
+                  </p>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-8 w-8 shrink-0 px-0"
+                    title="Delete"
+                    onClick={() => void handleDeleteProfile(profile)}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
                 </div>
 
-                {transcriptPreview && (
-                  <div className="mt-3 rounded-lg bg-background/70 px-3 py-2 ring-1 ring-border/45">
-                    <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-primary/75">Reference Transcript</p>
-                    <p className="mt-1 text-sm text-foreground/90">{transcriptPreview}</p>
-                  </div>
-                )}
-
-                {notesPreview && <p className="mt-3 text-sm text-muted-foreground">Notes: {notesPreview}</p>}
-
                 {isPreviewing && (
-                  <audio key={previewUrl} controls autoPlay className="mt-3 w-full" src={previewUrl}>
-                    Your browser does not support audio playback.
-                  </audio>
+                  <div className="px-3 pb-2">
+                    <audio key={previewUrl} controls autoPlay className="h-8 w-full" src={previewUrl}>
+                      Your browser does not support audio playback.
+                    </audio>
+                  </div>
                 )}
               </div>
             )
           })}
 
           {!profilesLoading && profiles.length === 0 && (
-            <div className="rounded-xl border border-dashed border-border/60 p-6 text-center text-sm text-muted-foreground">
+            <div className="rounded-xl border border-dashed border-white/[0.08] p-6 text-center text-sm text-muted-foreground">
               Save your first voice profile to reuse it later.
             </div>
           )}
         </div>
-      </CardContent>
-    </Card>
+    </div>
   )
 
   const renderRecentVoiceoversPanel = () => (
-    <Card className="overflow-hidden border-border/70 bg-card shadow-sm">
-      <div className="border-b border-border/50 bg-muted/15 px-6 py-5">
-        <div className="flex items-start gap-3">
-          <div className="rounded-xl bg-primary/12 p-2.5 text-primary">
-            <History className="h-5 w-5" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <p className="text-lg font-semibold tracking-tight">Recent Voiceovers</p>
-                <p className="mt-2 text-sm text-muted-foreground">Select, download, or clear finished renders.</p>
-              </div>
-              <p className="text-xs text-muted-foreground">{recentLoading ? 'Loading...' : `${recentVoiceovers.length} saved`}</p>
-            </div>
-          </div>
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold tracking-tight">Outputs</p>
+          <p className="mt-1 font-mono text-[11px] text-muted-foreground">
+            {recentLoading ? 'Loading...' : `${recentVoiceovers.length} saved`}
+          </p>
         </div>
       </div>
-
-      <CardContent className="space-y-5 pt-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-3">
             {!recentLoading && recentVoiceovers.length > 0 && (
@@ -1742,9 +1770,7 @@ export function VoiceoverStudio() {
         </div>
 
         {selectedRecentVoiceovers.length > 1 && (
-          <p className="text-xs text-muted-foreground">
-            Browsers may ask you to allow multiple downloads when you bulk-download files.
-          </p>
+          <p className="text-xs text-muted-foreground">Your browser may ask to allow multiple downloads.</p>
         )}
 
         {recentError && (
@@ -1753,67 +1779,112 @@ export function VoiceoverStudio() {
           </div>
         )}
 
-        <div className="space-y-3">
+        <div className="nf-divider-list">
           {recentVoiceovers.map((item) => {
             const isSelected = selectedOutputIds.includes(item.job_id)
+            const durationLabel =
+              typeof item.duration_seconds === 'number' ? formatDuration(Math.round(item.duration_seconds)) : null
+            const detailParts = [
+              getReferenceSourceLabel(item.reference_source_type),
+              item.has_script_text ? 'script' : null,
+              item.has_metadata ? 'meta' : null,
+            ].filter(Boolean)
+            const detailLabel = detailParts.length > 0 ? detailParts.join(' · ') : 'Local render'
 
             return (
               <div
                 key={item.job_id}
                 className={cn(
-                  'rounded-xl bg-background/55 p-4 ring-1 ring-border/55 transition-colors',
-                  isSelected && 'bg-background/75 ring-2 ring-primary/35',
+                  'border-b border-white/10 px-3 py-2 transition-colors last:border-b-0',
+                  isSelected && 'bg-primary/[0.06]',
                 )}
               >
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div className="flex min-w-0 items-start gap-3">
+                <div className="grid grid-cols-[auto,minmax(0,max-content),auto,minmax(0,1fr),auto,minmax(0,176px),auto] items-center gap-3">
+                  <div className="flex h-8 w-8 shrink-0 items-center justify-center">
                     <input
                       type="checkbox"
-                      className="mt-1 h-4 w-4 rounded border-input bg-background accent-primary"
+                      className="h-4 w-4 rounded border-input bg-background accent-primary"
                       checked={isSelected}
                       onChange={() => toggleRecentVoiceoverSelection(item.job_id)}
                       disabled={bulkDeletingOutputs}
                     />
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-semibold">{item.filename}</p>
-                      <p className="mt-1 text-xs text-muted-foreground">Saved {dateFormatter.format(new Date(item.created_at))}</p>
-                    </div>
                   </div>
-                  <div className="flex flex-wrap gap-2">
-                    <a href={item.output_url} download className="inline-flex">
-                      <Button type="button" variant="outline" size="sm" className="gap-2">
-                        <Download className="h-3.5 w-3.5" />
-                        Download
-                      </Button>
-                    </a>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="gap-2"
-                      onClick={() => void handleDeleteRecentVoiceover(item)}
-                      disabled={deletingOutputId === item.job_id || bulkDeletingOutputs}
+                  <p className="min-w-0 truncate text-sm font-semibold">{item.filename}</p>
+                  {durationLabel ? (
+                    <p className="shrink-0 text-[11px] text-muted-foreground">{durationLabel}</p>
+                  ) : (
+                    <span aria-hidden="true" className="block w-0 shrink-0" />
+                  )}
+                  <p className="min-w-0 truncate text-sm text-muted-foreground">{detailLabel}</p>
+                  <p className="shrink-0 text-[11px] text-muted-foreground">
+                    {compactDateFormatter.format(new Date(item.created_at))}
+                  </p>
+                  <audio
+                    controls
+                    className="h-8 min-w-0 w-full"
+                    src={`${item.output_url}?v=${encodeURIComponent(item.created_at)}`}
+                  >
+                    Your browser does not support audio playback.
+                  </audio>
+                  <details className="relative shrink-0">
+                    <summary
+                      className="flex h-8 w-8 cursor-pointer list-none items-center justify-center rounded-md border border-input text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+                      title="Output actions"
                     >
-                      <Trash2 className="h-3.5 w-3.5" />
-                      {deletingOutputId === item.job_id ? 'Deleting...' : 'Delete'}
-                    </Button>
-                  </div>
+                      <MoreHorizontal className="h-4 w-4" />
+                    </summary>
+                    <div className="absolute right-0 z-20 mt-2 w-44 overflow-hidden rounded-lg border border-white/[0.08] bg-[#151823] p-1 shadow-xl">
+                      <a
+                        href={item.output_url}
+                        download
+                        className="flex items-center gap-2 rounded-md px-3 py-2 text-xs text-foreground hover:bg-accent"
+                      >
+                        <Download className="h-3.5 w-3.5" />
+                        Download Audio
+                      </a>
+                      {item.has_script_text && item.script_text_url && (
+                        <a
+                          href={item.script_text_url}
+                          download
+                          className="flex items-center gap-2 rounded-md px-3 py-2 text-xs text-foreground hover:bg-accent"
+                        >
+                          <FileText className="h-3.5 w-3.5" />
+                          Download Text
+                        </a>
+                      )}
+                      {item.has_metadata && item.metadata_url && (
+                        <a
+                          href={item.metadata_url}
+                          download
+                          className="flex items-center gap-2 rounded-md px-3 py-2 text-xs text-foreground hover:bg-accent"
+                        >
+                          <FileText className="h-3.5 w-3.5" />
+                          Download Metadata
+                        </a>
+                      )}
+                      <button
+                        type="button"
+                        className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-xs text-red-300 hover:bg-red-500/10"
+                        onClick={() => void handleDeleteRecentVoiceover(item)}
+                        disabled={deletingOutputId === item.job_id || bulkDeletingOutputs}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        {deletingOutputId === item.job_id ? 'Deleting...' : 'Delete'}
+                      </button>
+                    </div>
+                  </details>
                 </div>
-                <audio controls className="mt-3 w-full" src={`${item.output_url}?v=${encodeURIComponent(item.created_at)}`}>
-                  Your browser does not support audio playback.
-                </audio>
               </div>
             )
           })}
 
           {!recentLoading && recentVoiceovers.length === 0 && (
-            <div className="rounded-xl border border-dashed border-border/60 p-6 text-center text-sm text-muted-foreground">
+            <div className="rounded-xl border border-dashed border-white/[0.08] p-6 text-center text-sm text-muted-foreground">
               Completed voiceovers will appear here after a render finishes.
             </div>
           )}
         </div>
-      </CardContent>
-    </Card>
+    </div>
   )
 
   const renderGeneratePanel = () => {
@@ -1822,24 +1893,263 @@ export function VoiceoverStudio() {
     const showVoiceProfileSelection = hasSelectedModel && !isVoxContinuationMode && requiresSavedVoiceProfile
     const selectedProfileTranscript = getProfileTranscriptSeed(selectedProfile)
     const scriptLabel = isVoxContinuationMode ? 'New Script' : 'Script'
-    const scriptHelper = isVoxContinuationMode
-      ? 'Write the narration that should follow the reference clip.'
-      : 'Paste the narration you want to render.'
     const scriptPlaceholder = isVoxContinuationMode
       ? 'Write the next narration that should continue after the reference clip.'
       : 'Paste the voiceover script here.'
 
+    const renderModelStep = () => (
+      <FlowStep number={1} title="Model">
+        <div className="grid gap-2 md:grid-cols-3">
+          {models.map((model) => {
+            const isActive = selectedModelId === model.model_id
+            return (
+              <button
+                key={model.model_id}
+                type="button"
+                disabled={!model.available}
+                aria-pressed={isActive}
+                onClick={() => setSelectedModelId(model.model_id)}
+                className={cn(
+                  'min-w-0 rounded-lg border px-3 py-2.5 text-left transition-colors',
+                  isActive
+                    ? 'border-primary/70 bg-primary/10 shadow-[0_0_0_3px_rgba(61,123,255,0.12)]'
+                    : 'border-white/[0.06] bg-[#0f1218] hover:border-white/[0.12] hover:bg-[#151823]',
+                  !model.available && 'cursor-not-allowed opacity-45 hover:border-white/[0.06] hover:bg-[#0f1218]',
+                )}
+              >
+                <div className="flex items-center gap-2">
+                  {isActive && <span className="h-1.5 w-1.5 rounded-full bg-primary" />}
+                  <span className="truncate text-sm font-semibold">{model.display_name}</span>
+                </div>
+                <p className="mt-1 font-mono text-[11px] text-muted-foreground">
+                  {model.available ? model.model_id : 'unavailable'}
+                </p>
+              </button>
+            )
+          })}
+        </div>
+        {modelsLoading ? (
+          <p className="text-xs text-muted-foreground">Loading models...</p>
+        ) : availableModels.length === 0 ? (
+          <p className="text-xs text-muted-foreground">No runnable voice models are currently available.</p>
+        ) : null}
+      </FlowStep>
+    )
+
+    const renderProfilePicker = (options?: { compact?: boolean }) => (
+      <div className="space-y-2">
+        <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr),auto]">
+          <select
+            id="voice-profile-select"
+            value={selectedProfileId}
+            onChange={(event) => setSelectedProfileId(event.target.value)}
+            className="nf-control w-full"
+          >
+            <option value="">Select a saved profile</option>
+            {profiles.map((profile) => (
+              <option key={profile.id} value={profile.id}>
+                {profile.name}
+              </option>
+            ))}
+          </select>
+          {!options?.compact && (
+            <Button type="button" variant="outline" size="sm" onClick={() => setActiveWorkspaceTab('profiles')}>
+              Add Profile
+            </Button>
+          )}
+        </div>
+        {selectedProfile && (
+          <p className="truncate text-xs text-muted-foreground">
+            {selectedProfile.notes || selectedProfile.reference_transcript || 'Reference ready.'}
+          </p>
+        )}
+      </div>
+    )
+
+    const renderContinuationReference = () => (
+      <div className="space-y-3">
+        <div className="inline-flex w-fit rounded-lg border border-white/[0.06] bg-[#0f1218] p-1">
+          <button
+            type="button"
+            aria-pressed={voxContinuationReferenceSource === 'profile'}
+            onClick={handleUseSavedVoiceProfile}
+            className={cn(
+              'rounded-md px-3 py-1.5 text-xs font-medium transition-colors',
+              voxContinuationReferenceSource === 'profile' ? 'bg-[#1c1f2c] text-foreground' : 'text-muted-foreground hover:text-foreground',
+            )}
+          >
+            Saved Profile
+          </button>
+          <button
+            type="button"
+            aria-pressed={voxContinuationReferenceSource === 'record'}
+            onClick={handleRecordReferenceNow}
+            className={cn(
+              'rounded-md px-3 py-1.5 text-xs font-medium transition-colors',
+              voxContinuationReferenceSource === 'record' ? 'bg-[#1c1f2c] text-foreground' : 'text-muted-foreground hover:text-foreground',
+            )}
+          >
+            Record
+          </button>
+        </div>
+
+        {voxContinuationReferenceSource === 'profile' ? (
+          <div className="grid gap-2 lg:grid-cols-[minmax(0,1fr),minmax(0,260px)]">
+            {renderProfilePicker({ compact: true })}
+            <div className="min-w-0 rounded-md border border-white/[0.06] bg-[#0f1218] px-3 py-2">
+              <p className="truncate text-sm font-medium">
+                {selectedProfile ? selectedProfile.name : 'Choose a saved profile'}
+              </p>
+              <p className="mt-1 truncate text-xs text-muted-foreground">
+                {selectedProfileTranscript ? `Transcript: ${truncateText(selectedProfileTranscript, 96)}` : 'Transcript required below'}
+              </p>
+            </div>
+          </div>
+        ) : (
+          <div className="rounded-md border border-white/[0.06] bg-[#0f1218] p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              {!voxRecorder.isRecording ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="gap-2"
+                  onClick={() => void handleStartRecordedReference()}
+                >
+                  <Mic2 className="h-3.5 w-3.5" />
+                  Record
+                </Button>
+              ) : (
+                <Button
+                  type="button"
+                  variant="destructive"
+                  size="sm"
+                  className="gap-2"
+                  onClick={voxRecorder.stopRecording}
+                >
+                  <Square className="h-3.5 w-3.5" />
+                  Stop
+                </Button>
+              )}
+
+              {voxRecorder.isRecording && (
+                <span className="font-mono text-xs text-foreground/90">{formatDuration(voxRecorder.duration)}</span>
+              )}
+
+              {(voxRecorder.audioUrl || voxRecordedReferenceId || voxRecordedReferencePending) && !voxRecorder.isRecording && (
+                <Button type="button" variant="ghost" size="sm" className="gap-2" onClick={() => clearRecordedReference()}>
+                  <Trash2 className="h-3.5 w-3.5" />
+                  Re-record
+                </Button>
+              )}
+            </div>
+
+            {voxRecorder.audioUrl && !voxRecorder.isRecording && (
+              <audio controls className="mt-2 h-8 w-full" src={voxRecorder.audioUrl}>
+                Your browser does not support audio playback.
+              </audio>
+            )}
+            {voxRecordedReferencePending && (
+              <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                Transcribing...
+              </div>
+            )}
+            {voxRecordedReferenceId && !voxRecordedReferencePending && (
+              <p className="mt-2 text-xs text-emerald-300">Recorded reference ready.</p>
+            )}
+            {voxRecordedReferenceError && <p className="mt-2 text-xs text-red-300">{voxRecordedReferenceError}</p>}
+            {voxRecorder.error && <p className="mt-2 text-xs text-amber-300">{voxRecorder.error}</p>}
+          </div>
+        )}
+
+        <div className="space-y-2">
+          <div className="flex items-center justify-between gap-3">
+            <Label htmlFor="vox-prompt-text">Reference Transcript</Label>
+            {(voxContinuationUsesRecordedReference && voxRecordedReferenceId) ||
+            (!voxContinuationUsesRecordedReference && selectedProfileTranscript) ? (
+              <span className="rounded-full border border-white/[0.08] px-2 py-0.5 text-[11px] text-muted-foreground">
+                {voxContinuationUsesRecordedReference ? 'STT filled' : 'Profile filled'}
+              </span>
+            ) : null}
+          </div>
+          <Textarea
+            id="vox-prompt-text"
+            value={voxPromptText}
+            onChange={(event) => setVoxPromptText(event.target.value)}
+            placeholder={
+              voxContinuationUsesRecordedReference
+                ? 'ASR will fill this after recording.'
+                : 'Exact words spoken in the saved reference clip.'
+            }
+            rows={4}
+            className="min-h-[92px] border-white/[0.08] bg-[#0f1218]"
+          />
+        </div>
+      </div>
+    )
+
+    const renderModeReferenceStep = () => {
+      if (!hasSelectedModel) return null
+
+      if (!isVoxModel) {
+        return (
+          <FlowStep number={2} title="Reference">
+            {renderProfilePicker()}
+          </FlowStep>
+        )
+      }
+
+      return (
+        <FlowStep number={2} title="Mode / Reference">
+          <div className="space-y-4">
+            <div className="grid gap-2 md:grid-cols-3">
+              {VOX_MODE_OPTIONS.map((option) => {
+                const isActive = voxMode === option.value
+                return (
+                  <button
+                    key={option.value}
+                    type="button"
+                    aria-pressed={isActive}
+                    onClick={() => setVoxMode(option.value)}
+                    className={cn(
+                      'rounded-lg border px-3 py-2.5 text-left transition-colors',
+                      isActive
+                        ? 'border-primary/70 bg-primary/10 shadow-[0_0_0_3px_rgba(61,123,255,0.12)]'
+                        : 'border-white/[0.06] bg-[#0f1218] hover:border-white/[0.12] hover:bg-[#151823]',
+                    )}
+                  >
+                    <p className="text-sm font-semibold">{option.shortLabel}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">{option.helper}</p>
+                  </button>
+                )
+              })}
+            </div>
+
+            {isVoxDesignMode ? (
+              <div className="rounded-md border border-white/[0.06] bg-[#0f1218] px-3 py-2 text-sm text-muted-foreground">
+                No reference needed.
+              </div>
+            ) : isVoxContinuationMode ? (
+              renderContinuationReference()
+            ) : (
+              renderProfilePicker()
+            )}
+          </div>
+        </FlowStep>
+      )
+    }
+
     const renderScriptPanel = () => (
-      <div className="space-y-2 rounded-xl bg-background/55 p-4 ring-1 ring-border/55">
-        <Label htmlFor="voiceover-script">{scriptLabel}</Label>
-        <p className="text-xs text-muted-foreground">{scriptHelper}</p>
+      <div className="space-y-2">
         <Textarea
           id="voiceover-script"
           value={script}
           onChange={(event) => setScript(event.target.value)}
           placeholder={scriptPlaceholder}
           rows={10}
-          className="min-h-[220px] bg-background/85"
+          aria-label={scriptLabel}
+          className="min-h-[170px] border-white/[0.08] bg-[#0f1218]"
         />
         <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
           <span>{script.length} characters</span>
@@ -1849,451 +2159,122 @@ export function VoiceoverStudio() {
     )
 
     return (
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1.7fr),320px] 2xl:grid-cols-[minmax(0,1.85fr),340px]">
+      <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr),300px] xl:grid-cols-[minmax(0,820px),300px]">
         <div className="space-y-6">
-          <Card className="overflow-hidden border-border/70 bg-card shadow-sm">
-            <div className="border-b border-border/50 bg-muted/15 px-6 py-5">
-              <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-                <div className="flex items-start gap-3">
-                  <div className="rounded-xl bg-primary/12 p-2.5 text-primary">
-                    <Wand2 className="h-5 w-5" />
-                  </div>
-                  <div>
-                    <p className="text-lg font-semibold tracking-tight">Generate Voiceover</p>
-                  </div>
-                </div>
-                {recentVoiceovers.length > 0 && (
-                  <Button type="button" variant="outline" size="sm" onClick={() => setActiveWorkspaceTab('outputs')}>
-                    Open Outputs
-                  </Button>
-                )}
-              </div>
+          {renderModelStep()}
+
+          {!hasSelectedModel && (
+            <div className="rounded-lg border border-dashed border-white/[0.08] bg-[#0a0c12] p-5 text-sm text-muted-foreground">
+              Choose a TTS model to continue.
             </div>
+          )}
 
-            <CardContent className="space-y-6 pt-6">
-              <div className="space-y-2 rounded-xl bg-background/55 p-4 ring-1 ring-border/55">
-                <Label htmlFor="voice-model-select">1. TTS Model</Label>
-                <select
-                  id="voice-model-select"
-                  value={selectedModelId}
-                  onChange={(event) => setSelectedModelId(event.target.value)}
-                  className="h-10 w-full rounded-md border border-input bg-background/85 px-3 text-sm"
-                >
-                  <option value="">Select a model</option>
-                  {models.map((model) => (
-                    <option key={model.model_id} value={model.model_id} disabled={!model.available}>
-                      {model.display_name}
-                      {model.available ? '' : ' (unavailable)'}
-                    </option>
-                  ))}
-                </select>
-                {modelsLoading ? (
-                  <p className="text-xs text-muted-foreground">Loading model list...</p>
-                ) : availableModels.length === 0 ? (
-                  <p className="text-xs text-muted-foreground">No runnable voice models are currently available.</p>
-                ) : null}
-              </div>
+          {renderModeReferenceStep()}
 
-              {!hasSelectedModel && (
-                <div className="rounded-xl border border-dashed border-border/60 bg-background/45 p-6 text-center text-sm text-muted-foreground">
-                  Choose a TTS model to reveal the next step.
-                </div>
-              )}
+          {showVoiceProfileSelection && !profilesLoading && profiles.length === 0 && (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-dashed border-amber-500/30 bg-amber-500/10 p-3">
+              <p className="text-sm font-semibold">Saved voice profile required</p>
+              <Button type="button" variant="outline" size="sm" onClick={() => setActiveWorkspaceTab('profiles')}>
+                Open Profiles
+              </Button>
+            </div>
+          )}
 
-              {hasSelectedModel && isVoxModel && (
-                <div className="space-y-3 rounded-xl bg-background/55 p-4 ring-1 ring-border/55">
-                  <p className="text-sm font-semibold">2. Voice Mode</p>
-                  <div className="grid gap-2 md:grid-cols-3">
-                    {VOX_MODE_OPTIONS.map((option) => {
-                      const isActive = voxMode === option.value
-                      return (
-                        <button
-                          key={option.value}
-                          type="button"
-                          aria-pressed={isActive}
-                          onClick={() => setVoxMode(option.value)}
-                          className={`rounded-xl border px-4 py-3 text-left transition-colors ${
-                            isActive
-                              ? 'border-primary bg-primary text-primary-foreground shadow-md shadow-primary/10'
-                              : 'border-border/60 bg-background/60 text-foreground hover:border-border hover:bg-background/80'
-                          }`}
-                        >
-                          <p className="text-sm font-semibold">{option.shortLabel}</p>
-                          <p className={cn('mt-1 text-xs', isActive ? 'text-primary-foreground/85' : 'text-muted-foreground')}>
-                            {option.helper}
-                          </p>
-                        </button>
-                      )
-                    })}
-                  </div>
-                </div>
-              )}
+          {hasSelectedModel && (
+            <FlowStep
+              number={3}
+              title={scriptLabel}
+              aside={<span className="font-mono text-[11px] text-muted-foreground">{script.length} chars</span>}
+            >
+              {renderScriptPanel()}
+            </FlowStep>
+          )}
 
-              {showVoiceProfileSelection && (
-                <div className="space-y-2 rounded-xl bg-background/55 p-4 ring-1 ring-border/55">
-                  <Label htmlFor="voice-profile-select">{isVoxModel ? '3. Voice Profile' : '2. Voice Profile'}</Label>
+          {hasSelectedModel && isVoxModel && !isVoxContinuationMode && (
+            <details className="ml-0 rounded-lg border border-white/[0.06] bg-[#0f1218] p-3 sm:ml-[60px]" open={voxStyleText.trim().length > 0}>
+              <summary className="cursor-pointer list-none text-sm font-semibold">Style / Control</summary>
+              <Textarea
+                id="vox-style-text"
+                value={voxStyleText}
+                onChange={(event) => setVoxStyleText(event.target.value)}
+                placeholder="Warm, confident, slightly slower"
+                rows={3}
+                className="mt-3 border-white/[0.08] bg-[#0a0c12]"
+              />
+            </details>
+          )}
+
+          {hasSelectedModel && (
+            <FlowStep number={4} title="Render">
+              <div
+                className={cn(
+                  'grid gap-3 md:items-end',
+                  supportsSpeedControl
+                    ? 'md:grid-cols-[160px,minmax(0,1fr),auto]'
+                    : 'md:grid-cols-[160px,auto]',
+                )}
+              >
+                <div className="space-y-2">
+                  <Label htmlFor="voiceover-output-format">Format</Label>
                   <select
-                    id="voice-profile-select"
-                    value={selectedProfileId}
-                    onChange={(event) => setSelectedProfileId(event.target.value)}
-                    className="h-10 w-full rounded-md border border-input bg-background/85 px-3 text-sm"
+                    id="voiceover-output-format"
+                    value={outputFormat}
+                    onChange={(event) => setOutputFormat(event.target.value === 'mp3' ? 'mp3' : 'wav')}
+                    className="nf-control w-full"
                   >
-                    <option value="">Select a saved profile</option>
-                    {profiles.map((profile) => (
-                      <option key={profile.id} value={profile.id}>
-                        {profile.name}
-                      </option>
-                    ))}
+                    <option value="wav">wav</option>
+                    <option value="mp3">mp3</option>
                   </select>
-                  <p className="text-xs text-muted-foreground">
-                    {isVoxModel ? 'Clone uses a saved reference clip.' : 'Choose the saved reference clip to use.'}
-                  </p>
                 </div>
-              )}
 
-              {hasSelectedModel && isVoxDesignMode && (
-                <div className="rounded-xl bg-background/55 px-4 py-3 ring-1 ring-border/55">
-                  <p className="text-sm font-medium">Voice Design skips saved reference audio.</p>
-                </div>
-              )}
-
-              {showVoiceProfileSelection && !profilesLoading && profiles.length === 0 && (
-                <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-dashed border-amber-500/30 bg-amber-500/10 p-4">
-                  <div>
-                    <p className="text-sm font-semibold">Saved voice profile required</p>
-                    <p className="mt-1 text-xs text-amber-100/80">Add a reusable profile before you render.</p>
-                  </div>
-                  <Button type="button" variant="outline" size="sm" onClick={() => setActiveWorkspaceTab('profiles')}>
-                    Open Profiles
-                  </Button>
-                </div>
-              )}
-
-              {hasSelectedModel && isVoxContinuationMode && (
-                <div className="space-y-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4 sm:p-5">
-                  <p className="text-sm font-semibold">Vox Continuation Workspace</p>
-
-                  <div className="space-y-4">
-                    <div className="space-y-4 rounded-xl bg-background/25 p-4 ring-1 ring-amber-500/15">
-                      <div>
-                        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-amber-100/70">Step 1</p>
-                        <p className="mt-1 text-sm font-semibold">Reference source</p>
-                        <p className="mt-1 text-xs text-amber-100/80">Choose a saved profile or record a temporary clip.</p>
-                      </div>
-                      <div className="grid gap-3 md:grid-cols-2">
-                        <button
-                          type="button"
-                          aria-pressed={voxContinuationReferenceSource === 'profile'}
-                          onClick={handleUseSavedVoiceProfile}
-                          className={`rounded-xl border px-4 py-4 text-left transition-colors ${
-                            voxContinuationReferenceSource === 'profile'
-                              ? 'border-amber-400/40 bg-amber-500/15 text-foreground'
-                              : 'border-amber-500/20 bg-background/25 text-amber-100/75 hover:text-foreground'
-                          }`}
-                        >
-                          <p className="text-sm font-semibold">Use Saved Voice Profile</p>
-                          <p className="mt-1 text-xs leading-5">Stable reusable source.</p>
-                        </button>
-                        <button
-                          type="button"
-                          aria-pressed={voxContinuationReferenceSource === 'record'}
-                          onClick={handleRecordReferenceNow}
-                          className={`rounded-xl border px-4 py-4 text-left transition-colors ${
-                            voxContinuationReferenceSource === 'record'
-                              ? 'border-amber-400/40 bg-amber-500/15 text-foreground'
-                              : 'border-amber-500/20 bg-background/25 text-amber-100/75 hover:text-foreground'
-                          }`}
-                        >
-                          <p className="text-sm font-semibold">Record Reference Now</p>
-                          <p className="mt-1 text-xs leading-5">Temporary clip for this run.</p>
-                        </button>
-                      </div>
-
-                      {voxContinuationReferenceSource === 'profile' ? (
-                        <div className="grid gap-4 lg:grid-cols-[minmax(0,360px),minmax(0,1fr)]">
-                          <div className="space-y-2">
-                            <Label htmlFor="voice-profile-select">Saved Voice Profile</Label>
-                            <select
-                              id="voice-profile-select"
-                              value={selectedProfileId}
-                              onChange={(event) => setSelectedProfileId(event.target.value)}
-                              className="h-10 w-full rounded-md border border-input bg-background/85 px-3 text-sm"
-                            >
-                              <option value="">Select a saved profile</option>
-                              {profiles.map((profile) => (
-                                <option key={profile.id} value={profile.id}>
-                                  {profile.name}
-                                </option>
-                              ))}
-                            </select>
-                            <p className="text-xs text-amber-100/80">
-                              Step 3 uses the saved transcript when available.
-                            </p>
-                          </div>
-                          <div className="rounded-xl border border-amber-500/20 bg-background/30 p-4">
-                            <p className="text-sm font-medium">
-                              {selectedProfile ? `Selected saved profile: ${selectedProfile.name}` : 'Choose a saved voice profile to continue from.'}
-                            </p>
-                            {selectedProfileTranscript ? (
-                              <p className="mt-2 text-xs text-amber-100/80">
-                                Stored transcript: {truncateText(selectedProfileTranscript, 120)}
-                              </p>
-                            ) : (
-                              <p className="mt-2 text-xs text-amber-100/80">No stored transcript yet. You can paste it in Step 3.</p>
-                            )}
-                          </div>
-                        </div>
-                      ) : (
-                        <div className="rounded-xl border border-amber-500/20 bg-background/30 px-4 py-3 text-sm text-amber-50/90">
-                          Temporary reference mode keeps the clip only for this run.
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="space-y-4 rounded-xl bg-background/25 p-4 ring-1 ring-amber-500/15">
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div>
-                          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-amber-100/70">Step 2</p>
-                          <p className="mt-1 text-sm font-semibold">
-                            {voxContinuationUsesRecordedReference ? 'Capture the continuation reference' : 'Confirm the saved reference'}
-                          </p>
-                          <p className="mt-1 text-xs text-amber-100/80">
-                            {voxContinuationUsesRecordedReference
-                              ? 'Record, preview, then let NeonForge transcribe it.'
-                              : 'Review the saved profile before moving on.'}
-                          </p>
-                        </div>
-                        {voxContinuationUsesRecordedReference && (
-                          <div className="flex flex-wrap items-center gap-3">
-                            {!voxRecorder.isRecording ? (
-                              <Button
-                                type="button"
-                                variant="outline"
-                                className="gap-2"
-                                onClick={() => void handleStartRecordedReference()}
-                              >
-                                <Mic2 className="h-4 w-4" />
-                                Start Recording
-                              </Button>
-                            ) : (
-                              <Button
-                                type="button"
-                                variant="destructive"
-                                className="gap-2"
-                                onClick={voxRecorder.stopRecording}
-                              >
-                                <Square className="h-3.5 w-3.5" />
-                                Stop Recording
-                              </Button>
-                            )}
-
-                            {voxRecorder.isRecording && (
-                              <div className="flex items-center gap-2 text-sm text-amber-50/90">
-                                <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-red-500" />
-                                <span className="font-mono tabular-nums">{formatDuration(voxRecorder.duration)}</span>
-                              </div>
-                            )}
-
-                            {(voxRecorder.audioUrl || voxRecordedReferenceId || voxRecordedReferencePending) &&
-                              !voxRecorder.isRecording && (
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  className="gap-2"
-                                  onClick={() => clearRecordedReference()}
-                                >
-                                  <Trash2 className="h-4 w-4" />
-                                  Discard / Re-record
-                                </Button>
-                              )}
-                          </div>
-                        )}
-                      </div>
-
-                      {voxContinuationUsesRecordedReference ? (
-                        <>
-                          {voxRecorder.audioUrl && !voxRecorder.isRecording && (
-                            <audio controls className="w-full" src={voxRecorder.audioUrl}>
-                              Your browser does not support audio playback.
-                            </audio>
-                          )}
-
-                          {voxRecordedReferencePending && (
-                            <div className="flex items-center gap-2 rounded-lg border border-amber-500/20 bg-background/35 px-3 py-2 text-sm text-amber-50/90">
-                              <Loader2 className="h-4 w-4 animate-spin" />
-                              Uploading and transcribing your recorded reference clip...
-                            </div>
-                          )}
-
-                          {voxRecordedReferenceId && !voxRecordedReferencePending && (
-                            <div className="rounded-lg border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-100">
-                              Recorded reference ready. Step 3 is editable.
-                            </div>
-                          )}
-
-                          {voxRecordedReferenceError && (
-                            <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">
-                              {voxRecordedReferenceError}
-                            </div>
-                          )}
-
-                          {voxRecorder.error && (
-                            <div className="flex items-start gap-2 rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
-                              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
-                              <span>{voxRecorder.error}</span>
-                            </div>
-                          )}
-                        </>
-                      ) : (
-                        <div className="rounded-xl border border-amber-500/20 bg-background/30 p-4">
-                          <div className="flex flex-wrap items-center justify-between gap-3">
-                            <div>
-                              <p className="text-sm font-medium">
-                                {selectedProfile ? `Using saved profile: ${selectedProfile.name}` : 'Pick a saved voice profile in Step 1.'}
-                              </p>
-                              <p className="mt-2 text-xs text-amber-100/80">
-                                Vox will use that saved clip as the continuation anchor for this run.
-                              </p>
-                            </div>
-                            {selectedProfile && (
-                              <span className="rounded-full border border-amber-500/20 px-3 py-1 text-xs font-medium text-amber-50/90">
-                                Saved reference ready
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="space-y-3 rounded-xl bg-background/25 p-4 ring-1 ring-amber-500/15">
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div>
-                          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-amber-100/70">Step 3</p>
-                          <Label htmlFor="vox-prompt-text" className="mt-1 block">
-                            Reference Transcript
-                          </Label>
-                          <p className="mt-1 text-xs text-amber-100/80">
-                            {voxContinuationUsesRecordedReference
-                              ? 'ASR auto-fills this after recording.'
-                              : selectedProfileTranscript
-                                ? 'Seeded from the saved profile transcript.'
-                                : 'Paste the exact transcript of the saved reference clip.'}
-                          </p>
-                        </div>
-                        {(voxContinuationUsesRecordedReference && voxRecordedReferenceId) ||
-                        (!voxContinuationUsesRecordedReference && selectedProfileTranscript) ? (
-                          <span className="rounded-full border border-amber-500/20 px-3 py-1 text-xs font-medium text-amber-50/90">
-                            {voxContinuationUsesRecordedReference ? 'Auto-filled from ASR' : 'Seeded from profile'}
-                          </span>
-                        ) : null}
-                      </div>
-                      <Textarea
-                        id="vox-prompt-text"
-                        value={voxPromptText}
-                        onChange={(event) => setVoxPromptText(event.target.value)}
-                        placeholder={
-                          voxContinuationUsesRecordedReference
-                            ? 'ASR will fill this after you stop recording.'
-                            : 'Paste the exact transcript of the saved reference clip.'
-                        }
-                        rows={9}
-                        className="min-h-[240px] bg-background/85"
-                      />
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {hasSelectedModel && !isVoxContinuationMode && renderScriptPanel()}
-
-              {hasSelectedModel && isVoxModel && !isVoxContinuationMode && (
-                <details className="rounded-xl bg-background/55 p-4 ring-1 ring-border/55" open={voxStyleText.trim().length > 0}>
-                  <summary className="cursor-pointer list-none text-sm font-semibold">
-                    Style / Control
-                  </summary>
-                  <p className="mt-2 text-xs text-muted-foreground">Optional voice guidance.</p>
-                  <Textarea
-                    id="vox-style-text"
-                    value={voxStyleText}
-                    onChange={(event) => setVoxStyleText(event.target.value)}
-                    placeholder="Warm, confident, slightly slower"
-                    rows={3}
-                    className="mt-3 bg-background/85"
-                  />
-                </details>
-              )}
-
-              {hasSelectedModel && isVoxContinuationMode && renderScriptPanel()}
-
-              {hasSelectedModel && (
-                <div className="space-y-4 rounded-xl bg-background/55 p-4 ring-1 ring-border/55">
-                  <p className="text-sm font-semibold">{isVoxContinuationMode ? '4. Render' : isVoxModel ? '4. Render' : '3. Render'}</p>
-                  <div className="grid gap-4 md:grid-cols-[minmax(0,1fr),220px,auto] md:items-end">
-                    <div className="space-y-3 rounded-xl bg-background/70 p-4 ring-1 ring-border/45">
+                {supportsSpeedControl && (
+                  <details className="rounded-lg border border-white/[0.06] bg-[#0f1218] p-3">
+                    <summary className="cursor-pointer list-none text-sm font-semibold">Speed</summary>
+                    <div className="mt-3 space-y-3">
                       <div className="flex items-center justify-between gap-3">
-                        <Label htmlFor="voiceover-speed">Speed</Label>
+                        <Label htmlFor="voiceover-speed">Value</Label>
                         <Input
                           id="voiceover-speed"
                           type="number"
                           min={MIN_SPEED}
                           max={MAX_SPEED}
+                          step={SPEED_STEP}
+                          value={speedInput}
+                          onChange={(event) => setSpeedInput(event.target.value)}
+                          onBlur={() => updateSpeed(parseFloat(speedInput))}
+                          className="w-24 border-white/[0.08] bg-[#0a0c12] font-mono text-sm"
+                        />
+                      </div>
+                      <Slider
+                        value={speed}
+                        onChange={(value) => updateSpeed(value)}
+                        min={MIN_SPEED}
+                        max={MAX_SPEED}
                         step={SPEED_STEP}
-                        value={speedInput}
-                        onChange={(event) => setSpeedInput(event.target.value)}
-                        onBlur={() => updateSpeed(parseFloat(speedInput))}
-                        className="w-24 bg-background/85 font-mono text-sm"
                       />
                     </div>
-                    <Slider
-                      value={speed}
-                      onChange={(value) => updateSpeed(value)}
-                      min={MIN_SPEED}
-                      max={MAX_SPEED}
-                      step={SPEED_STEP}
-                    />
-                    <div className="flex justify-between text-[10px] text-muted-foreground/70">
-                      <span>0.80x</span>
-                      <span>{speed.toFixed(2)}x</span>
-                      <span>1.25x</span>
-                    </div>
-                  </div>
+                  </details>
+                )}
 
-                  <div className="space-y-2">
-                    <Label htmlFor="voiceover-output-format">Output Format</Label>
-                    <select
-                      id="voiceover-output-format"
-                      value={outputFormat}
-                      onChange={(event) => setOutputFormat(event.target.value === 'mp3' ? 'mp3' : 'wav')}
-                      className="h-10 w-full rounded-md border border-input bg-background/85 px-3 text-sm"
-                    >
-                      <option value="wav">wav</option>
-                      <option value="mp3">mp3</option>
-                    </select>
-                  </div>
+                <Button
+                  type="button"
+                  size="lg"
+                  className="w-full gap-2 px-8 font-semibold md:min-w-[168px]"
+                  disabled={!canGenerate}
+                  onClick={handleGenerate}
+                >
+                  {submittingJob ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />}
+                  {submittingJob ? 'Queueing...' : activeJobs.length > 0 ? 'Add to Queue' : 'Render'}
+                </Button>
+              </div>
+            </FlowStep>
+          )}
 
-                  <div className="flex items-end">
-                    <Button
-                      type="button"
-                      size="lg"
-                      className="w-full gap-2 px-8 font-semibold md:min-w-[180px]"
-                      disabled={!canGenerate}
-                      onClick={handleGenerate}
-                    >
-                      {submittingJob ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />}
-                      {submittingJob ? 'Submitting...' : 'Render'}
-                    </Button>
-                  </div>
-                </div>
-                </div>
-              )}
-
-              {generationError && (
-                <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
-                  {generationError}
-                </div>
-              )}
-            </CardContent>
-          </Card>
+          {generationError && (
+            <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
+              {generationError}
+            </div>
+          )}
         </div>
 
         <VoiceoverJobsPanel
@@ -2309,29 +2290,29 @@ export function VoiceoverStudio() {
   }
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       <div>
-        <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight">
-          <Mic2 className="h-6 w-6 text-primary" />
+        <h1 className="flex items-center gap-2 text-xl font-semibold tracking-tight">
+          <Mic2 className="h-5 w-5 text-primary" />
           Voiceover Studio
         </h1>
-        <p className="mt-1 text-sm text-muted-foreground">Profiles, guided generation, and recent renders in one place.</p>
+        <p className="mt-1 text-sm text-muted-foreground">Generate, manage profiles, and review local renders.</p>
       </div>
 
-      <Card className="border-border/70 bg-card shadow-sm">
-        <CardContent className="p-4">
-          <div className="flex flex-wrap gap-2">
+      <div className="border-b border-white/[0.06]">
+          <div className="flex flex-wrap gap-5">
             {workspaceTabs.map((tab) => {
               const Icon = tab.icon
               const active = activeWorkspaceTab === tab.id
               return (
-                <Button
+                <button
                   key={tab.id}
                   type="button"
-                  variant={active ? 'default' : 'outline'}
                   className={cn(
-                    'gap-2',
-                    active ? 'shadow-sm' : 'border-border/70 bg-background/60 hover:bg-background/80',
+                    'flex items-center gap-2 border-b-2 px-0 pb-3 text-sm font-medium transition-colors',
+                    active
+                      ? 'border-primary text-foreground'
+                      : 'border-transparent text-muted-foreground hover:text-foreground',
                   )}
                   onClick={() => setActiveWorkspaceTab(tab.id)}
                 >
@@ -2345,12 +2326,11 @@ export function VoiceoverStudio() {
                   >
                     {tab.badge}
                   </span>
-                </Button>
+                </button>
               )
             })}
           </div>
-        </CardContent>
-      </Card>
+      </div>
 
       {activeWorkspaceTab === 'generate' && renderGeneratePanel()}
       {activeWorkspaceTab === 'profiles' && renderProfilesPanel()}

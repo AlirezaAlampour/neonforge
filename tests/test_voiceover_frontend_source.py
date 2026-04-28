@@ -10,13 +10,13 @@ def test_voiceover_studio_has_vox_only_mode_controls_and_fields():
 
     assert "const isVoxModel = selectedModel?.model_id === VOX_MODEL_ID" in source
     assert "hasSelectedModel && isVoxModel && (" in source
-    assert "Voice Design" in source
-    assert "Clone My Voice" in source
-    assert "Continue From Reference" in source
+    assert "label: 'Design'" in source
+    assert "label: 'Clone'" in source
+    assert "label: 'Continue'" in source
     assert "hasSelectedModel && isVoxModel && !isVoxContinuationMode && (" in source
     assert "hasSelectedModel && isVoxContinuationMode && (" in source
-    assert "Use Saved Voice Profile" in source
-    assert "Record Reference Now" in source
+    assert "handleUseSavedVoiceProfile" in source
+    assert "Record Reference" in source
     assert "Style / Control" in source
     assert "Reference Transcript" in source
     assert "payload.vox_mode = voxMode" in source
@@ -29,18 +29,17 @@ def test_voiceover_studio_supports_recorded_voice_profiles_via_the_normal_profil
     source = VOICEOVER_STUDIO_PATH.read_text(encoding="utf-8")
 
     assert "type VoiceProfileReferenceSource = 'upload' | 'record'" in source
-    assert "Upload Reference Clip" in source
-    assert "Record Reference Now" in source
+    assert "Upload" in source
+    assert "Record" in source
     assert "profileReferenceSource === 'record'" in source
     assert "handleStartProfileRecording" in source
     assert "profileRecorder.audioUrl" in source
-    assert "Discard / Re-record" in source
+    assert "Re-record" in source
     assert "recording_source', BROWSER_RECORDED_PROFILE_SOURCE" in source
     assert "voice-profile-reference-${Date.now()}.${profileRecorder.fileExtension}" in source
     assert "await refreshProfiles(createdProfile.id)" in source
     assert "Captured as ${profileRecorder.mimeType}" in source
-    assert "Use a quiet room and close mic placement" in source
-    assert "NeonForge stores a high-quality" in source
+    assert "Short, clean reference clips work best." in source
 
 
 def test_voiceover_studio_exposes_profile_recording_device_mode_and_meter_controls():
@@ -55,11 +54,10 @@ def test_voiceover_studio_exposes_profile_recording_device_mode_and_meter_contro
     assert "noiseSuppression: enhancedCapture" in source
     assert 'id="voice-profile-input-device"' in source
     assert "Browser default microphone" in source
-    assert "Choose the exact mic if the browser default is not the one you want." in source
-    assert "Raw Reference Capture" in source
-    assert "Enhanced Reference Capture" in source
-    assert "Raw = better for accurate voice capture / cloning." in source
-    assert "Can sound closer and more polished in untreated rooms." in source
+    assert "Pick a mic when the default is wrong." in source
+    assert "Best clone source." in source
+    assert "Cleaner room sound." in source
+    assert "Raw is most faithful; enhanced is cleaner." in source
     assert "Live Input Level" in source
     assert "profileRecorder.inputLevel" in source
     assert "profileInputMeterState" in source
@@ -71,9 +69,10 @@ def test_voiceover_studio_uses_profile_reference_transcripts_for_profiles_and_co
     assert "reference_transcript?: string | null" in source
     assert "function getProfileTranscriptSeed" in source
     assert "lastAutoSeededVoxPromptRef" in source
-    assert "Seeded from profile" in source
+    assert "Profile filled" in source
     assert "Reference Transcript" in source
     assert "Stored transcript:" in source
+    assert "return profile.reference_transcript?.trim() || ''" in source
 
 
 def test_voiceover_studio_outputs_tab_supports_bulk_selection_delete_and_download():
@@ -86,3 +85,5 @@ def test_voiceover_studio_outputs_tab_supports_bulk_selection_delete_and_downloa
     assert "Download Selected" in source
     assert "Delete Selected" in source
     assert "Select all" in source
+    assert "Download Text" in source
+    assert "Download Metadata" in source
