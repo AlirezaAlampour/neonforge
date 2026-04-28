@@ -3,9 +3,11 @@
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { Activity, Mic, Video, Clapperboard, Zap, ChevronLeft, ChevronRight, LayoutGrid } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { cn } from '@/lib/utils'
 import { MemoryGauge } from './memory-gauge'
+
+const SIDEBAR_COLLAPSED_KEY = 'neonforge-sidebar-collapsed-v1'
 
 const navItems = [
   { href: '/status', label: 'System Status', icon: Activity },
@@ -19,6 +21,22 @@ const navItems = [
 export function Sidebar() {
   const pathname = usePathname()
   const [collapsed, setCollapsed] = useState(false)
+  const [restored, setRestored] = useState(false)
+
+  useEffect(() => {
+    try {
+      setCollapsed(window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true')
+    } catch {
+      setCollapsed(false)
+    } finally {
+      setRestored(true)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!restored) return
+    window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(collapsed))
+  }, [collapsed, restored])
 
   return (
     <aside
@@ -47,8 +65,10 @@ export function Sidebar() {
             <Link
               key={item.href}
               href={item.href}
+              title={collapsed ? item.label : undefined}
               className={cn(
                 'flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-all duration-200',
+                collapsed && 'justify-center px-2',
                 isActive
                   ? 'bg-primary/10 text-primary shadow-sm'
                   : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground',
@@ -70,6 +90,9 @@ export function Sidebar() {
 
       {/* Collapse toggle */}
       <button
+        type="button"
+        aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        aria-expanded={!collapsed}
         onClick={() => setCollapsed(!collapsed)}
         className="flex h-10 items-center justify-center border-t border-border/50 text-muted-foreground hover:text-foreground transition-colors"
       >

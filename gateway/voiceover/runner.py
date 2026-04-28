@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import audioop
+import json
 import logging
 import os
 import re
@@ -72,22 +73,35 @@ async def _update_job(redis_client, job_key: str, **fields: Any) -> None:
         await redis_client.hset(job_key, mapping=payload)
 
 
-def _sanitize_filename_part(value: str, fallback: str) -> str:
+def _sanitize_filename_part(value: str, fallback: str, *, max_length: int = 48) -> str:
     normalized = unicodedata.normalize("NFKD", value)
     ascii_value = normalized.encode("ascii", "ignore").decode("ascii")
     cleaned = re.sub(r"[^a-z0-9]+", "_", ascii_value.lower()).strip("_")
-    return cleaned or fallback
+    cleaned = cleaned or fallback
+    if len(cleaned) <= max_length:
+        return cleaned
+    return cleaned[:max_length].rstrip("_") or fallback
+
+
+def _script_slug(script: str, *, max_words: int = 8, max_length: int = 72) -> str:
+    normalized = unicodedata.normalize("NFKD", script)
+    ascii_value = normalized.encode("ascii", "ignore").decode("ascii").lower()
+    words = re.findall(r"[a-z0-9]+", ascii_value)
+    if not words:
+        return "untitled"
+    return _sanitize_filename_part(" ".join(words[:max_words]), "untitled", max_length=max_length)
 
 
 def _output_filename_timestamp() -> str:
     return datetime.now().astimezone().strftime("%Y-%m-%d_%H%M%S")
 
 
-def _build_output_basename(model_id: str, profile_name: str) -> str:
-    safe_model = _sanitize_filename_part(model_id, "voiceover")
-    safe_profile = _sanitize_filename_part(profile_name, "voice")
+def _build_output_basename(model_id: str, profile_name: str, script: str) -> str:
+    safe_model = _sanitize_filename_part(model_id, "voiceover", max_length=28)
+    safe_profile = _sanitize_filename_part(profile_name, "voice", max_length=28)
+    safe_script = _script_slug(script)
     timestamp = _output_filename_timestamp()
-    return f"{safe_model}_{safe_profile}_{timestamp}"
+    return f"{safe_model}_{safe_profile}_{safe_script}_{timestamp}"
 
 
 def _build_output_filename(output_basename: str, extension: str) -> str:
@@ -439,6 +453,87 @@ def _convert_to_mp3_if_possible(final_wav_path: Path, final_mp3_path: Path) -> P
         return final_wav_path
 
 
+def _wav_duration_seconds(path: Path) -> float | None:
+    if path.suffix.lower() != ".wav":
+        return None
+
+    try:
+        with wave.open(str(path), "rb") as wav_file:
+            frames = wav_file.getnframes()
+            rate = wav_file.getframerate()
+        return frames / float(rate) if rate else None
+    except Exception:
+        return None
+
+
+def _model_provider(model_id: str) -> str:
+    if model_id in {"f5tts", "fish_speech", VOX_MODEL_ID}:
+        return "local"
+    return "unknown"
+
+
+def _generation_params(model_id: str, output_format: str, speed: float) -> dict[str, Any]:
+    params: dict[str, Any] = {"format": str(output_format).lower()}
+    if model_id == "f5tts":
+        params["speed"] = speed
+    return params
+
+
+def _reference_source_type(profile: Any | None, reference_audio_path: str | None, reference_label: str | None) -> str:
+    if reference_audio_path:
+        if (reference_label or "").strip().lower() == "recorded reference":
+            return "temp_recording"
+        return "upload"
+    if profile is not None:
+        return "saved_profile"
+    return "none"
+
+
+def _reference_transcript(profile: Any | None, prompt_text: str | None) -> str | None:
+    cleaned_prompt_text = (prompt_text or "").strip()
+    if cleaned_prompt_text:
+        return cleaned_prompt_text
+
+    profile_transcript = str(getattr(profile, "reference_transcript", "") or "").strip()
+    return profile_transcript or None
+
+
+def _write_output_metadata(
+    final_output_path: Path,
+    *,
+    created_at: str,
+    model_id: str,
+    voice_mode: str,
+    profile: Any | None,
+    reference_audio_path: str | None,
+    reference_label: str | None,
+    script: str,
+    prompt_text: str | None,
+    output_format: str,
+    speed: float,
+    chunk_count: int,
+    duration_seconds: float | None,
+) -> Path:
+    metadata = {
+        "output_filename": final_output_path.name,
+        "created_at": created_at,
+        "model_id": model_id,
+        "provider": _model_provider(model_id),
+        "voice_mode": voice_mode,
+        "voice_profile_id": getattr(profile, "id", None),
+        "voice_profile_name": getattr(profile, "name", None),
+        "reference_source_type": _reference_source_type(profile, reference_audio_path, reference_label),
+        "script_text": script,
+        "reference_transcript": _reference_transcript(profile, prompt_text),
+        "generation_params": _generation_params(model_id, output_format, speed),
+        "chunk_count": chunk_count,
+        "duration_seconds": round(duration_seconds, 3) if duration_seconds is not None else None,
+    }
+    metadata_path = final_output_path.with_suffix(".json")
+    metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return metadata_path
+
+
 async def run_voiceover_job(
     job_id,
     profile_id,
@@ -501,7 +596,9 @@ async def run_voiceover_job(
 
         rendered_chunk_paths: list[Path] = []
         resolved_reference_audio_path = reference_audio_path or (profile.reference_audio_path if profile else None)
-        model_options = {"speed": speed}
+        model_options: dict[str, Any] = {}
+        if model_id == "f5tts":
+            model_options["speed"] = speed
         if model_id == FISH_MODEL_ID:
             if profile is None:
                 await _update_job(redis_client, job_key, status="failed", error="Voice profile not found")
@@ -557,7 +654,7 @@ async def run_voiceover_job(
         await _update_job(redis_client, job_key, status="stitching")
 
         merged_path = work_dir / "merged.wav"
-        output_basename = _build_output_basename(model_id, reference_label or (profile.name if profile else "voice_design"))
+        output_basename = _build_output_basename(model_id, reference_label or (profile.name if profile else "voice_design"), script)
         final_wav_path = work_dir / _build_output_filename(output_basename, "wav")
         final_mp3_path = work_dir / _build_output_filename(output_basename, "mp3")
 
@@ -571,17 +668,36 @@ async def run_voiceover_job(
                 shutil.copyfile(merged_path, final_wav_path)
 
         final_output_path = final_wav_path
+        duration_seconds = _wav_duration_seconds(final_wav_path)
         if str(output_format).lower() == "mp3":
             final_output_path = await asyncio.to_thread(_convert_to_mp3_if_possible, final_wav_path, final_mp3_path)
 
         merged_path.unlink(missing_ok=True)
+        metadata_created_at = datetime.now().astimezone().isoformat()
+        metadata_path = _write_output_metadata(
+            final_output_path,
+            created_at=metadata_created_at,
+            model_id=model_id,
+            voice_mode=effective_vox_mode if model_id == VOX_MODEL_ID else "clone",
+            profile=profile,
+            reference_audio_path=reference_audio_path,
+            reference_label=reference_label,
+            script=script,
+            prompt_text=prompt_text,
+            output_format=str(output_format).lower(),
+            speed=speed,
+            chunk_count=total_chunks,
+            duration_seconds=duration_seconds,
+        )
 
         host_output_path = _host_output_dir(str(job_id)) / final_output_path.name
+        host_metadata_path = _host_output_dir(str(job_id)) / metadata_path.name
         await _update_job(
             redis_client,
             job_key,
             status="done",
             output_path=str(host_output_path),
+            metadata_path=str(host_metadata_path),
             completed_chunks=total_chunks,
             total_chunks=total_chunks,
             error="",

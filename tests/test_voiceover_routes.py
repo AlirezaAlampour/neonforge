@@ -307,9 +307,19 @@ def test_create_temp_reference_normalizes_transcribes_and_stores_clip(
 class _FakeRedis:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, str]]] = []
+        self.store: dict[str, dict[str, str]] = {}
+        self.deleted_keys: list[str] = []
 
     async def hset(self, key: str, mapping: dict[str, str]) -> None:
         self.calls.append((key, mapping))
+        self.store.setdefault(key, {}).update(mapping)
+
+    async def hgetall(self, key: str) -> dict[str, str]:
+        return dict(self.store.get(key, {}))
+
+    async def delete(self, key: str) -> None:
+        self.deleted_keys.append(key)
+        self.store.pop(key, None)
 
 
 class _FakeModel:
@@ -490,6 +500,34 @@ def test_create_voiceover_job_rejects_vox_continuation_without_transcript(monkey
     assert response.json()["detail"] == "Vox continuation mode requires the exact transcript of the reference clip"
 
 
+def test_create_voiceover_job_rejects_temp_vox_continuation_without_transcript(monkeypatch, tmp_path: Path):
+    _configure_voice_profile_storage(monkeypatch, tmp_path)
+    _configure_voiceover_output_storage(monkeypatch, tmp_path)
+    _configure_job_creation(monkeypatch, model_id="voxcpm2")
+
+    temp_reference_id = "recorded-reference-1"
+    temp_reference_path = routes._temp_reference_path(temp_reference_id)
+    temp_reference_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_reference_path.write_bytes(b"RIFFfake")
+
+    client = _build_client()
+
+    response = client.post(
+        "/api/v1/voiceover/jobs",
+        json={
+            "temp_reference_id": temp_reference_id,
+            "script": "Continue directly from this fresh take.",
+            "model_id": "voxcpm2",
+            "vox_mode": "continuation",
+            "output_format": "wav",
+            "speed": 1.0,
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Vox continuation mode requires the exact transcript of the reference clip"
+
+
 def test_create_voiceover_job_accepts_vox_continuation_with_temp_reference(monkeypatch, tmp_path: Path):
     _configure_voice_profile_storage(monkeypatch, tmp_path)
     _configure_voiceover_output_storage(monkeypatch, tmp_path)
@@ -571,3 +609,103 @@ def test_create_voiceover_job_still_requires_profile_for_f5(monkeypatch, tmp_pat
 
     assert response.status_code == 422
     assert response.json()["detail"] == "This model requires a saved voice profile"
+
+
+def test_recent_outputs_include_metadata_and_script_downloads(monkeypatch, tmp_path: Path):
+    _configure_voiceover_output_storage(monkeypatch, tmp_path)
+    monkeypatch.setattr(routes, "_get_redis_client", lambda: None)
+
+    job_id = "job-with-metadata"
+    job_dir = routes._voiceover_output_dir() / job_id
+    job_dir.mkdir(parents=True)
+    output_path = job_dir / "voxcpm2_test_ai_training_four_versions_2026-04-27_222424.wav"
+    _write_pcm_wav(output_path, _tone_frames(300))
+    metadata_path = output_path.with_suffix(".json")
+    metadata_path.write_text(
+        """{
+  "output_filename": "voxcpm2_test_ai_training_four_versions_2026-04-27_222424.wav",
+  "created_at": "2026-04-27T22:24:24+00:00",
+  "model_id": "voxcpm2",
+  "provider": "local",
+  "voice_mode": "continuation",
+  "reference_source_type": "temp_recording",
+  "script_text": "AI training, four versions.",
+  "duration_seconds": 0.3
+}
+""",
+        encoding="utf-8",
+    )
+    client = _build_client()
+
+    outputs_response = client.get("/api/v1/voiceover/outputs")
+    assert outputs_response.status_code == 200
+    outputs = outputs_response.json()
+    assert outputs[0]["job_id"] == job_id
+    assert outputs[0]["has_metadata"] is True
+    assert outputs[0]["has_script_text"] is True
+    assert outputs[0]["metadata_url"] == f"/api/v1/voiceover/output/{job_id}/metadata"
+    assert outputs[0]["script_text_url"] == f"/api/v1/voiceover/output/{job_id}/script-text"
+    assert outputs[0]["reference_source_type"] == "temp_recording"
+
+    metadata_response = client.get(f"/api/v1/voiceover/output/{job_id}/metadata")
+    assert metadata_response.status_code == 200
+    assert metadata_response.json()["model_id"] == "voxcpm2"
+
+    script_response = client.get(f"/api/v1/voiceover/output/{job_id}/script-text")
+    assert script_response.status_code == 200
+    assert script_response.text == "AI training, four versions.\n"
+
+
+def test_delete_voiceover_output_removes_directory_and_redis_history(monkeypatch, tmp_path: Path):
+    _configure_voiceover_output_storage(monkeypatch, tmp_path)
+    fake_redis = _FakeRedis()
+    monkeypatch.setattr(routes, "_get_redis_client", lambda: fake_redis)
+
+    job_id = "job-to-delete"
+    job_dir = routes._voiceover_output_dir() / job_id
+    job_dir.mkdir(parents=True)
+    output_path = job_dir / "f5tts_narrator_short_script_2026-04-27_222424.wav"
+    _write_pcm_wav(output_path, _tone_frames(300))
+    output_path.with_suffix(".json").write_text("{}", encoding="utf-8")
+    fake_redis.store[f"voiceover:{job_id}"] = {
+        "status": "done",
+        "output_path": str(output_path),
+        "total_chunks": "1",
+        "completed_chunks": "1",
+    }
+    client = _build_client()
+
+    response = client.delete(f"/api/v1/voiceover/output/{job_id}")
+
+    assert response.status_code == 200
+    assert response.json()["deleted"] is True
+    assert response.json()["file_deleted"] is True
+    assert not job_dir.exists()
+    assert fake_redis.deleted_keys == [f"voiceover:{job_id}"]
+
+
+def test_delete_voiceover_output_handles_already_missing_audio(monkeypatch, tmp_path: Path):
+    _configure_voiceover_output_storage(monkeypatch, tmp_path)
+    fake_redis = _FakeRedis()
+    monkeypatch.setattr(routes, "_get_redis_client", lambda: fake_redis)
+
+    job_id = "job-with-missing-audio"
+    job_dir = routes._voiceover_output_dir() / job_id
+    job_dir.mkdir(parents=True)
+    missing_output = job_dir / "missing.wav"
+    (job_dir / "missing.json").write_text("{}", encoding="utf-8")
+    fake_redis.store[f"voiceover:{job_id}"] = {
+        "status": "done",
+        "output_path": str(missing_output),
+        "total_chunks": "1",
+        "completed_chunks": "1",
+    }
+    client = _build_client()
+
+    response = client.delete(f"/api/v1/voiceover/output/{job_id}")
+
+    assert response.status_code == 200
+    assert response.json()["deleted"] is True
+    assert response.json()["file_deleted"] is False
+    assert not job_dir.exists()
+    assert fake_redis.deleted_keys == [f"voiceover:{job_id}"]
