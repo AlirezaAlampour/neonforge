@@ -98,6 +98,11 @@ const dateFormatter = new Intl.DateTimeFormat('en-US', {
   timeStyle: 'short',
 })
 
+const compactDateFormatter = new Intl.DateTimeFormat('en-US', {
+  month: 'short',
+  day: 'numeric',
+})
+
 const MIN_SPEED = 0.8
 const MAX_SPEED = 1.25
 const SPEED_STEP = 0.05
@@ -1640,39 +1645,32 @@ export function VoiceoverStudio() {
             const transcriptPreview = truncateText(profile.reference_transcript, 180)
             const notesPreview =
               profile.notes && profile.notes !== profile.reference_transcript ? truncateText(profile.notes, 140) : ''
+            const rowDetail = notesPreview || transcriptPreview || 'No notes'
 
             return (
-              <div key={profile.id} className="nf-row px-3 py-2.5">
-                <div className="grid items-center gap-3 sm:grid-cols-[auto,minmax(0,1fr),auto,auto]">
+              <div key={profile.id} className="border-b border-white/10 last:border-b-0">
+                <div className="grid grid-cols-[auto,minmax(0,max-content),auto,minmax(0,1fr),auto,auto] items-center gap-3 px-3 py-2">
                   <Button
                     type="button"
                     variant="outline"
                     size="sm"
-                    className="h-8 w-8 px-0"
+                    className="h-8 w-8 shrink-0 px-0"
                     title="Play"
                     onClick={() => handlePlayProfile(profile)}
                   >
                     <Play className="h-3.5 w-3.5" />
                   </Button>
-                  <div className="min-w-0">
-                    <div className="flex min-w-0 items-baseline gap-2">
-                      <p className="truncate text-sm font-semibold">{profile.name}</p>
-                      {profile.reference_transcript && (
-                        <span className="shrink-0 text-[11px] text-emerald-300">transcript</span>
-                      )}
-                    </div>
-                    <p className="mt-1 truncate text-xs text-muted-foreground">
-                      {notesPreview || transcriptPreview || 'No notes'}
-                    </p>
-                  </div>
-                  <p className="font-mono text-[11px] text-muted-foreground">
-                    {dateFormatter.format(new Date(profile.created_at))}
+                  <p className="min-w-0 truncate text-sm font-semibold">{profile.name}</p>
+                  <span aria-hidden="true" className="block w-0 shrink-0" />
+                  <p className="min-w-0 truncate text-sm text-muted-foreground">{rowDetail}</p>
+                  <p className="shrink-0 text-[11px] text-muted-foreground">
+                    {compactDateFormatter.format(new Date(profile.created_at))}
                   </p>
                   <Button
                     type="button"
                     variant="outline"
                     size="sm"
-                    className="h-8 w-8 px-0"
+                    className="h-8 w-8 shrink-0 px-0"
                     title="Delete"
                     onClick={() => void handleDeleteProfile(profile)}
                   >
@@ -1681,9 +1679,11 @@ export function VoiceoverStudio() {
                 </div>
 
                 {isPreviewing && (
-                  <audio key={previewUrl} controls autoPlay className="mt-2 h-8 w-full" src={previewUrl}>
-                    Your browser does not support audio playback.
-                  </audio>
+                  <div className="px-3 pb-2">
+                    <audio key={previewUrl} controls autoPlay className="h-8 w-full" src={previewUrl}>
+                      Your browser does not support audio playback.
+                    </audio>
+                  </div>
                 )}
               </div>
             )
@@ -1782,17 +1782,25 @@ export function VoiceoverStudio() {
         <div className="nf-divider-list">
           {recentVoiceovers.map((item) => {
             const isSelected = selectedOutputIds.includes(item.job_id)
+            const durationLabel =
+              typeof item.duration_seconds === 'number' ? formatDuration(Math.round(item.duration_seconds)) : null
+            const detailParts = [
+              getReferenceSourceLabel(item.reference_source_type),
+              item.has_script_text ? 'script' : null,
+              item.has_metadata ? 'meta' : null,
+            ].filter(Boolean)
+            const detailLabel = detailParts.length > 0 ? detailParts.join(' · ') : 'Local render'
 
             return (
               <div
                 key={item.job_id}
                 className={cn(
-                  'nf-row px-3 py-2.5 transition-colors',
+                  'border-b border-white/10 px-3 py-2 transition-colors last:border-b-0',
                   isSelected && 'bg-primary/[0.06]',
                 )}
               >
-                <div className="grid items-center gap-3 lg:grid-cols-[minmax(0,1fr),minmax(180px,260px),auto]">
-                  <div className="flex min-w-0 items-center gap-3">
+                <div className="grid grid-cols-[auto,minmax(0,max-content),auto,minmax(0,1fr),auto,minmax(0,176px),auto] items-center gap-3">
+                  <div className="flex h-8 w-8 shrink-0 items-center justify-center">
                     <input
                       type="checkbox"
                       className="h-4 w-4 rounded border-input bg-background accent-primary"
@@ -1800,23 +1808,25 @@ export function VoiceoverStudio() {
                       onChange={() => toggleRecentVoiceoverSelection(item.job_id)}
                       disabled={bulkDeletingOutputs}
                     />
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-semibold">{item.filename}</p>
-                      <p className="mt-1 font-mono text-[11px] text-muted-foreground">
-                        {dateFormatter.format(new Date(item.created_at))}
-                        {typeof item.duration_seconds === 'number' ? ` · ${formatDuration(Math.round(item.duration_seconds))}` : ''}
-                        {getReferenceSourceLabel(item.reference_source_type) ? ` · ${getReferenceSourceLabel(item.reference_source_type)}` : ''}
-                      </p>
-                    </div>
                   </div>
+                  <p className="min-w-0 truncate text-sm font-semibold">{item.filename}</p>
+                  {durationLabel ? (
+                    <p className="shrink-0 text-[11px] text-muted-foreground">{durationLabel}</p>
+                  ) : (
+                    <span aria-hidden="true" className="block w-0 shrink-0" />
+                  )}
+                  <p className="min-w-0 truncate text-sm text-muted-foreground">{detailLabel}</p>
+                  <p className="shrink-0 text-[11px] text-muted-foreground">
+                    {compactDateFormatter.format(new Date(item.created_at))}
+                  </p>
                   <audio
                     controls
-                    className="h-8 w-full min-w-0"
+                    className="h-8 min-w-0 w-full"
                     src={`${item.output_url}?v=${encodeURIComponent(item.created_at)}`}
                   >
                     Your browser does not support audio playback.
                   </audio>
-                  <details className="relative">
+                  <details className="relative shrink-0">
                     <summary
                       className="flex h-8 w-8 cursor-pointer list-none items-center justify-center rounded-md border border-input text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
                       title="Output actions"
