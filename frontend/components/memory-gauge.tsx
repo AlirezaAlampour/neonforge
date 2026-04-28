@@ -12,8 +12,8 @@ export function MemoryGauge({ compact }: MemoryGaugeProps) {
 
   if (!memory) {
     return (
-      <div className={cn('animate-pulse', compact ? 'h-10' : 'h-20')}>
-        <div className="h-full rounded-lg bg-secondary/50" />
+      <div className={cn('animate-pulse', compact ? 'h-9' : 'h-20')}>
+        <div className="h-full rounded-md bg-white/[0.04]" />
       </div>
     )
   }
@@ -35,18 +35,18 @@ export function MemoryGauge({ compact }: MemoryGaugeProps) {
 
   if (compact) {
     return (
-      <div className="space-y-1.5">
+      <div className="rounded-lg border border-white/[0.06] bg-[#0f1218] px-2.5 py-2">
         <div className="flex items-center justify-between text-xs">
-          <span className="text-muted-foreground">UMA Memory</span>
+          <span className="font-medium text-muted-foreground">UMA</span>
           <span className={cn('font-mono font-medium tabular-nums', color)}>{pct}%</span>
         </div>
-        <div className="h-1.5 w-full rounded-full bg-secondary overflow-hidden">
+        <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-white/[0.06]">
           <div
             className={cn('h-full rounded-full transition-all duration-700 ease-out', barColor)}
             style={{ width: `${pct}%` }}
           />
         </div>
-        <p className="text-[10px] text-muted-foreground/70">
+        <p className="mt-1 text-[10px] text-muted-foreground/70">
           {memory.used_gb} / {memory.total_gb} GB
         </p>
       </div>
