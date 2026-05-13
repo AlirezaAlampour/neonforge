@@ -9,14 +9,20 @@ export function useJobPoller() {
   const intervalsRef = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map())
 
   const trackJob = useCallback((jobId: string, service: string) => {
+    const existingInterval = intervalsRef.current.get(jobId)
+    if (existingInterval) {
+      clearInterval(existingInterval)
+      intervalsRef.current.delete(jobId)
+    }
+
     setJobs(prev => [
+      ...prev.filter(job => job.job_id !== jobId),
       {
         job_id: jobId,
         service,
         status: 'queued',
         created_at: new Date().toISOString(),
       },
-      ...prev,
     ])
 
     const poll = async () => {
