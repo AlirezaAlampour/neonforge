@@ -1,4 +1,8 @@
-FROM nvcr.io/nvidia/pytorch:24.10-py3 AS base
+# CVE-2025-32434 (torch.load RCE): NGC 24.10-py3 ships torch 2.5.0a0 (vulnerable).
+# Bumped to 26.02-py3 (torch >= 2.11, Blackwell-ready). Override via build-arg
+# BASE_IMAGE if a different NGC tag is needed.
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.02-py3
+FROM ${BASE_IMAGE} AS base
 
 LABEL maintainer="ai-infra"
 LABEL component="${SERVICE}"

@@ -18,6 +18,9 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 
+# Pull alpine package patches (CVE-2026-31789 in libcrypto3, etc.)
+RUN apk --no-cache upgrade
+
 RUN addgroup --system --gid 1001 nodejs && \
     adduser --system --uid 1001 nextjs
 

@@ -87,3 +87,4 @@ def test_voiceover_studio_outputs_tab_supports_bulk_selection_delete_and_downloa
     assert "Select all" in source
     assert "Download Text" in source
     assert "Download Metadata" in source
+    assert "Save as Profile" in source

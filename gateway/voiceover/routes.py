@@ -63,6 +63,11 @@ class CreateVoiceoverJobRequest(BaseModel):
     style_text: str | None = None
 
 
+class SaveVoiceoverOutputAsProfileRequest(BaseModel):
+    name: str
+    notes: str | None = None
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -329,6 +334,37 @@ def _metadata_has_script_text(metadata: dict[str, Any] | None) -> bool:
     return bool(str((metadata or {}).get("script_text") or "").strip())
 
 
+def _output_can_save_as_profile(metadata: dict[str, Any] | None) -> bool:
+    if not metadata:
+        return False
+
+    model_id = str(metadata.get("model_id") or "").strip()
+    voice_mode = str(metadata.get("voice_mode") or "").strip().lower()
+    return model_id == VOX_MODEL_ID and voice_mode == VOX_MODE_DESIGN
+
+
+def _normalize_existing_audio_file_to_wav(input_path: Path, *, decode_error_message: str) -> tuple[bytes, str]:
+    if not input_path.exists() or not input_path.is_file():
+        raise HTTPException(404, "Voiceover output not found")
+
+    temp_output_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=REFERENCE_AUDIO_EXTENSION) as temp_file:
+            temp_output_path = Path(temp_file.name)
+
+        _normalize_reference_audio_to_wav(
+            input_path,
+            temp_output_path,
+            decode_error_message=decode_error_message,
+        )
+
+        normalized_filename = f"{input_path.stem}{REFERENCE_AUDIO_EXTENSION}"
+        return temp_output_path.read_bytes(), normalized_filename
+    finally:
+        if temp_output_path is not None:
+            temp_output_path.unlink(missing_ok=True)
+
+
 async def _prepare_reference_audio_upload(
     audio_file: UploadFile,
     *,
@@ -428,6 +464,7 @@ def _serialize_recent_voiceover(job_id: str, output_path: Path) -> dict[str, Any
         "script_text_url": f"/api/v1/voiceover/output/{job_id}/script-text" if _metadata_has_script_text(metadata) else None,
         "duration_seconds": duration_seconds if isinstance(duration_seconds, (int, float)) else None,
         "reference_source_type": str(metadata.get("reference_source_type") or "") if metadata else None,
+        "can_save_as_profile": _output_can_save_as_profile(metadata),
     }
 
 
@@ -706,6 +743,48 @@ async def delete_voiceover_output(job_id: str):
         await redis_client.delete(f"voiceover:{job_id}")
 
     return {"deleted": True, "file_deleted": output_path is not None}
+
+
+@router.post("/output/{job_id}/save-profile")
+async def save_voiceover_output_as_profile(job_id: str, request: SaveVoiceoverOutputAsProfileRequest):
+    cleaned_name = request.name.strip()
+    if not cleaned_name:
+        raise HTTPException(422, "Voice profile name is required")
+
+    job = await _read_job(job_id)
+    output_path = _resolve_job_output_path(job_id, job)
+    if output_path is None:
+        raise HTTPException(404, "Voiceover output not found")
+
+    metadata_path = _find_voiceover_metadata(job_id, output_path)
+    metadata = _read_output_metadata(metadata_path)
+    if not _output_can_save_as_profile(metadata):
+        raise HTTPException(422, "Only Vox design outputs can be saved as voice profiles")
+
+    normalized_audio_bytes, normalized_filename = _normalize_existing_audio_file_to_wav(
+        output_path,
+        decode_error_message="Voiceover output could not be decoded as WAV or MP3",
+    )
+    media_type = mimetypes.guess_type(normalized_filename)[0] or "audio/wav"
+    reference_transcript = str((metadata or {}).get("script_text") or "").strip() or None
+    if not reference_transcript:
+        try:
+            reference_transcript = await _transcribe_audio_with_whisper(
+                normalized_filename,
+                normalized_audio_bytes,
+                media_type,
+            )
+        except HTTPException:
+            reference_transcript = None
+
+    profile = save_profile(
+        name=cleaned_name,
+        audio_bytes=normalized_audio_bytes,
+        stored_filename=normalized_filename,
+        notes=(request.notes or "").strip() or "Saved from Vox design output.",
+        reference_transcript=reference_transcript,
+    )
+    return _serialize_profile(profile)
 
 
 @router.get("/output/{job_id}/metadata")

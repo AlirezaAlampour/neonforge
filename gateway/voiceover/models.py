@@ -291,6 +291,9 @@ class FishSpeechModel(_HTTPVoiceoverModel):
             "streaming": False,
             "use_memory_cache": "on" if references else "off",
         }
+        speed = options.get("speed")
+        if speed is not None:
+            payload["prosody"] = {"speed": float(speed)}
 
         try:
             response = httpx.post(
@@ -346,11 +349,14 @@ class VoxCPM2Model(_HTTPVoiceoverModel):
         vox_mode = str(options.get("vox_mode") or "clone").strip().lower() or "clone"
         prompt_text = str(options.get("prompt_text") or "").strip()
         style_text = str(options.get("style_text") or "").strip()
+        speed = options.get("speed")
 
         data = {
             "text": _build_vox_text(text, style_text if vox_mode != "continuation" else None),
             "vox_mode": vox_mode,
         }
+        if speed is not None:
+            data["speed"] = str(speed)
 
         files: dict[str, tuple[str, bytes, str]] = {}
         if vox_mode == "design":

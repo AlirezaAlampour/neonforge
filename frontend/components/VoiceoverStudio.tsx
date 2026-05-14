@@ -66,6 +66,7 @@ interface RecentVoiceover {
   metadata_url?: string | null
   duration_seconds?: number | null
   reference_source_type?: string | null
+  can_save_as_profile?: boolean
 }
 
 interface PersistedVoiceoverFormState {
@@ -256,6 +257,15 @@ function truncateText(value: string | null | undefined, maxLength: number): stri
   return `${trimmedValue.slice(0, maxLength - 1).trimEnd()}...`
 }
 
+function getDesignedVoiceProfileName(createdAt: string): string {
+  const parsedDate = new Date(createdAt)
+  if (Number.isNaN(parsedDate.getTime())) {
+    return 'Designed Voice'
+  }
+
+  return `Designed Voice ${compactDateFormatter.format(parsedDate)}`
+}
+
 function extractErrorMessage(payload: unknown, fallback: string): string {
   if (typeof payload === 'string' && payload.trim()) {
     return payload
@@ -379,7 +389,9 @@ interface VoiceoverJobsPanelProps {
   trackedJobs: TrackedVoiceoverJob[]
   latestRecentVoiceover: RecentVoiceover | null
   onOpenOutputs: () => void
+  onSaveOutputAsProfile: (jobId: string, suggestedName: string) => void
   recentVoiceoversCount: number
+  savingOutputProfileId: string | null
   className?: string
 }
 
@@ -388,7 +400,9 @@ function VoiceoverJobsPanel({
   trackedJobs,
   latestRecentVoiceover,
   onOpenOutputs,
+  onSaveOutputAsProfile,
   recentVoiceoversCount,
+  savingOutputProfileId,
   className,
 }: VoiceoverJobsPanelProps) {
   const hasTrackedJobs = trackedJobs.length > 0
@@ -419,62 +433,82 @@ function VoiceoverJobsPanel({
           <div className="space-y-3">
             <div className="space-y-2">
               {trackedJobs.map((job) => {
-              const currentStatus = job.status
-              const progressValue = getJobProgressValue(currentStatus)
-              const jobFilename = getTrackedJobFilename(job)
-              const isIndeterminate =
-                !currentStatus || currentStatus.status === 'queued' || currentStatus.status === 'pending' || currentStatus.status === 'stitching'
+                const currentStatus = job.status
+                const progressValue = getJobProgressValue(currentStatus)
+                const jobFilename = getTrackedJobFilename(job)
+                const canSaveOutputAsProfile = job.modelId === VOX_MODEL_ID && job.profileId === 'voice-design'
+                const isIndeterminate =
+                  !currentStatus || currentStatus.status === 'queued' || currentStatus.status === 'pending' || currentStatus.status === 'stitching'
 
-              return (
-                <div key={job.jobId} className="rounded-lg border border-white/[0.06] bg-primary/[0.06] p-3">
-                  <div className="flex flex-wrap items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <p className="text-sm font-semibold">{job.modelLabel}</p>
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        {job.profileName} · {dateFormatter.format(new Date(job.createdAt))}
-                      </p>
-                      <p className="mt-1 text-xs font-mono text-muted-foreground">{job.jobId}</p>
-                      {jobFilename && <p className="mt-2 truncate text-xs text-muted-foreground">{jobFilename}</p>}
+                return (
+                  <div key={job.jobId} className="rounded-lg border border-white/[0.06] bg-primary/[0.06] p-3">
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold">{job.modelLabel}</p>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {job.profileName} · {dateFormatter.format(new Date(job.createdAt))}
+                        </p>
+                        <p className="mt-1 text-xs font-mono text-muted-foreground">{job.jobId}</p>
+                        {jobFilename && <p className="mt-2 truncate text-xs text-muted-foreground">{jobFilename}</p>}
+                      </div>
+                      <div className="rounded-full border border-primary/20 bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
+                        {getJobStatusLabel(currentStatus?.status)}
+                      </div>
                     </div>
-                    <div className="rounded-full border border-primary/20 bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
-                      {getJobStatusLabel(currentStatus?.status)}
+
+                    <div className="mt-3 space-y-2">
+                      <Progress value={progressValue} indeterminate={isIndeterminate} className="h-1" />
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+                        <span>
+                          {currentStatus?.completed_chunks ?? 0} / {currentStatus?.total_chunks ?? 0} chunks complete
+                        </span>
+                        {currentStatus?.status === 'stitching' && <span>Finalizing</span>}
+                        {!currentStatus && <span>Restoring job state...</span>}
+                      </div>
                     </div>
+
+                    {currentStatus?.status === 'failed' && currentStatus.error && (
+                      <p className="mt-3 text-sm text-red-300">{currentStatus.error}</p>
+                    )}
+
+                    {currentStatus?.status === 'done' && currentStatus.output_url && (
+                      <div className="mt-3 space-y-3">
+                        <audio
+                          controls
+                          className="w-full"
+                          src={`${currentStatus.output_url}?v=${encodeURIComponent(currentStatus.created_at ?? job.createdAt)}`}
+                        >
+                          Your browser does not support audio playback.
+                        </audio>
+                        <div className="flex flex-wrap gap-2">
+                          <a href={currentStatus.output_url} download className="inline-flex">
+                            <Button type="button" variant="outline" size="sm" className="gap-2">
+                              <Download className="h-3.5 w-3.5" />
+                              Download Audio
+                            </Button>
+                          </a>
+                          {canSaveOutputAsProfile && (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="gap-2"
+                              onClick={() => onSaveOutputAsProfile(job.jobId, getDesignedVoiceProfileName(currentStatus.created_at ?? job.createdAt))}
+                              disabled={savingOutputProfileId === job.jobId}
+                            >
+                              {savingOutputProfileId === job.jobId ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <UploadCloud className="h-3.5 w-3.5" />
+                              )}
+                              {savingOutputProfileId === job.jobId ? 'Saving...' : 'Save as Profile'}
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                    )}
                   </div>
-
-                  <div className="mt-3 space-y-2">
-                    <Progress value={progressValue} indeterminate={isIndeterminate} className="h-1" />
-                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-                      <span>
-                        {currentStatus?.completed_chunks ?? 0} / {currentStatus?.total_chunks ?? 0} chunks complete
-                      </span>
-                      {currentStatus?.status === 'stitching' && <span>Finalizing</span>}
-                      {!currentStatus && <span>Restoring job state...</span>}
-                    </div>
-                  </div>
-
-                  {currentStatus?.status === 'failed' && currentStatus.error && (
-                    <p className="mt-3 text-sm text-red-300">{currentStatus.error}</p>
-                  )}
-
-                  {currentStatus?.status === 'done' && currentStatus.output_url && (
-                    <div className="mt-3 space-y-3">
-                      <audio
-                        controls
-                        className="w-full"
-                        src={`${currentStatus.output_url}?v=${encodeURIComponent(currentStatus.created_at ?? job.createdAt)}`}
-                      >
-                        Your browser does not support audio playback.
-                      </audio>
-                      <a href={currentStatus.output_url} download className="inline-flex">
-                        <Button type="button" variant="outline" size="sm" className="gap-2">
-                          <Download className="h-3.5 w-3.5" />
-                          Download Audio
-                        </Button>
-                      </a>
-                    </div>
-                  )}
-                </div>
-              )
+                )
               })}
             </div>
             {latestRecentVoiceover && (
@@ -572,6 +606,7 @@ export function VoiceoverStudio() {
   const [trackedJobs, setTrackedJobs] = useState<TrackedVoiceoverJob[]>([])
   const [submittingJob, setSubmittingJob] = useState(false)
   const [deletingOutputId, setDeletingOutputId] = useState<string | null>(null)
+  const [savingOutputProfileId, setSavingOutputProfileId] = useState<string | null>(null)
   const [selectedOutputIds, setSelectedOutputIds] = useState<string[]>([])
   const [bulkDeletingOutputs, setBulkDeletingOutputs] = useState(false)
   const [bulkDownloadingOutputs, setBulkDownloadingOutputs] = useState(false)
@@ -832,7 +867,8 @@ export function VoiceoverStudio() {
     [profiles, selectedProfileId],
   )
   const isVoxModel = selectedModel?.model_id === VOX_MODEL_ID
-  const supportsSpeedControl = selectedModel?.model_id === 'f5tts'
+  const supportsSpeedControl =
+    selectedModel?.model_id === 'f5tts' || selectedModel?.model_id === 'fish_speech' || selectedModel?.model_id === VOX_MODEL_ID
   const isVoxDesignMode = isVoxModel && voxMode === VOX_MODE_DESIGN
   const isVoxContinuationMode = isVoxModel && voxMode === VOX_MODE_CONTINUATION
   const voxContinuationUsesRecordedReference = isVoxContinuationMode && voxContinuationReferenceSource === 'record'
@@ -1269,6 +1305,35 @@ export function VoiceoverStudio() {
       setRecentError(error instanceof Error ? error.message : 'Failed to delete voiceover output')
     } finally {
       setDeletingOutputId(null)
+    }
+  }
+
+  const handleSaveOutputAsProfile = async (jobId: string, suggestedName: string) => {
+    if (typeof window === 'undefined') return
+
+    const requestedName = window.prompt('Save output as profile', suggestedName)
+    const trimmedName = requestedName?.trim() || ''
+    if (!trimmedName) return
+
+    setSavingOutputProfileId(jobId)
+    setGenerationError(null)
+    setRecentError(null)
+    setProfileError(null)
+
+    try {
+      const profile = await apiRequest<VoiceProfile>(`/api/v1/voiceover/output/${jobId}/save-profile`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: trimmedName }),
+      })
+      await refreshProfiles(profile.id)
+      window.alert(`Saved "${profile.name}" as a voice profile.`)
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Failed to save output as voice profile'
+      setGenerationError(message)
+      setRecentError(message)
+    } finally {
+      setSavingOutputProfileId(null)
     }
   }
 
@@ -1862,6 +1927,21 @@ export function VoiceoverStudio() {
                           Download Metadata
                         </a>
                       )}
+                      {item.can_save_as_profile && (
+                        <button
+                          type="button"
+                          className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-xs text-foreground hover:bg-accent"
+                          onClick={() => void handleSaveOutputAsProfile(item.job_id, getDesignedVoiceProfileName(item.created_at))}
+                          disabled={savingOutputProfileId === item.job_id}
+                        >
+                          {savingOutputProfileId === item.job_id ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <UploadCloud className="h-3.5 w-3.5" />
+                          )}
+                          {savingOutputProfileId === item.job_id ? 'Saving...' : 'Save as Profile'}
+                        </button>
+                      )}
                       <button
                         type="button"
                         className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-xs text-red-300 hover:bg-red-500/10"
@@ -2281,7 +2361,9 @@ export function VoiceoverStudio() {
           activeJobsCount={activeJobs.length}
           latestRecentVoiceover={latestRecentVoiceover}
           onOpenOutputs={() => setActiveWorkspaceTab('outputs')}
+          onSaveOutputAsProfile={handleSaveOutputAsProfile}
           recentVoiceoversCount={recentVoiceovers.length}
+          savingOutputProfileId={savingOutputProfileId}
           trackedJobs={trackedJobs}
           className="xl:sticky xl:top-6 xl:self-start"
         />

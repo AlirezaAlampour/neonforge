@@ -152,6 +152,8 @@ def test_fish_reference_transcript_is_persisted_and_reused(monkeypatch, tmp_path
     assert len(synth_payloads) == 2
     assert synth_payloads[0]["references"][0]["text"] == "This is the cached reference transcript."
     assert synth_payloads[1]["references"][0]["text"] == "This is the cached reference transcript."
+    assert synth_payloads[0]["prosody"] == {"speed": 1.0}
+    assert synth_payloads[1]["prosody"] == {"speed": 1.0}
     assert get_profile(profile.id).reference_transcript == "This is the cached reference transcript."
 
 
@@ -194,7 +196,7 @@ def test_run_voiceover_job_writes_metadata_and_script_slug_filename(monkeypatch,
     assert metadata["voice_mode"] == runner.VOX_MODE_DESIGN
     assert metadata["reference_source_type"] == "none"
     assert metadata["script_text"] == script
-    assert metadata["generation_params"] == {"format": "wav"}
+    assert metadata["generation_params"] == {"format": "wav", "speed": 1.15}
     assert metadata["chunk_count"] == 1
     assert metadata["duration_seconds"] is not None
 
@@ -217,7 +219,7 @@ def test_vox_clone_mode_sends_reference_audio_without_prompt_text(monkeypatch, t
     output = VoxCPM2Model().synthesize(
         "This is a clean clone.",
         str(reference_wav),
-        {"vox_mode": runner.VOX_MODE_CLONE, "style_text": "warm, steady delivery"},
+        {"vox_mode": runner.VOX_MODE_CLONE, "style_text": "warm, steady delivery", "speed": 1.15},
     )
 
     assert output == b"RIFFfake"
@@ -225,6 +227,7 @@ def test_vox_clone_mode_sends_reference_audio_without_prompt_text(monkeypatch, t
     assert captured["data"] == {
         "text": "(warm, steady delivery)This is a clean clone.",
         "vox_mode": runner.VOX_MODE_CLONE,
+        "speed": "1.15",
     }
     assert list((captured["files"] or {}).keys()) == ["reference_audio"]
 
@@ -250,6 +253,7 @@ def test_vox_continuation_mode_sends_prompt_text_when_explicitly_requested(monke
             "vox_mode": runner.VOX_MODE_CONTINUATION,
             "prompt_text": "This is the exact transcript of the saved clip.",
             "style_text": "should be ignored here",
+            "speed": 0.95,
         },
     )
 
@@ -258,6 +262,7 @@ def test_vox_continuation_mode_sends_prompt_text_when_explicitly_requested(monke
         "text": "Continue from the same thought.",
         "vox_mode": runner.VOX_MODE_CONTINUATION,
         "prompt_text": "This is the exact transcript of the saved clip.",
+        "speed": "0.95",
     }
     assert list((captured["files"] or {}).keys()) == ["reference_audio"]
 

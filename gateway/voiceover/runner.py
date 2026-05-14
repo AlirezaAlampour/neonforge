@@ -474,7 +474,7 @@ def _model_provider(model_id: str) -> str:
 
 def _generation_params(model_id: str, output_format: str, speed: float) -> dict[str, Any]:
     params: dict[str, Any] = {"format": str(output_format).lower()}
-    if model_id == "f5tts":
+    if model_id in {"f5tts", FISH_MODEL_ID, VOX_MODEL_ID}:
         params["speed"] = speed
     return params
 
@@ -597,7 +597,7 @@ async def run_voiceover_job(
         rendered_chunk_paths: list[Path] = []
         resolved_reference_audio_path = reference_audio_path or (profile.reference_audio_path if profile else None)
         model_options: dict[str, Any] = {}
-        if model_id == "f5tts":
+        if model_id in {"f5tts", FISH_MODEL_ID, VOX_MODEL_ID}:
             model_options["speed"] = speed
         if model_id == FISH_MODEL_ID:
             if profile is None:

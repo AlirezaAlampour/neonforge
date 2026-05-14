@@ -646,6 +646,7 @@ def test_recent_outputs_include_metadata_and_script_downloads(monkeypatch, tmp_p
     assert outputs[0]["metadata_url"] == f"/api/v1/voiceover/output/{job_id}/metadata"
     assert outputs[0]["script_text_url"] == f"/api/v1/voiceover/output/{job_id}/script-text"
     assert outputs[0]["reference_source_type"] == "temp_recording"
+    assert outputs[0]["can_save_as_profile"] is False
 
     metadata_response = client.get(f"/api/v1/voiceover/output/{job_id}/metadata")
     assert metadata_response.status_code == 200
@@ -654,6 +655,50 @@ def test_recent_outputs_include_metadata_and_script_downloads(monkeypatch, tmp_p
     script_response = client.get(f"/api/v1/voiceover/output/{job_id}/script-text")
     assert script_response.status_code == 200
     assert script_response.text == "AI training, four versions.\n"
+
+
+def test_save_vox_design_output_as_profile_promotes_it_to_normal_voice_profile(monkeypatch, tmp_path: Path):
+    _configure_voice_profile_storage(monkeypatch, tmp_path)
+    _configure_voiceover_output_storage(monkeypatch, tmp_path)
+    _mock_ffmpeg_success(monkeypatch, duration_ms=1800, sample_rate=48000, channels=2)
+    client = _build_client()
+
+    job_id = "vox-design-output"
+    job_dir = routes._voiceover_output_dir() / job_id
+    job_dir.mkdir(parents=True)
+    output_path = job_dir / "voxcpm2_voice_design_test_2026-05-07_103000.wav"
+    _write_pcm_wav(output_path, _tone_frames(300))
+    output_path.with_suffix(".json").write_text(
+        """{
+  "output_filename": "voxcpm2_voice_design_test_2026-05-07_103000.wav",
+  "created_at": "2026-05-07T10:30:00+00:00",
+  "model_id": "voxcpm2",
+  "provider": "local",
+  "voice_mode": "design",
+  "reference_source_type": "none",
+  "script_text": "Designed voice sample line."
+}
+""",
+        encoding="utf-8",
+    )
+
+    response = client.post(
+        f"/api/v1/voiceover/output/{job_id}/save-profile",
+        json={"name": "My Designed Voice"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["name"] == "My Designed Voice"
+    assert payload["reference_transcript"] == "Designed voice sample line."
+    assert payload["notes"] == "Saved from Vox design output."
+    saved_audio_path = profiles.host_path_to_container(payload["reference_audio_path"])
+    assert saved_audio_path.exists()
+    assert saved_audio_path.suffix == ".wav"
+
+    listed_profiles = client.get("/api/v1/voiceover/profiles")
+    assert listed_profiles.status_code == 200
+    assert listed_profiles.json()[0]["id"] == payload["id"]
 
 
 def test_delete_voiceover_output_removes_directory_and_redis_history(monkeypatch, tmp_path: Path):
