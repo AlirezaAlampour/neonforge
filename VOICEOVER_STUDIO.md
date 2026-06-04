@@ -53,6 +53,23 @@ The legacy TTS flow is useful for shorter direct generations. Voiceover Studio a
 - useful for experimentation and some medium-form tests
 - should still be treated as experimental for longer cloned narration quality
 
+### cosyvoice3
+- optional local backend
+- this integration pass exposes clone-only behavior
+- requires:
+  - saved voice profile
+  - exact transcript of that saved reference clip
+- no no-reference voice-design mode in this UI pass
+- treat as experimental until you verify the upstream stack on your target ARM64/CUDA image
+
+### qwen3tts
+- optional local backend
+- supports two explicit modes in this pass:
+  - `clone`: saved voice profile plus exact transcript
+  - `design`: no reference audio, style/control text required
+- local voice cloning is only exposed when the reference transcript is available
+- treat as experimental until you verify the upstream stack on your target ARM64/CUDA image
+
 ## VoxCPM2 modes
 
 ### Voice Design
@@ -106,3 +123,85 @@ Output naming format:
 - production / reliable narration: **F5-TTS**
 - higher-quality alternative: **Fish Speech**
 - experimental testing: **VoxCPM2**
+- transcript-driven reference cloning experiments: **CosyVoice 3**
+- optional prompt-only design + transcript-driven clone testing: **Qwen3-TTS**
+
+## Manual model install
+
+Expected host layout:
+
+```text
+/srv/ai/models/voice/
+  cosyvoice3/
+    Fun-CosyVoice3-0.5B-2512/
+  qwen3tts/
+    Qwen3-TTS-12Hz-0.6B-Base/
+    Qwen3-TTS-12Hz-1.7B-VoiceDesign/
+```
+
+Official upstream repos:
+- CosyVoice 3: `https://github.com/FunAudioLLM/CosyVoice`
+- Qwen3-TTS: `https://github.com/QwenLM/Qwen3-TTS`
+
+Official model snapshots:
+- CosyVoice 3: `https://huggingface.co/FunAudioLLM/Fun-CosyVoice3-0.5B-2512`
+- Qwen clone model: `https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base`
+- Qwen voice design model: `https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign`
+
+Download commands:
+
+```bash
+mkdir -p /srv/ai/models/voice/cosyvoice3 /srv/ai/models/voice/qwen3tts
+
+uv run --with huggingface_hub python - <<'PY'
+from huggingface_hub import snapshot_download
+
+snapshot_download(
+    repo_id="FunAudioLLM/Fun-CosyVoice3-0.5B-2512",
+    local_dir="/srv/ai/models/voice/cosyvoice3/Fun-CosyVoice3-0.5B-2512",
+    local_dir_use_symlinks=False,
+)
+snapshot_download(
+    repo_id="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+    local_dir="/srv/ai/models/voice/qwen3tts/Qwen3-TTS-12Hz-0.6B-Base",
+    local_dir_use_symlinks=False,
+)
+snapshot_download(
+    repo_id="Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+    local_dir="/srv/ai/models/voice/qwen3tts/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+    local_dir_use_symlinks=False,
+)
+PY
+```
+
+NeonForge reads `QWEN3TTS_MODEL_DIR` as a parent directory containing the official Base and VoiceDesign snapshots. A separate `Qwen3-TTS-Tokenizer-12Hz` download is optional, not required, because each official Qwen model snapshot already includes a `speech_tokenizer/` subdirectory.
+
+Enable the backends in `.env`:
+
+```bash
+COSYVOICE3_ENABLED=true
+COSYVOICE3_MODEL_DIR=/srv/ai/models/voice/cosyvoice3
+QWEN3TTS_ENABLED=true
+QWEN3TTS_MODEL_DIR=/srv/ai/models/voice/qwen3tts
+```
+
+Start the optional services:
+
+```bash
+docker compose up -d gateway cosyvoice3 qwen3tts
+```
+
+Health and smoke checks:
+
+```bash
+curl http://localhost:8080/api/v1/voiceover/models
+docker compose exec cosyvoice3 curl -fsS http://localhost:8000/healthz
+docker compose exec cosyvoice3 curl -fsS http://localhost:8000/readyz
+docker compose exec cosyvoice3 curl -fsS http://localhost:8000/smoke
+docker compose exec qwen3tts curl -fsS http://localhost:8000/healthz
+docker compose exec qwen3tts curl -fsS http://localhost:8000/readyz
+docker compose exec qwen3tts curl -fsS http://localhost:8000/smoke
+```
+
+Compatibility note:
+- ARM64/CUDA 13 compatibility for these upstream projects is not verified in NeonForge yet. Keep them opt-in and confirm build/load/smoke behavior on your own machine before treating them as stable backends.

@@ -4,6 +4,7 @@ import subprocess
 import sys
 import wave
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -326,13 +327,110 @@ class _FakeModel:
     def __init__(self, model_id: str) -> None:
         self.model_id = model_id
         self.display_name = f"{model_id} (fake)"
-        self.supports_reference_audio = True
+        self.supports_seed = False
+        self.experimental = False
+        if model_id == "voxcpm2":
+            self.modes = (
+                _FakeMode(
+                    "design",
+                    label="Design",
+                    description="Prompt-only design.",
+                    requires_reference_audio=False,
+                    supports_style_text=True,
+                ),
+                _FakeMode(
+                    "clone",
+                    label="Clone",
+                    description="Reference audio clone.",
+                    requires_reference_audio=True,
+                    supports_style_text=True,
+                ),
+                _FakeMode(
+                    "continuation",
+                    label="Continue",
+                    description="Continuation from transcript.",
+                    requires_reference_audio=True,
+                    requires_transcript=True,
+                    supports_recorded_reference=True,
+                ),
+            )
+            self.supports_speed_control = True
+            self.experimental = True
+        else:
+            self.modes = (
+                _FakeMode(
+                    "clone",
+                    label="Clone",
+                    description="Reference audio clone.",
+                    requires_reference_audio=True,
+                ),
+            )
+            self.supports_speed_control = True
+
+        self.supports_reference_audio = any(mode.requires_reference_audio for mode in self.modes)
+        self.supports_transcript = any(mode.requires_transcript for mode in self.modes)
+        self.supports_style_text = any(mode.supports_style_text for mode in self.modes)
+        self.supports_voice_design = any(not mode.requires_reference_audio for mode in self.modes)
 
     def is_available(self) -> bool:
         return True
 
     def availability_error(self) -> str:
         return "unavailable"
+
+    def default_mode(self) -> str:
+        return "clone"
+
+    def mode(self, mode_id: str):
+        return next((mode for mode in self.modes if mode.mode_id == mode_id), None)
+
+
+class _FakeMode:
+    def __init__(
+        self,
+        mode_id: str,
+        *,
+        label: str,
+        description: str,
+        requires_reference_audio: bool,
+        requires_transcript: bool = False,
+        supports_style_text: bool = False,
+        requires_style_text: bool = False,
+        supports_recorded_reference: bool = False,
+    ) -> None:
+        self.mode_id = mode_id
+        self.label = label
+        self.description = description
+        self.requires_reference_audio = requires_reference_audio
+        self.requires_transcript = requires_transcript
+        self.supports_style_text = supports_style_text
+        self.requires_style_text = requires_style_text
+        self.supports_recorded_reference = supports_recorded_reference
+
+    def to_summary(self) -> dict[str, object]:
+        return {
+            "mode_id": self.mode_id,
+            "label": self.label,
+            "description": self.description,
+            "requires_reference_audio": self.requires_reference_audio,
+            "requires_transcript": self.requires_transcript,
+            "supports_style_text": self.supports_style_text,
+            "requires_style_text": self.requires_style_text,
+            "supports_recorded_reference": self.supports_recorded_reference,
+        }
+
+
+class _FakeCapabilityModel(_FakeModel):
+    def __init__(self, model_id: str, *, display_name: str, modes: tuple[_FakeMode, ...]) -> None:
+        super().__init__(model_id)
+        self.display_name = display_name
+        self.modes = modes
+        self.supports_reference_audio = any(mode.requires_reference_audio for mode in modes)
+        self.supports_transcript = any(mode.requires_transcript for mode in modes)
+        self.supports_style_text = any(mode.supports_style_text for mode in modes)
+        self.supports_voice_design = any(not mode.requires_reference_audio for mode in modes)
+        self.experimental = True
+        self.supports_speed_control = False
 
 
 def _fake_profile(profile_id: str = "profile-1") -> profiles.VoiceProfile:
@@ -385,6 +483,97 @@ def _configure_job_creation(monkeypatch, *, model_id: str):
     monkeypatch.setattr(routes.ModelRegistry, "get_model", lambda requested_model_id: _FakeModel(requested_model_id))
     monkeypatch.setattr(routes, "run_voiceover_job", fake_run_voiceover_job)
     return fake_redis, captured
+
+
+def test_list_voiceover_models_includes_capability_flags_and_modes(monkeypatch):
+    clone_mode = _FakeMode(
+        "clone",
+        label="Clone",
+        description="Reference clip plus transcript.",
+        requires_reference_audio=True,
+        requires_transcript=True,
+    )
+    design_mode = _FakeMode(
+        "design",
+        label="Design",
+        description="Prompt-only voice design.",
+        requires_reference_audio=False,
+        supports_style_text=True,
+        requires_style_text=True,
+    )
+    cosy_model = _FakeCapabilityModel("cosyvoice3", display_name="CosyVoice 3 (Local)", modes=(clone_mode,))
+    qwen_model = _FakeCapabilityModel("qwen3tts", display_name="Qwen3-TTS (Local)", modes=(clone_mode, design_mode))
+    monkeypatch.setattr(routes.ModelRegistry, "all_models", lambda: [cosy_model, qwen_model])
+    client = _build_client()
+
+    response = client.get("/api/v1/voiceover/models")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload == [
+        {
+            "model_id": "cosyvoice3",
+            "display_name": "CosyVoice 3 (Local)",
+            "supports_reference_audio": True,
+            "supports_transcript": True,
+            "supports_style_text": False,
+            "supports_voice_design": False,
+            "supports_seed": False,
+            "supports_speed_control": False,
+            "experimental": True,
+            "available": True,
+            "availability_error": "",
+            "default_mode": "clone",
+            "modes": [
+                {
+                    "mode_id": "clone",
+                    "label": "Clone",
+                    "description": "Reference clip plus transcript.",
+                    "requires_reference_audio": True,
+                    "requires_transcript": True,
+                    "supports_style_text": False,
+                    "requires_style_text": False,
+                    "supports_recorded_reference": False,
+                }
+            ],
+        },
+        {
+            "model_id": "qwen3tts",
+            "display_name": "Qwen3-TTS (Local)",
+            "supports_reference_audio": True,
+            "supports_transcript": True,
+            "supports_style_text": True,
+            "supports_voice_design": True,
+            "supports_seed": False,
+            "supports_speed_control": False,
+            "experimental": True,
+            "available": True,
+            "availability_error": "",
+            "default_mode": "clone",
+            "modes": [
+                {
+                    "mode_id": "clone",
+                    "label": "Clone",
+                    "description": "Reference clip plus transcript.",
+                    "requires_reference_audio": True,
+                    "requires_transcript": True,
+                    "supports_style_text": False,
+                    "requires_style_text": False,
+                    "supports_recorded_reference": False,
+                },
+                {
+                    "mode_id": "design",
+                    "label": "Design",
+                    "description": "Prompt-only voice design.",
+                    "requires_reference_audio": False,
+                    "requires_transcript": False,
+                    "supports_style_text": True,
+                    "requires_style_text": True,
+                    "supports_recorded_reference": False,
+                },
+            ],
+        },
+    ]
 
 
 def test_create_voiceover_job_defaults_vox_to_clone_mode(monkeypatch, tmp_path: Path):
@@ -454,6 +643,76 @@ def test_create_voiceover_job_rejects_vox_clone_without_profile(monkeypatch, tmp
 
     assert response.status_code == 422
     assert response.json()["detail"] == "Vox clone mode requires a saved voice profile"
+
+
+def test_create_voiceover_job_rejects_unsupported_generic_mode(monkeypatch, tmp_path: Path):
+    _configure_voice_profile_storage(monkeypatch, tmp_path)
+    _configure_job_creation(monkeypatch, model_id="cosyvoice3")
+    clone_mode = _FakeMode(
+        "clone",
+        label="Clone",
+        description="Reference clip plus transcript.",
+        requires_reference_audio=True,
+        requires_transcript=True,
+    )
+    profile = _fake_profile()
+    monkeypatch.setattr(routes, "get_profile", lambda profile_id: profile if profile_id == profile.id else None)
+    monkeypatch.setattr(
+        routes.ModelRegistry,
+        "get_model",
+        lambda requested_model_id: _FakeCapabilityModel("cosyvoice3", display_name="CosyVoice 3 (Local)", modes=(clone_mode,)),
+    )
+    client = _build_client()
+
+    response = client.post(
+        "/api/v1/voiceover/jobs",
+        json={
+            "voice_profile_id": profile.id,
+            "script": "Try a mode the backend does not expose.",
+            "model_id": "cosyvoice3",
+            "voice_mode": "design",
+            "output_format": "wav",
+            "speed": 1.0,
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "CosyVoice 3 (Local) does not support design mode"
+
+
+def test_create_voiceover_job_rejects_clone_mode_without_transcript_for_qwen(monkeypatch, tmp_path: Path):
+    _configure_voice_profile_storage(monkeypatch, tmp_path)
+    _configure_job_creation(monkeypatch, model_id="qwen3tts")
+    clone_mode = _FakeMode(
+        "clone",
+        label="Clone",
+        description="Reference clip plus transcript.",
+        requires_reference_audio=True,
+        requires_transcript=True,
+    )
+    profile = _fake_profile()
+    monkeypatch.setattr(routes, "get_profile", lambda profile_id: profile if profile_id == profile.id else None)
+    monkeypatch.setattr(
+        routes.ModelRegistry,
+        "get_model",
+        lambda requested_model_id: _FakeCapabilityModel("qwen3tts", display_name="Qwen3-TTS (Local)", modes=(clone_mode,)),
+    )
+    client = _build_client()
+
+    response = client.post(
+        "/api/v1/voiceover/jobs",
+        json={
+            "voice_profile_id": profile.id,
+            "script": "Clone this sample but no transcript was supplied.",
+            "model_id": "qwen3tts",
+            "voice_mode": "clone",
+            "output_format": "wav",
+            "speed": 1.0,
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Clone mode requires the exact transcript of the reference clip"
 
 
 def test_create_voiceover_job_rejects_vox_continuation_without_any_reference(monkeypatch, tmp_path: Path):

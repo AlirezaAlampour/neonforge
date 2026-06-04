@@ -20,6 +20,8 @@ NeonForge combines a Next.js frontend, a FastAPI gateway, Redis/supervisor orche
 | **Faster-Whisper** | Audio transcription (STT) | Always-on baseline service; also used to transcribe reference audio for Fish Speech |
 | **F5-TTS** | Text-to-speech and voiceover synthesis | Most reliable local voiceover backend |
 | **Fish Speech 1.5** | Higher-quality local voiceover synthesis | Optional; enabled with `FISH_SPEECH_ENABLED=true` |
+| **CosyVoice 3** | Optional local reference-based voiceover synthesis | Clone mode requires reference audio plus transcript |
+| **Qwen3-TTS** | Optional local clone/design voiceover synthesis | Clone requires transcript; design mode is prompt-only |
 | **VoxCPM2** | Experimental local voiceover synthesis | Optional; enabled with `VOXCPM2_ENABLED=true` |
 | **LivePortrait** | Face animation from image + driving video | Warm GPU runtime |
 | **Lip-sync** | Audio-driven mouth animation | Warm GPU runtime |
@@ -122,7 +124,7 @@ docker compose up -d f5tts liveportrait lipsync
 
 # 5. (Optional) Start additional runtimes if configured
 # Fish Speech uses a compose image reference rather than a local Dockerfile.
-docker compose up -d fish_speech voxcpm2
+docker compose up -d fish_speech voxcpm2 cosyvoice3 qwen3tts
 
 # 6. Verify
 python3 scripts/verify_dgx.py --smoke
@@ -192,8 +194,102 @@ Voiceover Studio is the isolated long-form narration path in NeonForge. It inten
   - `clone`: reference audio only, optional style/control text
   - `continuation`: reference audio plus the exact transcript of that clip
 - Vox now defaults to normal clone semantics instead of silently auto-entering continuation mode.
+- CosyVoice 3 is optional and currently exposed as a clone-only backend in this UI pass.
+- Qwen3-TTS is optional and currently exposed as:
+  - `clone`: saved profile plus exact transcript
+  - `design`: no reference audio, style/control text required
 
 See [VOICEOVER_STUDIO.md](VOICEOVER_STUDIO.md) for the product-level notes and [gateway/voiceover/](gateway/voiceover) for the implementation.
+
+### Optional CosyVoice 3 / Qwen3-TTS setup
+
+These backends stay fully manual and opt-in:
+- NeonForge does not download weights for you.
+- NeonForge does not commit model weights.
+- Gateway only lists these backends when their enable flags are turned on.
+
+Expected host layout under `/srv/ai/models`:
+
+```text
+/srv/ai/models/voice/
+  cosyvoice3/
+    Fun-CosyVoice3-0.5B-2512/         # official snapshot root
+  qwen3tts/
+    Qwen3-TTS-12Hz-0.6B-Base/         # clone mode
+    Qwen3-TTS-12Hz-1.7B-VoiceDesign/  # design mode
+```
+
+Official upstream sources:
+- CosyVoice repo: `https://github.com/FunAudioLLM/CosyVoice`
+- CosyVoice checkpoint: `https://huggingface.co/FunAudioLLM/Fun-CosyVoice3-0.5B-2512`
+- Qwen3-TTS repo: `https://github.com/QwenLM/Qwen3-TTS`
+- Qwen clone checkpoint: `https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base`
+- Qwen design checkpoint: `https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign`
+
+Download the official snapshots onto the host with `uv`:
+
+```bash
+mkdir -p /srv/ai/models/voice/cosyvoice3 /srv/ai/models/voice/qwen3tts
+
+uv run --with huggingface_hub python - <<'PY'
+from huggingface_hub import snapshot_download
+
+snapshot_download(
+    repo_id="FunAudioLLM/Fun-CosyVoice3-0.5B-2512",
+    local_dir="/srv/ai/models/voice/cosyvoice3/Fun-CosyVoice3-0.5B-2512",
+    local_dir_use_symlinks=False,
+)
+snapshot_download(
+    repo_id="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+    local_dir="/srv/ai/models/voice/qwen3tts/Qwen3-TTS-12Hz-0.6B-Base",
+    local_dir_use_symlinks=False,
+)
+snapshot_download(
+    repo_id="Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+    local_dir="/srv/ai/models/voice/qwen3tts/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+    local_dir_use_symlinks=False,
+)
+PY
+```
+
+NeonForge does not require the separate `Qwen3-TTS-Tokenizer-12Hz` repo for service readiness because the official Qwen model snapshots already include `speech_tokenizer/` inside each model directory.
+
+Official upstream sources:
+- CosyVoice 3: `https://github.com/FunAudioLLM/CosyVoice`
+- Qwen3-TTS: `https://github.com/QwenLM/Qwen3-TTS`
+
+Enable them in `.env`:
+
+```bash
+COSYVOICE3_ENABLED=true
+COSYVOICE3_MODEL_DIR=/srv/ai/models/voice/cosyvoice3
+QWEN3TTS_ENABLED=true
+QWEN3TTS_MODEL_DIR=/srv/ai/models/voice/qwen3tts
+```
+
+Start the services:
+
+```bash
+docker compose up -d gateway cosyvoice3 qwen3tts
+```
+
+Verify runtime health:
+
+```bash
+curl http://localhost:8080/api/v1/voiceover/models
+```
+
+Container-local health checks:
+
+```bash
+docker compose exec cosyvoice3 curl -fsS http://localhost:8000/healthz
+docker compose exec cosyvoice3 curl -fsS http://localhost:8000/readyz
+docker compose exec qwen3tts curl -fsS http://localhost:8000/healthz
+docker compose exec qwen3tts curl -fsS http://localhost:8000/readyz
+```
+
+Compatibility note:
+- ARM64 on DGX Spark / CUDA 13 for these two upstream stacks is not verified in this repo yet. Treat both as experimental until you confirm image build, model load, and a real synth run on your target machine.
 
 ## ComfyUI Templates
 

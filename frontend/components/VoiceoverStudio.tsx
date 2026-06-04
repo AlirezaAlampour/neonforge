@@ -40,7 +40,27 @@ interface VoiceoverModelSummary {
   model_id: string
   display_name: string
   supports_reference_audio: boolean
+  supports_transcript: boolean
+  supports_style_text: boolean
+  supports_voice_design: boolean
+  supports_seed: boolean
+  supports_speed_control: boolean
+  experimental: boolean
   available: boolean
+  availability_error: string
+  default_mode: string
+  modes: VoiceoverModeSummary[]
+}
+
+interface VoiceoverModeSummary {
+  mode_id: string
+  label: string
+  description: string
+  requires_reference_audio: boolean
+  requires_transcript: boolean
+  supports_style_text: boolean
+  requires_style_text: boolean
+  supports_recorded_reference: boolean
 }
 
 interface VoiceoverJobStatus {
@@ -75,7 +95,7 @@ interface PersistedVoiceoverFormState {
   script?: string
   outputFormat?: 'wav' | 'mp3'
   speed?: number
-  voxMode?: VoxMode
+  voxMode?: string
   voxContinuationReferenceSource?: VoxContinuationReferenceSource
   voxPromptText?: string
   voxStyleText?: string
@@ -596,7 +616,7 @@ export function VoiceoverStudio() {
   const [outputFormat, setOutputFormat] = useState<'wav' | 'mp3'>('wav')
   const [speed, setSpeed] = useState(1)
   const [speedInput, setSpeedInput] = useState('1.00')
-  const [voxMode, setVoxMode] = useState<VoxMode>(VOX_MODE_CLONE)
+  const [voxMode, setVoxMode] = useState<string>(VOX_MODE_CLONE)
   const [voxContinuationReferenceSource, setVoxContinuationReferenceSource] = useState<VoxContinuationReferenceSource>('profile')
   const [voxRecordedReferenceId, setVoxRecordedReferenceId] = useState('')
   const [voxRecordedReferencePending, setVoxRecordedReferencePending] = useState(false)
@@ -715,11 +735,7 @@ export function VoiceoverStudio() {
             setSpeed(normalizedSpeed)
             setSpeedInput(normalizedSpeed.toFixed(2))
           }
-          if (
-            payload.voxMode === VOX_MODE_DESIGN ||
-            payload.voxMode === VOX_MODE_CLONE ||
-            payload.voxMode === VOX_MODE_CONTINUATION
-          ) {
+          if (typeof payload.voxMode === 'string' && payload.voxMode.trim()) {
             setVoxMode(payload.voxMode)
           }
           if (
@@ -866,13 +882,21 @@ export function VoiceoverStudio() {
     () => profiles.find((profile) => profile.id === selectedProfileId) ?? null,
     [profiles, selectedProfileId],
   )
+  const selectedMode = useMemo(
+    () => selectedModel?.modes.find((mode) => mode.mode_id === voxMode) ?? selectedModel?.modes[0] ?? null,
+    [selectedModel, voxMode],
+  )
   const isVoxModel = selectedModel?.model_id === VOX_MODEL_ID
-  const supportsSpeedControl =
-    selectedModel?.model_id === 'f5tts' || selectedModel?.model_id === 'fish_speech' || selectedModel?.model_id === VOX_MODEL_ID
-  const isVoxDesignMode = isVoxModel && voxMode === VOX_MODE_DESIGN
-  const isVoxContinuationMode = isVoxModel && voxMode === VOX_MODE_CONTINUATION
-  const voxContinuationUsesRecordedReference = isVoxContinuationMode && voxContinuationReferenceSource === 'record'
-  const requiresSavedVoiceProfile = !isVoxDesignMode && !voxContinuationUsesRecordedReference
+  const supportsSpeedControl = !!selectedModel?.supports_speed_control
+  const isVoxDesignMode = isVoxModel && selectedMode?.mode_id === VOX_MODE_DESIGN
+  const isVoxContinuationMode = isVoxModel && selectedMode?.mode_id === VOX_MODE_CONTINUATION
+  const selectedModeRequiresReference = !!selectedMode?.requires_reference_audio
+  const selectedModeRequiresTranscript = !!selectedMode?.requires_transcript
+  const selectedModeSupportsStyle = !!selectedMode?.supports_style_text
+  const selectedModeRequiresStyle = !!selectedMode?.requires_style_text
+  const selectedModeSupportsRecordedReference = !!selectedMode?.supports_recorded_reference
+  const voxContinuationUsesRecordedReference = selectedModeSupportsRecordedReference && voxContinuationReferenceSource === 'record'
+  const requiresSavedVoiceProfile = selectedModeRequiresReference && !voxContinuationUsesRecordedReference
   const availableModels = useMemo(() => models.filter((model) => model.available), [models])
   const activeJobs = useMemo(
     () => trackedJobs.filter((job) => !isTerminalJobStatus(job.status?.status)),
@@ -888,6 +912,12 @@ export function VoiceoverStudio() {
     () => activeJobs.map((job) => job.jobId).sort().join(','),
     [activeJobs],
   )
+
+  useEffect(() => {
+    if (!selectedModel) return
+    if (selectedMode) return
+    setVoxMode(selectedModel.default_mode)
+  }, [selectedMode, selectedModel])
 
   useEffect(() => {
     setSelectedOutputIds((current) =>
@@ -1038,7 +1068,7 @@ export function VoiceoverStudio() {
   }, [uploadRecordedReference, voxContinuationUsesRecordedReference, voxRecorder.audioBlob])
 
   useEffect(() => {
-    if (!isVoxContinuationMode || voxContinuationReferenceSource !== 'profile') return
+    if (!selectedModeRequiresTranscript || voxContinuationReferenceSource !== 'profile') return
 
     const transcriptSeed = getProfileTranscriptSeed(selectedProfile)
     if (!transcriptSeed) return
@@ -1052,7 +1082,7 @@ export function VoiceoverStudio() {
       return transcriptSeed
     })
   }, [
-    isVoxContinuationMode,
+    selectedModeRequiresTranscript,
     selectedProfile,
     voxContinuationReferenceSource,
   ])
@@ -1062,7 +1092,7 @@ export function VoiceoverStudio() {
     if (trimmedScript.length === 0) return 0
 
     if (selectedModelId === VOX_MODEL_ID) {
-      const singlePassLimit = voxMode === VOX_MODE_CONTINUATION ? VOX_CONTINUATION_SINGLE_PASS_MAX_CHARS : VOX_SINGLE_PASS_MAX_CHARS
+      const singlePassLimit = selectedMode?.mode_id === VOX_MODE_CONTINUATION ? VOX_CONTINUATION_SINGLE_PASS_MAX_CHARS : VOX_SINGLE_PASS_MAX_CHARS
       if (trimmedScript.length <= singlePassLimit) {
         return 1
       }
@@ -1070,10 +1100,10 @@ export function VoiceoverStudio() {
     }
 
     return Math.ceil(trimmedScript.length / 150)
-  }, [script, selectedModelId, voxMode])
+  }, [script, selectedModelId, selectedMode])
   const chunkEstimateLabel =
     roughChunkEstimate === 1 && selectedModelId === VOX_MODEL_ID ? 'Estimated chunks: 1 (single pass)' : `Estimated chunks: ${roughChunkEstimate}`
-  const hasRequiredReference = isVoxDesignMode ? true : voxContinuationUsesRecordedReference ? !!voxRecordedReferenceId : !!selectedProfileId
+  const hasRequiredReference = !selectedModeRequiresReference ? true : voxContinuationUsesRecordedReference ? !!voxRecordedReferenceId : !!selectedProfileId
   const profileInputLevelPercent = Math.round(profileRecorder.inputLevel * 100)
   const profileInputMeterState = useMemo(() => {
     if (!profileRecorder.isRecording) {
@@ -1118,7 +1148,8 @@ export function VoiceoverStudio() {
   const canGenerate =
     hasRequiredReference &&
     !!script.trim() &&
-    (!isVoxContinuationMode || !!voxPromptText.trim()) &&
+    (!selectedModeRequiresTranscript || !!voxPromptText.trim()) &&
+    (!selectedModeRequiresStyle || !!voxStyleText.trim()) &&
     !!selectedModel?.available &&
     (!voxContinuationUsesRecordedReference || !voxRecordedReferencePending) &&
     !submittingJob
@@ -1248,14 +1279,17 @@ export function VoiceoverStudio() {
         payload.temp_reference_id = voxRecordedReferenceId
       }
 
+      if (selectedMode) {
+        payload.voice_mode = selectedMode.mode_id
+      }
       if (isVoxModel) {
         payload.vox_mode = voxMode
-        if (isVoxContinuationMode && trimmedVoxPromptText) {
-          payload.prompt_text = trimmedVoxPromptText
-        }
-        if (!isVoxContinuationMode && trimmedVoxStyleText) {
-          payload.style_text = trimmedVoxStyleText
-        }
+      }
+      if (selectedModeRequiresTranscript && trimmedVoxPromptText) {
+        payload.prompt_text = trimmedVoxPromptText
+      }
+      if (selectedModeSupportsStyle && trimmedVoxStyleText) {
+        payload.style_text = trimmedVoxStyleText
       }
 
       const response = await apiRequest<{ job_id: string; status: string }>('/api/v1/voiceover/jobs', {
@@ -1270,7 +1304,12 @@ export function VoiceoverStudio() {
           modelId: selectedModel.model_id,
           modelLabel: selectedModel.display_name,
           profileId: voxContinuationUsesRecordedReference ? voxRecordedReferenceId || 'recorded-reference' : selectedProfileId || 'voice-design',
-          profileName: isVoxDesignMode ? 'Voice Design' : voxContinuationUsesRecordedReference ? 'Recorded Reference' : selectedProfile?.name ?? 'Voice',
+          profileName:
+            !selectedModeRequiresReference
+              ? selectedMode?.label ?? 'Voice Design'
+              : voxContinuationUsesRecordedReference
+                ? 'Recorded Reference'
+                : selectedProfile?.name ?? 'Voice',
           createdAt: new Date().toISOString(),
           status: { status: response.status, completed_chunks: 0, total_chunks: 0 },
         }),
@@ -1970,7 +2009,7 @@ export function VoiceoverStudio() {
   const renderGeneratePanel = () => {
     const latestRecentVoiceover = recentVoiceovers[0] ?? null
     const hasSelectedModel = !!selectedModel
-    const showVoiceProfileSelection = hasSelectedModel && !isVoxContinuationMode && requiresSavedVoiceProfile
+    const showVoiceProfileSelection = hasSelectedModel && requiresSavedVoiceProfile
     const selectedProfileTranscript = getProfileTranscriptSeed(selectedProfile)
     const scriptLabel = isVoxContinuationMode ? 'New Script' : 'Script'
     const scriptPlaceholder = isVoxContinuationMode
@@ -2000,10 +2039,16 @@ export function VoiceoverStudio() {
                 <div className="flex items-center gap-2">
                   {isActive && <span className="h-1.5 w-1.5 rounded-full bg-primary" />}
                   <span className="truncate text-sm font-semibold">{model.display_name}</span>
+                  {model.experimental && (
+                    <span className="rounded-full border border-amber-400/30 px-1.5 py-0.5 text-[10px] uppercase tracking-[0.18em] text-amber-200/80">
+                      Experimental
+                    </span>
+                  )}
                 </div>
-                <p className="mt-1 font-mono text-[11px] text-muted-foreground">
-                  {model.available ? model.model_id : 'unavailable'}
-                </p>
+                <p className="mt-1 font-mono text-[11px] text-muted-foreground">{model.available ? model.model_id : 'runtime unavailable'}</p>
+                {!model.available && model.availability_error && (
+                  <p className="mt-1 text-[11px] leading-5 text-amber-200/80">{model.availability_error}</p>
+                )}
               </button>
             )
           })}
@@ -2043,6 +2088,32 @@ export function VoiceoverStudio() {
             {selectedProfile.notes || selectedProfile.reference_transcript || 'Reference ready.'}
           </p>
         )}
+      </div>
+    )
+
+    const renderTranscriptField = () => (
+      <div className="space-y-2">
+        <div className="flex items-center justify-between gap-3">
+          <Label htmlFor="vox-prompt-text">Reference Transcript</Label>
+          {(voxContinuationUsesRecordedReference && voxRecordedReferenceId) ||
+          (!voxContinuationUsesRecordedReference && selectedProfileTranscript) ? (
+            <span className="rounded-full border border-white/[0.08] px-2 py-0.5 text-[11px] text-muted-foreground">
+              {voxContinuationUsesRecordedReference ? 'STT filled' : 'Profile filled'}
+            </span>
+          ) : null}
+        </div>
+        <Textarea
+          id="vox-prompt-text"
+          value={voxPromptText}
+          onChange={(event) => setVoxPromptText(event.target.value)}
+          placeholder={
+            voxContinuationUsesRecordedReference
+              ? 'ASR will fill this after recording.'
+              : 'Exact words spoken in the saved reference clip.'
+          }
+          rows={4}
+          className="min-h-[92px] border-white/[0.08] bg-[#0f1218]"
+        />
       </div>
     )
 
@@ -2143,39 +2214,26 @@ export function VoiceoverStudio() {
           </div>
         )}
 
-        <div className="space-y-2">
-          <div className="flex items-center justify-between gap-3">
-            <Label htmlFor="vox-prompt-text">Reference Transcript</Label>
-            {(voxContinuationUsesRecordedReference && voxRecordedReferenceId) ||
-            (!voxContinuationUsesRecordedReference && selectedProfileTranscript) ? (
-              <span className="rounded-full border border-white/[0.08] px-2 py-0.5 text-[11px] text-muted-foreground">
-                {voxContinuationUsesRecordedReference ? 'STT filled' : 'Profile filled'}
-              </span>
-            ) : null}
-          </div>
-          <Textarea
-            id="vox-prompt-text"
-            value={voxPromptText}
-            onChange={(event) => setVoxPromptText(event.target.value)}
-            placeholder={
-              voxContinuationUsesRecordedReference
-                ? 'ASR will fill this after recording.'
-                : 'Exact words spoken in the saved reference clip.'
-            }
-            rows={4}
-            className="min-h-[92px] border-white/[0.08] bg-[#0f1218]"
-          />
-        </div>
+        {renderTranscriptField()}
       </div>
     )
 
     const renderModeReferenceStep = () => {
-      if (!hasSelectedModel) return null
+      if (!hasSelectedModel || !selectedMode) return null
 
-      if (!isVoxModel) {
+      if (selectedModel.modes.length === 1 && !selectedModeSupportsRecordedReference) {
         return (
           <FlowStep number={2} title="Reference">
-            {renderProfilePicker()}
+            {selectedModeRequiresReference ? (
+              <div className="space-y-3">
+                {renderProfilePicker()}
+                {selectedModeRequiresTranscript && renderTranscriptField()}
+              </div>
+            ) : (
+                <div className="rounded-md border border-white/[0.06] bg-[#0f1218] px-3 py-2 text-sm text-muted-foreground">
+                  No reference needed.
+                </div>
+            )}
           </FlowStep>
         )
       }
@@ -2184,14 +2242,14 @@ export function VoiceoverStudio() {
         <FlowStep number={2} title="Mode / Reference">
           <div className="space-y-4">
             <div className="grid gap-2 md:grid-cols-3">
-              {VOX_MODE_OPTIONS.map((option) => {
-                const isActive = voxMode === option.value
+              {selectedModel.modes.map((mode) => {
+                const isActive = selectedMode.mode_id === mode.mode_id
                 return (
                   <button
-                    key={option.value}
+                    key={mode.mode_id}
                     type="button"
                     aria-pressed={isActive}
-                    onClick={() => setVoxMode(option.value)}
+                    onClick={() => setVoxMode(mode.mode_id)}
                     className={cn(
                       'rounded-lg border px-3 py-2.5 text-left transition-colors',
                       isActive
@@ -2199,21 +2257,24 @@ export function VoiceoverStudio() {
                         : 'border-white/[0.06] bg-[#0f1218] hover:border-white/[0.12] hover:bg-[#151823]',
                     )}
                   >
-                    <p className="text-sm font-semibold">{option.shortLabel}</p>
-                    <p className="mt-1 text-xs text-muted-foreground">{option.helper}</p>
+                    <p className="text-sm font-semibold">{mode.label}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">{mode.description}</p>
                   </button>
                 )
               })}
             </div>
 
-            {isVoxDesignMode ? (
+            {!selectedMode.requires_reference_audio ? (
               <div className="rounded-md border border-white/[0.06] bg-[#0f1218] px-3 py-2 text-sm text-muted-foreground">
                 No reference needed.
               </div>
-            ) : isVoxContinuationMode ? (
+            ) : selectedModeSupportsRecordedReference ? (
               renderContinuationReference()
             ) : (
-              renderProfilePicker()
+              <div className="space-y-3">
+                {renderProfilePicker()}
+                {selectedModeRequiresTranscript && renderTranscriptField()}
+              </div>
             )}
           </div>
         </FlowStep>
@@ -2270,14 +2331,14 @@ export function VoiceoverStudio() {
             </FlowStep>
           )}
 
-          {hasSelectedModel && isVoxModel && !isVoxContinuationMode && (
+          {hasSelectedModel && selectedModeSupportsStyle && (
             <details className="ml-0 rounded-lg border border-white/[0.06] bg-[#0f1218] p-3 sm:ml-[60px]" open={voxStyleText.trim().length > 0}>
               <summary className="cursor-pointer list-none text-sm font-semibold">Style / Control</summary>
               <Textarea
                 id="vox-style-text"
                 value={voxStyleText}
                 onChange={(event) => setVoxStyleText(event.target.value)}
-                placeholder="Warm, confident, slightly slower"
+                placeholder={selectedModeRequiresStyle ? 'Required for this mode.' : 'Warm, confident, slightly slower'}
                 rows={3}
                 className="mt-3 border-white/[0.08] bg-[#0a0c12]"
               />

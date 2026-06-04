@@ -11,7 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from gateway.voiceover.chunker import chunk_script
-from gateway.voiceover.models import FishSpeechModel, VoxCPM2Model
+from gateway.voiceover.models import FishSpeechModel, ModelRegistry, VoiceoverMode, VoxCPM2Model
 from gateway.voiceover.profiles import get_profile, save_profile
 from gateway.voiceover import models, profiles, runner
 
@@ -87,6 +87,40 @@ class _FakeVoxModel:
     model_id = runner.VOX_MODEL_ID
     display_name = "Vox fake"
     supports_reference_audio = True
+    supports_speed_control = True
+    modes = (
+        VoiceoverMode(
+            mode_id=runner.VOX_MODE_DESIGN,
+            label="Design",
+            description="Prompt-only design.",
+            requires_reference_audio=False,
+            supports_style_text=True,
+        ),
+        VoiceoverMode(
+            mode_id=runner.VOX_MODE_CLONE,
+            label="Clone",
+            description="Reference audio clone.",
+            requires_reference_audio=True,
+            supports_style_text=True,
+        ),
+        VoiceoverMode(
+            mode_id=runner.VOX_MODE_CONTINUATION,
+            label="Continue",
+            description="Continuation from transcript.",
+            requires_reference_audio=True,
+            requires_transcript=True,
+            supports_recorded_reference=True,
+        ),
+    )
+
+    def default_mode(self) -> str:
+        return runner.VOX_MODE_CLONE
+
+    def mode(self, mode_id: str):
+        for mode in self.modes:
+            if mode.mode_id == mode_id:
+                return mode
+        return None
 
     def synthesize(self, text: str, reference_audio_path: str | None, options: dict) -> bytes:
         output = Path(options.get("_test_output", "")) if options.get("_test_output") else None
@@ -155,6 +189,45 @@ def test_fish_reference_transcript_is_persisted_and_reused(monkeypatch, tmp_path
     assert synth_payloads[0]["prosody"] == {"speed": 1.0}
     assert synth_payloads[1]["prosody"] == {"speed": 1.0}
     assert get_profile(profile.id).reference_transcript == "This is the cached reference transcript."
+
+
+def test_model_registry_omits_disabled_optional_backends(monkeypatch):
+    monkeypatch.setenv("COSYVOICE3_ENABLED", "false")
+    monkeypatch.setenv("QWEN3TTS_ENABLED", "false")
+
+    model_ids = [model.model_id for model in ModelRegistry.all_models()]
+
+    assert "f5tts" in model_ids
+    assert "fish_speech" in model_ids
+    assert "voxcpm2" in model_ids
+    assert "cosyvoice3" not in model_ids
+    assert "qwen3tts" not in model_ids
+
+
+def test_model_registry_includes_enabled_optional_backends_with_capabilities(monkeypatch):
+    monkeypatch.setenv("COSYVOICE3_ENABLED", "true")
+    monkeypatch.setenv("QWEN3TTS_ENABLED", "true")
+
+    models_by_id = {model.model_id: model for model in ModelRegistry.all_models()}
+
+    cosyvoice = models_by_id["cosyvoice3"]
+    qwen = models_by_id["qwen3tts"]
+
+    assert cosyvoice.supports_reference_audio is True
+    assert cosyvoice.supports_transcript is True
+    assert cosyvoice.supports_style_text is False
+    assert cosyvoice.supports_voice_design is False
+    assert cosyvoice.supports_seed is False
+    assert cosyvoice.experimental is True
+    assert [mode.mode_id for mode in cosyvoice.modes] == ["clone"]
+
+    assert qwen.supports_reference_audio is True
+    assert qwen.supports_transcript is True
+    assert qwen.supports_style_text is True
+    assert qwen.supports_voice_design is True
+    assert qwen.supports_seed is False
+    assert qwen.experimental is True
+    assert [mode.mode_id for mode in qwen.modes] == ["clone", "design"]
 
 
 def test_run_voiceover_job_writes_metadata_and_script_slug_filename(monkeypatch, tmp_path: Path):
@@ -226,6 +299,7 @@ def test_vox_clone_mode_sends_reference_audio_without_prompt_text(monkeypatch, t
     assert captured["url"] == "http://voxcpm2:8000/synthesize"
     assert captured["data"] == {
         "text": "(warm, steady delivery)This is a clean clone.",
+        "voice_mode": runner.VOX_MODE_CLONE,
         "vox_mode": runner.VOX_MODE_CLONE,
         "speed": "1.15",
     }
@@ -260,6 +334,7 @@ def test_vox_continuation_mode_sends_prompt_text_when_explicitly_requested(monke
     assert output == b"RIFFfake"
     assert captured["data"] == {
         "text": "Continue from the same thought.",
+        "voice_mode": runner.VOX_MODE_CONTINUATION,
         "vox_mode": runner.VOX_MODE_CONTINUATION,
         "prompt_text": "This is the exact transcript of the saved clip.",
         "speed": "0.95",

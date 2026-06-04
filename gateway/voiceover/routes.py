@@ -56,6 +56,7 @@ class CreateVoiceoverJobRequest(BaseModel):
     temp_reference_id: str | None = None
     script: str
     model_id: str
+    voice_mode: str | None = None
     output_format: str = "wav"
     speed: float = 1.0
     vox_mode: str | None = None
@@ -86,7 +87,10 @@ def _output_host_path_to_container(path_value: str | Path) -> Path:
 
 
 def _get_redis_client():
-    import app as gateway_app
+    try:
+        import app as gateway_app
+    except Exception:
+        return None
 
     return gateway_app.rdb
 
@@ -580,12 +584,22 @@ async def voice_profile_sample(profile_id: str):
 async def list_voiceover_models():
     items = []
     for model in ModelRegistry.all_models():
+        available = model.is_available()
         items.append(
             {
                 "model_id": model.model_id,
                 "display_name": model.display_name,
                 "supports_reference_audio": model.supports_reference_audio,
-                "available": model.is_available(),
+                "supports_transcript": model.supports_transcript,
+                "supports_style_text": model.supports_style_text,
+                "supports_voice_design": model.supports_voice_design,
+                "supports_seed": model.supports_seed,
+                "supports_speed_control": model.supports_speed_control,
+                "experimental": model.experimental,
+                "available": available,
+                "availability_error": "" if available else model.availability_error(),
+                "default_mode": model.default_mode(),
+                "modes": [mode.to_summary() for mode in model.modes],
             }
         )
     return items
@@ -625,12 +639,10 @@ async def create_voiceover_job(request: CreateVoiceoverJobRequest, background_ta
     if not model.is_available():
         raise HTTPException(422, model.availability_error())
 
-    is_vox_model = request.model_id == VOX_MODEL_ID
-    vox_mode = str(request.vox_mode or VOX_MODE_CLONE).strip().lower() or VOX_MODE_CLONE
-    if is_vox_model and vox_mode not in VALID_VOX_MODES:
-        raise HTTPException(422, "Vox mode must be design, clone, or continuation")
-    if request.temp_reference_id and (not is_vox_model or vox_mode != VOX_MODE_CONTINUATION):
-        raise HTTPException(422, "Temporary recorded references are only supported for Vox continuation mode")
+    requested_mode = str(request.voice_mode or request.vox_mode or model.default_mode()).strip().lower() or model.default_mode()
+    selected_mode = model.mode(requested_mode)
+    if selected_mode is None:
+        raise HTTPException(422, f"{model.display_name} does not support {requested_mode} mode")
 
     cleaned_prompt_text = str(request.prompt_text or "").strip() or None
     cleaned_style_text = str(request.style_text or "").strip() or None
@@ -639,32 +651,35 @@ async def create_voiceover_job(request: CreateVoiceoverJobRequest, background_ta
     temp_reference_path = _get_temp_reference_path(request.temp_reference_id)
     if request.temp_reference_id and temp_reference_path is None:
         raise HTTPException(422, "Recorded reference clip does not exist")
+    if request.temp_reference_id and not selected_mode.supports_recorded_reference:
+        raise HTTPException(422, "Temporary recorded references are not supported for the selected mode")
 
-    if is_vox_model:
-        if vox_mode == VOX_MODE_CLONE:
-            if not request.voice_profile_id:
-                raise HTTPException(422, "Vox clone mode requires a saved voice profile")
-
-            profile = get_profile(request.voice_profile_id)
-            if profile is None:
-                raise HTTPException(422, "Selected voice profile does not exist")
-        elif vox_mode == VOX_MODE_CONTINUATION and temp_reference_path is None:
-            if not request.voice_profile_id:
-                raise HTTPException(422, "Vox continuation mode requires a saved voice profile or recorded reference clip")
-
-            profile = get_profile(request.voice_profile_id)
-            if profile is None:
-                raise HTTPException(422, "Selected voice profile does not exist")
-
-        if vox_mode == VOX_MODE_CONTINUATION and not cleaned_prompt_text:
-            raise HTTPException(422, "Vox continuation mode requires the exact transcript of the reference clip")
-    else:
+    if selected_mode.requires_reference_audio and temp_reference_path is None:
         if not request.voice_profile_id:
+            if request.model_id == VOX_MODEL_ID and selected_mode.mode_id == VOX_MODE_CLONE:
+                raise HTTPException(422, "Vox clone mode requires a saved voice profile")
+            if request.model_id == VOX_MODEL_ID and selected_mode.mode_id == VOX_MODE_CONTINUATION:
+                raise HTTPException(422, "Vox continuation mode requires a saved voice profile or recorded reference clip")
             raise HTTPException(422, "This model requires a saved voice profile")
 
         profile = get_profile(request.voice_profile_id)
         if profile is None:
             raise HTTPException(422, "Selected voice profile does not exist")
+
+    if selected_mode.requires_transcript and not cleaned_prompt_text and profile is not None:
+        seeded_transcript = str(profile.reference_transcript or "").strip()
+        if seeded_transcript:
+            cleaned_prompt_text = seeded_transcript or None
+
+    if selected_mode.requires_transcript and not cleaned_prompt_text:
+        if request.model_id == VOX_MODEL_ID and selected_mode.mode_id == VOX_MODE_CONTINUATION:
+            raise HTTPException(422, "Vox continuation mode requires the exact transcript of the reference clip")
+        raise HTTPException(422, f"{selected_mode.label} mode requires the exact transcript of the reference clip")
+
+    if cleaned_style_text and not selected_mode.supports_style_text:
+        raise HTTPException(422, f"{selected_mode.label} mode does not accept style/control text")
+    if selected_mode.requires_style_text and not cleaned_style_text:
+        raise HTTPException(422, f"{selected_mode.label} mode requires style/control text")
 
     script = request.script.strip()
     if not script:
@@ -704,9 +719,9 @@ async def create_voiceover_job(request: CreateVoiceoverJobRequest, background_ta
         output_format,
         speed,
         redis_client,
-        vox_mode if is_vox_model else None,
-        cleaned_prompt_text if is_vox_model else None,
-        cleaned_style_text if is_vox_model else None,
+        selected_mode.mode_id,
+        cleaned_prompt_text,
+        cleaned_style_text,
         str(staged_reference_path) if staged_reference_path is not None else None,
         "Recorded Reference" if temp_reference_path is not None else None,
     )

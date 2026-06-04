@@ -467,7 +467,7 @@ def _wav_duration_seconds(path: Path) -> float | None:
 
 
 def _model_provider(model_id: str) -> str:
-    if model_id in {"f5tts", "fish_speech", VOX_MODEL_ID}:
+    if model_id in {"f5tts", "fish_speech", VOX_MODEL_ID, "cosyvoice3", "qwen3tts"}:
         return "local"
     return "unknown"
 
@@ -562,21 +562,28 @@ async def run_voiceover_job(
             await _update_job(redis_client, job_key, status="failed", error="Requested model was not found")
             return
 
-        effective_vox_mode = (vox_mode or VOX_MODE_CLONE).strip().lower() or VOX_MODE_CLONE
-        if model_id != VOX_MODEL_ID:
-            effective_vox_mode = VOX_MODE_CLONE
+        effective_voice_mode = str(vox_mode or model.default_mode()).strip().lower() or model.default_mode()
+        selected_mode = model.mode(effective_voice_mode)
+        if selected_mode is None:
+            await _update_job(
+                redis_client,
+                job_key,
+                status="failed",
+                error=f"{model.display_name} does not support {effective_voice_mode} mode",
+            )
+            return
 
-        chunks = _build_voiceover_chunks(script, model_id=model_id, vox_mode=effective_vox_mode)
+        chunks = _build_voiceover_chunks(script, model_id=model_id, vox_mode=effective_voice_mode)
         synthesis_chunks = [chunk for chunk in chunks if not chunk.get("is_pause")]
         total_chunks = len(synthesis_chunks)
         if model_id == VOX_MODEL_ID:
             log.info(
                 "Vox job %s: vox_mode=%s single_pass=%s chunk_count=%s continuation=%s",
                 job_id,
-                effective_vox_mode,
+                effective_voice_mode,
                 len(chunks) == 1 and total_chunks == 1,
                 total_chunks,
-                effective_vox_mode == VOX_MODE_CONTINUATION,
+                effective_voice_mode == VOX_MODE_CONTINUATION,
             )
         if total_chunks == 0:
             await _update_job(redis_client, job_key, status="failed", error="Script did not produce any synthesis chunks")
@@ -597,25 +604,27 @@ async def run_voiceover_job(
         rendered_chunk_paths: list[Path] = []
         resolved_reference_audio_path = reference_audio_path or (profile.reference_audio_path if profile else None)
         model_options: dict[str, Any] = {}
-        if model_id in {"f5tts", FISH_MODEL_ID, VOX_MODEL_ID}:
+        if model.supports_speed_control:
             model_options["speed"] = speed
         if model_id == FISH_MODEL_ID:
             if profile is None:
                 await _update_job(redis_client, job_key, status="failed", error="Voice profile not found")
                 return
             model_options["voice_profile_id"] = profile.id
-        elif model_id == VOX_MODEL_ID:
-            if effective_vox_mode == VOX_MODE_DESIGN:
-                resolved_reference_audio_path = None
-            model_options["vox_mode"] = effective_vox_mode
+        if not selected_mode.requires_reference_audio:
+            resolved_reference_audio_path = None
 
-            cleaned_prompt_text = (prompt_text or "").strip()
-            if effective_vox_mode == VOX_MODE_CONTINUATION and cleaned_prompt_text:
-                model_options["prompt_text"] = cleaned_prompt_text
+        model_options["voice_mode"] = effective_voice_mode
+        if model_id == VOX_MODEL_ID:
+            model_options["vox_mode"] = effective_voice_mode
 
-            cleaned_style_text = (style_text or "").strip()
-            if effective_vox_mode != VOX_MODE_CONTINUATION and cleaned_style_text:
-                model_options["style_text"] = cleaned_style_text
+        cleaned_prompt_text = (prompt_text or "").strip()
+        if cleaned_prompt_text:
+            model_options["prompt_text"] = cleaned_prompt_text
+
+        cleaned_style_text = (style_text or "").strip()
+        if cleaned_style_text:
+            model_options["style_text"] = cleaned_style_text
 
         for chunk_index, chunk in enumerate(chunks, start=1):
             if chunk.get("is_pause"):
@@ -678,7 +687,7 @@ async def run_voiceover_job(
             final_output_path,
             created_at=metadata_created_at,
             model_id=model_id,
-            voice_mode=effective_vox_mode if model_id == VOX_MODEL_ID else "clone",
+            voice_mode=effective_voice_mode,
             profile=profile,
             reference_audio_path=reference_audio_path,
             reference_label=reference_label,

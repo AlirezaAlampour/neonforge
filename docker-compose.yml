@@ -107,8 +107,12 @@ services:
       F5TTS_URL: http://f5tts:8000
       FISH_SPEECH_ENABLED: ${FISH_SPEECH_ENABLED:-false}
       FISH_SPEECH_INTERNAL_URL: ${FISH_SPEECH_INTERNAL_URL:-http://fish_speech:8000}
+      COSYVOICE3_ENABLED: ${COSYVOICE3_ENABLED:-false}
+      COSYVOICE3_INTERNAL_URL: ${COSYVOICE3_INTERNAL_URL:-http://cosyvoice3:8000}
       LIVEPORTRAIT_URL: http://liveportrait:8000
       LIPSYNC_URL: http://lipsync:8000
+      QWEN3TTS_ENABLED: ${QWEN3TTS_ENABLED:-false}
+      QWEN3TTS_INTERNAL_URL: ${QWEN3TTS_INTERNAL_URL:-http://qwen3tts:8000}
       VOXCPM2_ENABLED: ${VOXCPM2_ENABLED:-false}
       VOXCPM2_INTERNAL_URL: ${VOXCPM2_INTERNAL_URL:-http://voxcpm2:8000}
       WAN21_URL: http://wan21:8000
@@ -232,6 +236,42 @@ services:
       interval: 30s
       timeout: 60s
       retries: 3
+      start_period: 180s
+    networks:
+      - ai-net
+
+  cosyvoice3:
+    build:
+      context: ./services/cosyvoice3
+      dockerfile: Dockerfile
+    container_name: ai-cosyvoice3
+    restart: unless-stopped
+    <<: *common-gpu
+    environment:
+      <<: *common-env
+      COSYVOICE3_MODEL_DIR: ${COSYVOICE3_MODEL_DIR:-/models/voice/cosyvoice3}
+    volumes: *common-volumes
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      <<: *healthcheck-defaults
+      start_period: 180s
+    networks:
+      - ai-net
+
+  qwen3tts:
+    build:
+      context: ./services/qwen3tts
+      dockerfile: Dockerfile
+    container_name: ai-qwen3tts
+    restart: unless-stopped
+    <<: *common-gpu
+    environment:
+      <<: *common-env
+      QWEN3TTS_MODEL_DIR: ${QWEN3TTS_MODEL_DIR:-/models/voice/qwen3tts}
+    volumes: *common-volumes
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      <<: *healthcheck-defaults
       start_period: 180s
     networks:
       - ai-net

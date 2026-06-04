@@ -5,22 +5,31 @@ ROOT = Path(__file__).resolve().parents[1]
 VOICEOVER_STUDIO_PATH = ROOT / "frontend" / "components" / "VoiceoverStudio.tsx"
 
 
-def test_voiceover_studio_has_vox_only_mode_controls_and_fields():
+def test_voiceover_studio_uses_backend_capability_flags_for_mode_controls_and_fields():
     source = VOICEOVER_STUDIO_PATH.read_text(encoding="utf-8")
 
+    assert "interface VoiceoverModeSummary" in source
+    assert "supports_transcript: boolean" in source
+    assert "supports_style_text: boolean" in source
+    assert "supports_voice_design: boolean" in source
+    assert "supports_speed_control: boolean" in source
+    assert "availability_error: string" in source
+    assert "default_mode: string" in source
+    assert "modes: VoiceoverModeSummary[]" in source
+    assert "const selectedMode = useMemo" in source
+    assert "const selectedModeRequiresTranscript = !!selectedMode?.requires_transcript" in source
+    assert "const selectedModeSupportsStyle = !!selectedMode?.supports_style_text" in source
+    assert "const selectedModeSupportsRecordedReference = !!selectedMode?.supports_recorded_reference" in source
+    assert "const supportsSpeedControl = !!selectedModel?.supports_speed_control" in source
+    assert "payload.voice_mode = selectedMode.mode_id" in source
+    assert "runtime unavailable" in source
+    assert "model.availability_error" in source
     assert "const isVoxModel = selectedModel?.model_id === VOX_MODEL_ID" in source
-    assert "hasSelectedModel && isVoxModel && (" in source
-    assert "label: 'Design'" in source
-    assert "label: 'Clone'" in source
-    assert "label: 'Continue'" in source
-    assert "hasSelectedModel && isVoxModel && !isVoxContinuationMode && (" in source
-    assert "hasSelectedModel && isVoxContinuationMode && (" in source
     assert "handleUseSavedVoiceProfile" in source
-    assert "Record Reference" in source
+    assert "Recorded reference ready." in source
     assert "Style / Control" in source
     assert "Reference Transcript" in source
     assert "payload.vox_mode = voxMode" in source
-    assert "payload.prompt_text = trimmedVoxPromptText" in source
     assert "payload.temp_reference_id = voxRecordedReferenceId" in source
     assert "/api/v1/voiceover/temp-reference" in source
 
@@ -71,7 +80,6 @@ def test_voiceover_studio_uses_profile_reference_transcripts_for_profiles_and_co
     assert "lastAutoSeededVoxPromptRef" in source
     assert "Profile filled" in source
     assert "Reference Transcript" in source
-    assert "Stored transcript:" in source
     assert "return profile.reference_transcript?.trim() || ''" in source
 
 
