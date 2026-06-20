@@ -16,6 +16,28 @@ interface FileDropzoneProps {
   icon?: 'audio' | 'image' | 'video'
 }
 
+function isAcceptedFileType(file: File, accept: string): boolean {
+  const acceptedTypes = accept
+    .split(',')
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean)
+  if (acceptedTypes.length === 0) return true
+
+  const fileType = file.type.toLowerCase()
+  const fileName = file.name.toLowerCase()
+
+  return acceptedTypes.some((acceptedType) => {
+    if (acceptedType.endsWith('/*')) {
+      const [acceptedGroup] = acceptedType.split('/')
+      return fileType.startsWith(`${acceptedGroup}/`)
+    }
+    if (acceptedType.startsWith('.')) {
+      return fileName.endsWith(acceptedType)
+    }
+    return fileType === acceptedType
+  })
+}
+
 export function FileDropzone({
   accept,
   label,
@@ -31,13 +53,17 @@ export function FileDropzone({
   const validateAndSet = useCallback(
     (f: File) => {
       setError(null)
+      if (!isAcceptedFileType(f, accept)) {
+        setError('File type is not supported for this field')
+        return
+      }
       if (f.size > maxSizeMB * 1024 * 1024) {
         setError(`File too large (max ${maxSizeMB} MB)`)
         return
       }
       onFileChange(f)
     },
-    [maxSizeMB, onFileChange],
+    [accept, maxSizeMB, onFileChange],
   )
 
   const handleDrop = useCallback(
@@ -95,6 +121,7 @@ export function FileDropzone({
           type="file"
           accept={accept}
           className="hidden"
+          aria-label={label}
           onChange={(e) => {
             const f = e.target.files?.[0]
             if (f) validateAndSet(f)
