@@ -12,9 +12,9 @@ jobs:
   control-plane:
     runs-on: ubuntu-latest
     env:
-      OUTPUTS_ROOT: ${{ runner.temp }}/neonforge-test-outputs
-      HISTORY_DB_PATH: ${{ runner.temp }}/neonforge-test-outputs/history.sqlite3
-      ASSETS_ROOT: ${{ runner.temp }}/neonforge-test-assets
+      OUTPUTS_ROOT: /tmp/neonforge-test-outputs
+      HISTORY_DB_PATH: /tmp/neonforge-test-outputs/history.sqlite3
+      ASSETS_ROOT: /tmp/neonforge-test-assets
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.2.0
