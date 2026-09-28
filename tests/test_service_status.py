@@ -1,7 +1,12 @@
 import asyncio
+import os
 import sys
 from pathlib import Path
 
+
+os.environ.setdefault("OUTPUTS_ROOT", "/tmp/neonforge-test-outputs")
+os.environ.setdefault("HISTORY_DB_PATH", "/tmp/neonforge-test-outputs/history.sqlite3")
+os.environ.setdefault("ASSETS_ROOT", "/tmp/neonforge-test-assets")
 
 GATEWAY_ROOT = Path(__file__).resolve().parents[1] / "gateway"
 if str(GATEWAY_ROOT) not in sys.path:
