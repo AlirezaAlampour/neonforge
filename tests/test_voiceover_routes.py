@@ -335,6 +335,150 @@ class _FakeModel:
         return "unavailable"
 
 
+class _FakeProviderModel(_FakeModel):
+    def __init__(self, model_id: str, *, display_name: str | None = None, available: bool = True) -> None:
+        super().__init__(model_id)
+        if display_name is not None:
+            self.display_name = display_name
+        self._available = available
+
+    def is_available(self) -> bool:
+        return self._available
+
+
+def test_list_voiceover_providers_returns_rich_misotts_metadata_even_when_unavailable(monkeypatch):
+    miso_model = _FakeProviderModel("misotts", display_name="MisoTTS 8B", available=False)
+    monkeypatch.setattr(routes.ModelRegistry, "all_models", lambda: [miso_model])
+    monkeypatch.setattr(
+        routes,
+        "_provider_status_summary",
+        lambda model: {
+            "status": "unavailable",
+            "status_badge": "Service offline",
+            "status_detail": "The dedicated MisoTTS service is not reachable.",
+            "available": False,
+            "gpu_device_name": "NVIDIA GB10",
+            "gpu_total_vram_gb": 121.69,
+            "gpu_free_vram_gb": 1.3,
+            "top_gpu_process": {"pid": 4835, "process_name": "python", "used_memory_mib": 19479},
+            "actionable_hint": "Stop Qwen/Vox/Jupyter/LLM service to free GPU memory.",
+        },
+    )
+    client = _build_client()
+
+    response = client.get("/api/v1/voiceover/providers")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "id": "misotts",
+            "name": "MisoTTS 8B",
+            "type": "text-to-speech",
+            "runtime": "dedicated-service",
+            "supports_plain_tts": True,
+            "supports_prompt_audio": True,
+            "requires_prompt_transcript": True,
+            "default_max_audio_length_ms": 10000,
+            "capability_label": "Text / Prompt",
+            "modes": ["plain", "prompted"],
+            "license_note": None,
+            "status": "unavailable",
+            "status_badge": "Service offline",
+            "status_detail": "The dedicated MisoTTS service is not reachable.",
+            "available": False,
+            "gpu_device_name": "NVIDIA GB10",
+            "gpu_total_vram_gb": 121.69,
+            "gpu_free_vram_gb": 1.3,
+            "top_gpu_process": {"pid": 4835, "process_name": "python", "used_memory_mib": 19479},
+            "actionable_hint": "Stop Qwen/Vox/Jupyter/LLM service to free GPU memory.",
+        }
+    ]
+
+
+def test_list_voiceover_models_preserves_unavailable_misotts_for_legacy_clients(monkeypatch):
+    miso_model = _FakeProviderModel("misotts", display_name="MisoTTS 8B", available=False)
+    monkeypatch.setattr(routes.ModelRegistry, "all_models", lambda: [miso_model])
+    client = _build_client()
+
+    response = client.get("/api/v1/voiceover/models")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "model_id": "misotts",
+            "display_name": "MisoTTS 8B",
+            "supports_reference_audio": True,
+            "available": False,
+            "status": "unavailable",
+            "status_badge": "Service offline",
+            "status_detail": "The dedicated MisoTTS service is not reachable.",
+            "capability_label": "Text / Prompt",
+            "modes": ["plain", "prompted"],
+        }
+    ]
+
+
+def test_misotts_status_summary_maps_device_mismatch_to_model_runtime_error(monkeypatch):
+    class _FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "runtime_status": "error",
+                "error": (
+                    "MisoTTS hit a model runtime device mismatch between CUDA and CPU tensors. "
+                    "Original error: Expected all tensors to be on the same device, but found at least "
+                    "two devices, cuda:0 and cpu!"
+                ),
+                "diagnostics": {
+                    "gpu_device": "NVIDIA GB10",
+                    "gpu_total_gb": 121.69,
+                    "gpu_free_gb": 12.56,
+                    "top_gpu_process": {
+                        "pid": 50,
+                        "process_name": "/opt/venv/bin/python3",
+                        "used_memory_mib": 16323,
+                    },
+                    "actionable_hint": "If free VRAM drops too low, stop Qwen/Vox/Jupyter/LLM service to free GPU memory.",
+                },
+            }
+
+    monkeypatch.setattr(routes.httpx, "get", lambda *args, **kwargs: _FakeResponse())
+    model = _FakeProviderModel("misotts", display_name="MisoTTS 8B", available=True)
+    model.base_url = "http://misotts:8000"
+
+    summary = routes._misotts_status_summary(model)
+
+    assert summary["status"] == "error"
+    assert summary["status_badge"] == "Model runtime error"
+    assert summary["gpu_free_vram_gb"] == 12.56
+
+
+@pytest.mark.parametrize(
+    "runtime_status, expected_status, expected_badge, available",
+    [
+        ("disabled", "disabled", "Disabled", False),
+        ("unavailable", "unavailable", "Service offline", False),
+        ("loading", "loading", "Loading model", False),
+        ("ready", "ready", "Ready", True),
+        ("error", "error", "Runtime error", False),
+    ],
+)
+def test_breeze_status_summary_distinguishes_runtime_states(runtime_status, expected_status, expected_badge, available):
+    model = _FakeProviderModel("breeze_tts", display_name="Breeze TTS 2", available=available)
+    model.health_payload = lambda: {
+        "runtime_status": runtime_status,
+        "error": "Model load failed" if runtime_status == "error" else None,
+    }
+
+    summary = routes._breeze_status_summary(model)
+
+    assert summary["status"] == expected_status
+    assert summary["status_badge"] == expected_badge
+    assert summary["available"] is available
+
+
 def _fake_profile(profile_id: str = "profile-1") -> profiles.VoiceProfile:
     return profiles.VoiceProfile(
         id=profile_id,
@@ -363,6 +507,12 @@ def _configure_job_creation(monkeypatch, *, model_id: str):
         style_text=None,
         reference_audio_path=None,
         reference_label=None,
+        speaker_id=None,
+        max_audio_length_ms=None,
+        breeze_mode=None,
+        instruction=None,
+        cfg_scale=None,
+        seed=None,
     ) -> None:
         captured.update(
             {
@@ -378,6 +528,12 @@ def _configure_job_creation(monkeypatch, *, model_id: str):
                 "style_text": style_text,
                 "reference_audio_path": reference_audio_path,
                 "reference_label": reference_label,
+                "speaker_id": speaker_id,
+                "max_audio_length_ms": max_audio_length_ms,
+                "breeze_mode": breeze_mode,
+                "instruction": instruction,
+                "cfg_scale": cfg_scale,
+                "seed": seed,
             }
         )
 
@@ -609,6 +765,228 @@ def test_create_voiceover_job_still_requires_profile_for_f5(monkeypatch, tmp_pat
 
     assert response.status_code == 422
     assert response.json()["detail"] == "This model requires a saved voice profile"
+
+
+def test_create_voiceover_job_allows_misotts_without_profile(monkeypatch, tmp_path: Path):
+    _configure_voice_profile_storage(monkeypatch, tmp_path)
+    _, captured = _configure_job_creation(monkeypatch, model_id="misotts")
+    monkeypatch.setattr(routes, "get_profile", lambda profile_id: pytest.fail("Plain MisoTTS should not require a saved profile"))
+    client = _build_client()
+
+    response = client.post(
+        "/api/v1/voiceover/jobs",
+        json={
+            "script": "Plain Miso narration.",
+            "model_id": "misotts",
+            "output_format": "wav",
+            "speed": 1.0,
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["profile_id"] is None
+    assert captured["prompt_text"] is None
+    assert captured["speaker_id"] is None
+    assert captured["max_audio_length_ms"] is None
+
+
+def test_create_voiceover_job_accepts_misotts_prompt_profile_with_transcript_override(monkeypatch, tmp_path: Path):
+    _configure_voice_profile_storage(monkeypatch, tmp_path)
+    _, captured = _configure_job_creation(monkeypatch, model_id="misotts")
+    profile = _fake_profile()
+    monkeypatch.setattr(routes, "get_profile", lambda profile_id: profile if profile_id == profile.id else None)
+    client = _build_client()
+
+    response = client.post(
+        "/api/v1/voiceover/jobs",
+        json={
+            "voice_profile_id": profile.id,
+            "script": "Condition this on the saved profile.",
+            "model_id": "misotts",
+            "prompt_text": "This is the exact transcript of the saved prompt audio.",
+            "speaker_id": 2,
+            "max_audio_length_ms": 12000,
+            "output_format": "wav",
+            "speed": 1.0,
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["profile_id"] == profile.id
+    assert captured["prompt_text"] == "This is the exact transcript of the saved prompt audio."
+    assert captured["speaker_id"] == 2
+    assert captured["max_audio_length_ms"] == 12000
+
+
+def test_create_voiceover_job_rejects_misotts_prompt_profile_without_transcript(monkeypatch, tmp_path: Path):
+    _configure_voice_profile_storage(monkeypatch, tmp_path)
+    _configure_job_creation(monkeypatch, model_id="misotts")
+    profile = _fake_profile()
+    monkeypatch.setattr(routes, "get_profile", lambda profile_id: profile if profile_id == profile.id else None)
+    client = _build_client()
+
+    response = client.post(
+        "/api/v1/voiceover/jobs",
+        json={
+            "voice_profile_id": profile.id,
+            "script": "Condition this on the saved profile.",
+            "model_id": "misotts",
+            "output_format": "wav",
+            "speed": 1.0,
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "MisoTTS voice prompting requires the exact transcript of the reference clip"
+
+
+def test_create_voiceover_job_accepts_breeze_design_and_propagates_seed_cfg(monkeypatch, tmp_path: Path):
+    _configure_voice_profile_storage(monkeypatch, tmp_path)
+    _, captured = _configure_job_creation(monkeypatch, model_id="breeze_tts")
+    client = _build_client()
+
+    response = client.post(
+        "/api/v1/voiceover/jobs",
+        json={
+            "script": "A short designed voice sample.",
+            "model_id": "breeze_tts",
+            "breeze_mode": "design",
+            "instruction": "A warm, thoughtful creator voice.",
+            "cfg_scale": 4.25,
+            "seed": 112233,
+            "output_format": "wav",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["profile_id"] is None
+    assert captured["breeze_mode"] == "design"
+    assert captured["instruction"] == "A warm, thoughtful creator voice."
+    assert captured["cfg_scale"] == 4.25
+    assert captured["seed"] == 112233
+
+
+def test_create_voiceover_job_reuses_profile_transcript_for_breeze_clone(monkeypatch, tmp_path: Path):
+    _configure_voice_profile_storage(monkeypatch, tmp_path)
+    _, captured = _configure_job_creation(monkeypatch, model_id="breeze_tts")
+    profile = profiles.save_profile(
+        name="Narrator",
+        audio_bytes=b"RIFFfake",
+        stored_filename="reference.wav",
+        notes=None,
+        reference_transcript="This transcript is stored with the profile.",
+    )
+    client = _build_client()
+
+    response = client.post(
+        "/api/v1/voiceover/jobs",
+        json={
+            "voice_profile_id": profile.id,
+            "script": "Clone this voice.",
+            "model_id": "breeze_tts",
+            "breeze_mode": "clone",
+            "seed": 77,
+            "output_format": "wav",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["profile_id"] == profile.id
+    assert captured["breeze_mode"] == "clone"
+    assert captured["prompt_text"] == "This transcript is stored with the profile."
+    assert captured["instruction"] is None
+    assert captured["cfg_scale"] is None
+    assert captured["seed"] == 77
+
+
+def test_create_voiceover_job_accepts_breeze_direction_and_persists_transcript_edit(monkeypatch, tmp_path: Path):
+    _configure_voice_profile_storage(monkeypatch, tmp_path)
+    _, captured = _configure_job_creation(monkeypatch, model_id="breeze_tts")
+    profile = profiles.save_profile(
+        name="Narrator",
+        audio_bytes=b"RIFFfake",
+        stored_filename="reference.wav",
+        notes=None,
+        reference_transcript="Old transcript.",
+    )
+    client = _build_client()
+
+    response = client.post(
+        "/api/v1/voiceover/jobs",
+        json={
+            "voice_profile_id": profile.id,
+            "script": "Direct this voice.",
+            "model_id": "breeze_tts",
+            "breeze_mode": "direction",
+            "prompt_text": "Corrected exact transcript.",
+            "instruction": "Keep the identity and sound energetic.",
+            "cfg_scale": 4,
+            "seed": 42,
+            "output_format": "wav",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["breeze_mode"] == "direction"
+    assert captured["prompt_text"] == "Corrected exact transcript."
+    assert captured["instruction"] == "Keep the identity and sound energetic."
+    assert captured["cfg_scale"] == 4
+    assert captured["seed"] == 42
+    assert profiles.get_profile(profile.id).reference_transcript == "Corrected exact transcript."
+
+
+def test_create_voiceover_job_rejects_breeze_reference_without_transcript(monkeypatch, tmp_path: Path):
+    _configure_voice_profile_storage(monkeypatch, tmp_path)
+    _configure_job_creation(monkeypatch, model_id="breeze_tts")
+    profile = profiles.save_profile(
+        name="Narrator",
+        audio_bytes=b"RIFFfake",
+        stored_filename="reference.wav",
+        notes=None,
+    )
+    client = _build_client()
+
+    response = client.post(
+        "/api/v1/voiceover/jobs",
+        json={
+            "voice_profile_id": profile.id,
+            "script": "This must not run.",
+            "model_id": "breeze_tts",
+            "breeze_mode": "clone",
+            "output_format": "wav",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "exact reference transcript" in response.json()["detail"]
+
+
+def test_create_voiceover_job_rejects_instruction_in_breeze_clone(monkeypatch, tmp_path: Path):
+    _configure_voice_profile_storage(monkeypatch, tmp_path)
+    _configure_job_creation(monkeypatch, model_id="breeze_tts")
+    profile = profiles.save_profile(
+        name="Narrator",
+        audio_bytes=b"RIFFfake",
+        stored_filename="reference.wav",
+        notes=None,
+        reference_transcript="Exact transcript.",
+    )
+    client = _build_client()
+
+    response = client.post(
+        "/api/v1/voiceover/jobs",
+        json={
+            "voice_profile_id": profile.id,
+            "script": "This should be direction, not clone.",
+            "model_id": "breeze_tts",
+            "breeze_mode": "clone",
+            "instruction": "Sound energetic.",
+            "output_format": "wav",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "select Direction mode" in response.json()["detail"]
 
 
 def test_recent_outputs_include_metadata_and_script_downloads(monkeypatch, tmp_path: Path):

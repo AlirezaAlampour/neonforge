@@ -60,6 +60,21 @@ def _build_vox_text(text: str, style_text: str | None) -> str:
     return f"({cleaned_style}){cleaned_text}"
 
 
+def _response_detail(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+    except Exception:
+        payload = None
+
+    if isinstance(payload, dict):
+        detail = payload.get("detail")
+        if isinstance(detail, str) and detail.strip():
+            return detail.strip()
+
+    body = response.text.strip()
+    return body or f"HTTP {response.status_code}"
+
+
 class VoiceoverModel(ABC):
     @property
     @abstractmethod
@@ -392,6 +407,198 @@ class VoxCPM2Model(_HTTPVoiceoverModel):
         return response.content
 
 
+class MisoTTSModel(VoiceoverModel):
+    @property
+    def model_id(self) -> str:
+        return "misotts"
+
+    @property
+    def display_name(self) -> str:
+        return "MisoTTS 8B (Local)"
+
+    @property
+    def supports_reference_audio(self) -> bool:
+        return True
+
+    @property
+    def base_url(self) -> str:
+        return os.getenv("MISOTTS_BASE_URL") or os.getenv("MISOTTS_INTERNAL_URL", "http://misotts:8000")
+
+    def is_available(self) -> bool:
+        return _service_reachable(self.base_url)
+
+    def availability_error(self) -> str:
+        return "MisoTTS is unreachable right now"
+
+    def synthesize(self, text: str, reference_audio_path: str | None, options: dict[str, Any]) -> bytes:
+        if not self.is_available():
+            raise ModelUnavailableError(self.availability_error())
+
+        speaker_id = options.get("speaker_id")
+        max_audio_length_ms = options.get("max_audio_length_ms")
+        prompt_text = str(options.get("prompt_text") or "").strip()
+
+        data = {"text": text.strip()}
+        if speaker_id is not None:
+            data["speaker"] = str(int(speaker_id))
+        if max_audio_length_ms is not None:
+            data["max_audio_length_ms"] = str(int(max_audio_length_ms))
+
+        files: dict[str, tuple[str, bytes, str]] | None = None
+        if reference_audio_path:
+            if not prompt_text:
+                raise ModelUnavailableError("MisoTTS voice prompting requires the exact transcript of the reference clip")
+
+            container_audio_path = host_path_to_container(reference_audio_path)
+            reference_bytes = container_audio_path.read_bytes()
+            audio_name = container_audio_path.name
+            media_type = mimetypes.guess_type(audio_name)[0] or "application/octet-stream"
+            data["prompt_text"] = prompt_text
+            files = {
+                "reference_audio": (audio_name, reference_bytes, media_type),
+            }
+        elif prompt_text:
+            data["prompt_text"] = prompt_text
+
+        response = httpx.post(
+            f"{self.base_url.rstrip('/')}/synthesize",
+            data=data,
+            files=files,
+            timeout=httpx.Timeout(600.0, connect=10.0),
+        )
+        if response.is_error:
+            raise ModelUnavailableError(_response_detail(response))
+
+        content_type = response.headers.get("content-type", "")
+        if "audio/" in content_type or response.content[:4] == b"RIFF":
+            return response.content
+
+        payload = response.json()
+        output_path = payload.get("output_path")
+        if not output_path:
+            raise ModelUnavailableError("MisoTTS did not return audio bytes or an output path")
+
+        return _resolve_output_path(str(output_path)).read_bytes()
+
+
+class BreezeTTSModel(VoiceoverModel):
+    @property
+    def model_id(self) -> str:
+        return "breeze_tts"
+
+    @property
+    def display_name(self) -> str:
+        return "Breeze TTS 2 (Local)"
+
+    @property
+    def supports_reference_audio(self) -> bool:
+        return True
+
+    @property
+    def base_url(self) -> str:
+        return os.getenv("BREEZE_TTS_INTERNAL_URL", "http://breeze_tts:8000")
+
+    @property
+    def enabled(self) -> bool:
+        return os.getenv("BREEZE_TTS_ENABLED", "false").lower() == "true"
+
+    def health_payload(self) -> dict[str, Any]:
+        if not self.enabled:
+            return {"runtime_status": "disabled", "error": None}
+        try:
+            response = httpx.get(
+                f"{self.base_url.rstrip('/')}/healthz",
+                timeout=httpx.Timeout(5.0, connect=3.0),
+            )
+            response.raise_for_status()
+            payload = response.json()
+            return payload if isinstance(payload, dict) else {"runtime_status": "unavailable"}
+        except Exception as exc:
+            return {"runtime_status": "unavailable", "error": str(exc)}
+
+    def is_available(self) -> bool:
+        return str(self.health_payload().get("runtime_status") or "").lower() == "ready"
+
+    def availability_error(self) -> str:
+        payload = self.health_payload()
+        status = str(payload.get("runtime_status") or "unavailable").lower()
+        error = str(payload.get("error") or "").strip()
+        if status == "disabled":
+            return "Breeze TTS 2 is disabled; set BREEZE_TTS_ENABLED=true to enable it"
+        if status == "loading":
+            return "Breeze TTS 2 is loading its model weights"
+        if status == "error":
+            return error or "Breeze TTS 2 failed to load"
+        return error or "Breeze TTS 2 is unreachable right now"
+
+    def synthesize(self, text: str, reference_audio_path: str | None, options: dict[str, Any]) -> bytes:
+        if not self.is_available():
+            raise ModelUnavailableError(self.availability_error())
+
+        mode = str(options.get("breeze_mode") or "design").strip().lower()
+        instruction = str(options.get("instruction") or "").strip()
+        ref_text = str(options.get("prompt_text") or "").strip()
+        seed = int(options.get("seed", 42))
+        cfg_scale = options.get("cfg_scale")
+        has_reference = bool(reference_audio_path)
+
+        if has_reference != bool(ref_text):
+            raise ModelUnavailableError("Breeze requires reference audio and its exact transcript together")
+        if mode == "design":
+            if has_reference:
+                raise ModelUnavailableError("Breeze Voice Design does not accept a voice profile")
+            if not instruction:
+                raise ModelUnavailableError("Breeze Voice Design requires a voice description")
+        elif mode == "clone":
+            if not has_reference:
+                raise ModelUnavailableError("Breeze Voice Clone requires a voice profile and exact reference transcript")
+            if instruction:
+                raise ModelUnavailableError("Breeze Voice Clone does not accept an instruction; use Direction mode")
+        elif mode == "direction":
+            if not has_reference:
+                raise ModelUnavailableError("Breeze Voice Direction requires a voice profile and exact reference transcript")
+            if not instruction:
+                raise ModelUnavailableError("Breeze Voice Direction requires an instruction")
+        else:
+            raise ModelUnavailableError(f"Unsupported Breeze mode: {mode}")
+
+        data = {
+            "text": text.strip(),
+            "mode": mode,
+            "seed": str(seed),
+        }
+        if instruction:
+            data["instruction"] = instruction
+        if ref_text:
+            data["ref_text"] = ref_text
+        if cfg_scale is not None:
+            data["cfg_scale"] = str(float(cfg_scale))
+
+        files: dict[str, tuple[str, bytes, str]] | None = None
+        if reference_audio_path:
+            container_audio_path = host_path_to_container(reference_audio_path)
+            audio_name = container_audio_path.name
+            media_type = mimetypes.guess_type(audio_name)[0] or "application/octet-stream"
+            files = {
+                "reference_audio": (audio_name, container_audio_path.read_bytes(), media_type),
+            }
+
+        try:
+            response = httpx.post(
+                f"{self.base_url.rstrip('/')}/synthesize",
+                data=data,
+                files=files,
+                timeout=httpx.Timeout(900.0, connect=10.0),
+            )
+        except httpx.HTTPError as exc:
+            raise ModelUnavailableError("Breeze TTS 2 synthesis service is unreachable") from exc
+        if response.is_error:
+            raise ModelUnavailableError(_response_detail(response))
+        if "audio/" not in response.headers.get("content-type", "") and response.content[:4] != b"RIFF":
+            raise ModelUnavailableError("Breeze TTS 2 did not return a WAV file")
+        return response.content
+
+
 class PremiumCloneModel(VoiceoverModel):
     @property
     def model_id(self) -> str:
@@ -423,6 +630,8 @@ class ModelRegistry:
             F5TTSModel(),
             FishSpeechModel(),
             VoxCPM2Model(),
+            MisoTTSModel(),
+            BreezeTTSModel(),
             PremiumCloneModel(),
         ]
 

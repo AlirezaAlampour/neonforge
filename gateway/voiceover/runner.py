@@ -22,6 +22,11 @@ HOST_OUTPUTS_ROOT = Path("/srv/ai/outputs")
 CONTAINER_OUTPUTS_ROOT = Path(os.getenv("OUTPUTS_ROOT", "/outputs"))
 VOICEOVER_RELATIVE_DIR = Path("voiceover")
 FISH_MODEL_ID = "fish_speech"
+MISO_MODEL_ID = "misotts"
+BREEZE_MODEL_ID = "breeze_tts"
+BREEZE_MODE_DESIGN = "design"
+BREEZE_MODE_CLONE = "clone"
+BREEZE_MODE_DIRECTION = "direction"
 VOX_MODEL_ID = "voxcpm2"
 VOX_MODE_DESIGN = "design"
 VOX_MODE_CLONE = "clone"
@@ -467,15 +472,39 @@ def _wav_duration_seconds(path: Path) -> float | None:
 
 
 def _model_provider(model_id: str) -> str:
-    if model_id in {"f5tts", "fish_speech", VOX_MODEL_ID}:
+    if model_id in {"f5tts", "fish_speech", MISO_MODEL_ID, BREEZE_MODEL_ID, VOX_MODEL_ID}:
         return "local"
     return "unknown"
 
 
-def _generation_params(model_id: str, output_format: str, speed: float) -> dict[str, Any]:
+def _generation_params(
+    model_id: str,
+    output_format: str,
+    speed: float,
+    *,
+    speaker_id: int | None = None,
+    max_audio_length_ms: int | None = None,
+    breeze_mode: str | None = None,
+    instruction: str | None = None,
+    cfg_scale: float | None = None,
+    seed: int | None = None,
+) -> dict[str, Any]:
     params: dict[str, Any] = {"format": str(output_format).lower()}
     if model_id in {"f5tts", FISH_MODEL_ID, VOX_MODEL_ID}:
         params["speed"] = speed
+    if model_id == MISO_MODEL_ID:
+        if speaker_id is not None:
+            params["speaker_id"] = speaker_id
+        if max_audio_length_ms is not None:
+            params["max_audio_length_ms"] = max_audio_length_ms
+    if model_id == BREEZE_MODEL_ID:
+        params["mode"] = breeze_mode or BREEZE_MODE_DESIGN
+        if instruction:
+            params["instruction"] = instruction
+        if cfg_scale is not None:
+            params["cfg_scale"] = cfg_scale
+        if seed is not None:
+            params["seed"] = seed
     return params
 
 
@@ -511,6 +540,12 @@ def _write_output_metadata(
     prompt_text: str | None,
     output_format: str,
     speed: float,
+    speaker_id: int | None,
+    max_audio_length_ms: int | None,
+    breeze_mode: str | None,
+    instruction: str | None,
+    cfg_scale: float | None,
+    seed: int | None,
     chunk_count: int,
     duration_seconds: float | None,
 ) -> Path:
@@ -525,7 +560,17 @@ def _write_output_metadata(
         "reference_source_type": _reference_source_type(profile, reference_audio_path, reference_label),
         "script_text": script,
         "reference_transcript": _reference_transcript(profile, prompt_text),
-        "generation_params": _generation_params(model_id, output_format, speed),
+        "generation_params": _generation_params(
+            model_id,
+            output_format,
+            speed,
+            speaker_id=speaker_id,
+            max_audio_length_ms=max_audio_length_ms,
+            breeze_mode=breeze_mode,
+            instruction=instruction,
+            cfg_scale=cfg_scale,
+            seed=seed,
+        ),
         "chunk_count": chunk_count,
         "duration_seconds": round(duration_seconds, 3) if duration_seconds is not None else None,
     }
@@ -547,6 +592,12 @@ async def run_voiceover_job(
     style_text: str | None = None,
     reference_audio_path: str | None = None,
     reference_label: str | None = None,
+    speaker_id: int | None = None,
+    max_audio_length_ms: int | None = None,
+    breeze_mode: str | None = None,
+    instruction: str | None = None,
+    cfg_scale: float | None = None,
+    seed: int | None = None,
 ) -> None:
     job_key = f"voiceover:{job_id}"
     completed_chunks = 0
@@ -565,6 +616,9 @@ async def run_voiceover_job(
         effective_vox_mode = (vox_mode or VOX_MODE_CLONE).strip().lower() or VOX_MODE_CLONE
         if model_id != VOX_MODEL_ID:
             effective_vox_mode = VOX_MODE_CLONE
+        effective_breeze_mode = (breeze_mode or BREEZE_MODE_DESIGN).strip().lower() or BREEZE_MODE_DESIGN
+        if model_id != BREEZE_MODEL_ID:
+            effective_breeze_mode = BREEZE_MODE_DESIGN
 
         chunks = _build_voiceover_chunks(script, model_id=model_id, vox_mode=effective_vox_mode)
         synthesis_chunks = [chunk for chunk in chunks if not chunk.get("is_pause")]
@@ -599,6 +653,28 @@ async def run_voiceover_job(
         model_options: dict[str, Any] = {}
         if model_id in {"f5tts", FISH_MODEL_ID, VOX_MODEL_ID}:
             model_options["speed"] = speed
+        if model_id == MISO_MODEL_ID:
+            if speaker_id is not None:
+                model_options["speaker_id"] = speaker_id
+            if max_audio_length_ms is not None:
+                model_options["max_audio_length_ms"] = max_audio_length_ms
+            cleaned_prompt_text = (prompt_text or getattr(profile, "reference_transcript", "") or "").strip()
+            if cleaned_prompt_text:
+                model_options["prompt_text"] = cleaned_prompt_text
+        if model_id == BREEZE_MODEL_ID:
+            model_options["breeze_mode"] = effective_breeze_mode
+            model_options["seed"] = 42 if seed is None else seed
+            if cfg_scale is not None and effective_breeze_mode in {BREEZE_MODE_DESIGN, BREEZE_MODE_DIRECTION}:
+                model_options["cfg_scale"] = cfg_scale
+            cleaned_instruction = (instruction or "").strip()
+            if cleaned_instruction:
+                model_options["instruction"] = cleaned_instruction
+            if effective_breeze_mode == BREEZE_MODE_DESIGN:
+                resolved_reference_audio_path = None
+            else:
+                cleaned_prompt_text = (prompt_text or getattr(profile, "reference_transcript", "") or "").strip()
+                if cleaned_prompt_text:
+                    model_options["prompt_text"] = cleaned_prompt_text
         if model_id == FISH_MODEL_ID:
             if profile is None:
                 await _update_job(redis_client, job_key, status="failed", error="Voice profile not found")
@@ -674,11 +750,19 @@ async def run_voiceover_job(
 
         merged_path.unlink(missing_ok=True)
         metadata_created_at = datetime.now().astimezone().isoformat()
+        if model_id == VOX_MODEL_ID:
+            voice_mode = effective_vox_mode
+        elif model_id == MISO_MODEL_ID:
+            voice_mode = "prompted" if resolved_reference_audio_path else "plain"
+        elif model_id == BREEZE_MODEL_ID:
+            voice_mode = effective_breeze_mode
+        else:
+            voice_mode = "clone"
         metadata_path = _write_output_metadata(
             final_output_path,
             created_at=metadata_created_at,
             model_id=model_id,
-            voice_mode=effective_vox_mode if model_id == VOX_MODEL_ID else "clone",
+            voice_mode=voice_mode,
             profile=profile,
             reference_audio_path=reference_audio_path,
             reference_label=reference_label,
@@ -686,6 +770,12 @@ async def run_voiceover_job(
             prompt_text=prompt_text,
             output_format=str(output_format).lower(),
             speed=speed,
+            speaker_id=speaker_id,
+            max_audio_length_ms=max_audio_length_ms,
+            breeze_mode=effective_breeze_mode if model_id == BREEZE_MODEL_ID else None,
+            instruction=instruction if model_id == BREEZE_MODEL_ID else None,
+            cfg_scale=cfg_scale if model_id == BREEZE_MODEL_ID else None,
+            seed=seed if model_id == BREEZE_MODEL_ID else None,
             chunk_count=total_chunks,
             duration_seconds=duration_seconds,
         )

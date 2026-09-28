@@ -20,6 +20,8 @@
 | F5-TTS | `services/f5tts/` | `services/f5tts/Dockerfile` | Internal `f5tts:8000`; gateway proxies direct TTS routes and Voiceover Studio can call it as a long-form backend | FastAPI, `librosa`, `soundfile`, shared model/cache/output mounts |
 | Fish Speech | Compose image only (`dgx-ai-stack-fish_speech`) | No local Dockerfile in this repo | Internal `fish_speech:8000`; Voiceover Studio can call it when `FISH_SPEECH_ENABLED=true` | External/prebuilt image, shared model/cache/output mounts, Whisper-assisted reference transcription |
 | VoxCPM2 | `services/voxcpm2/` | `services/voxcpm2/Dockerfile` | Internal `voxcpm2:8000`; Voiceover Studio can call it when `VOXCPM2_ENABLED=true` | FastAPI, PyTorch, shared model/cache/output mounts |
+| MisoTTS | `services/misotts/` | `services/misotts/Dockerfile` | Internal `misotts:8000`; optional plain/prompt-conditioned Voiceover Studio backend | FastAPI, NGC PyTorch, uv-locked dependencies, shared model/cache/output mounts |
+| Breeze TTS 2 | `services/breeze_tts/` | `services/breeze_tts/Dockerfile` | Internal `breeze_tts:8000`; optional Design/Clone/Direction backend when `BREEZE_TTS_ENABLED=true` | Official Breeze eager runtime, NGC PyTorch, uv-locked dependencies, shared model/cache/output mounts |
 | LivePortrait | `services/liveportrait/` | `services/liveportrait/Dockerfile` | Internal `liveportrait:8000`; gateway proxies `/api/v1/liveportrait/animate` to `/animate`; supervisor can start/stop it | FastAPI, PyTorch, ONNX Runtime, InsightFace, MediaPipe, shared mounts |
 | Lip-sync | `services/lipsync/` | `services/lipsync/Dockerfile` | Internal `lipsync:8000`; gateway proxies `/api/v1/lipsync/sync` to `/sync`; supervisor can start/stop it | FastAPI, PyTorch, OpenCV, video-retalking stack, GFPGAN/Real-ESRGAN, shared mounts |
 | Wan 2.1 | `services/wan21/` | `services/wan21/Dockerfile` | Internal `wan21:8000`; gateway proxies `/api/v1/wan21/generate` to `/generate`; lazy-start profile started by supervisor and stopped after idle | FastAPI, PyTorch, Diffusers, Transformers, Accelerate, shared mounts, heavy UMA memory budget |
@@ -31,13 +33,15 @@
 
 - Browser clients usually enter through `frontend:3000`, which rewrites API traffic to `gateway:8000`.
 - External API clients can call the gateway directly on host port `8080`.
-- The gateway talks to Redis for readiness and activity state, then proxies work to `whisper`, `f5tts`, `fish_speech`, `voxcpm2`, `liveportrait`, `lipsync`, and `wan21` over `ai-net`.
+- The gateway talks to Redis for readiness and activity state, then proxies work to `whisper`, `f5tts`, `fish_speech`, `misotts`, `breeze_tts`, `voxcpm2`, `liveportrait`, `lipsync`, and `wan21` over `ai-net`.
 - Voiceover Studio routes live inside the gateway and persist reusable profile assets under `/srv/ai/assets/voice_profiles`.
 - New voice-profile uploads accept WAV, MP3, and M4A, then normalize to a PCM WAV master on ingest before downstream model use.
 - The gateway does not mount the Docker socket. It delegates lifecycle operations to the internal supervisor service over HTTP.
 - The supervisor holds the Docker socket and runs `docker compose` to start or stop managed services (`wan21`, `f5tts`, `liveportrait`, `lipsync`).
 - The host idle manager polls Redis activity timestamps and stops idle managed containers from outside Docker via the local Docker CLI.
 - All GPU-backed services and ComfyUI share the same host-backed storage for models, cache, outputs, and logs.
+- Breeze stays within the gateway-first job path: the frontend submits a normal voiceover job, the gateway resolves the saved profile/transcript, and the dedicated service returns WAV. The service loads its model once and serializes inference internally.
+- Breeze uses the standard sentence/paragraph chunker and WAV stitcher. Vox-only silence trimming/crossfades are not applied.
 
 ## Shared Infrastructure
 

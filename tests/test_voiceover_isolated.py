@@ -5,13 +5,21 @@ import wave
 import asyncio
 import json
 from pathlib import Path
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from gateway.voiceover.chunker import chunk_script
-from gateway.voiceover.models import FishSpeechModel, VoxCPM2Model
+from gateway.voiceover.models import (
+    BreezeTTSModel,
+    FishSpeechModel,
+    MisoTTSModel,
+    ModelRegistry,
+    ModelUnavailableError,
+    VoxCPM2Model,
+)
 from gateway.voiceover.profiles import get_profile, save_profile
 from gateway.voiceover import models, profiles, runner
 
@@ -63,13 +71,27 @@ def _wav_duration_ms(path: Path) -> float:
 
 
 class _FakeResponse:
-    def __init__(self, *, payload=None, content: bytes = b"", headers: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        payload=None,
+        content: bytes = b"",
+        headers: dict[str, str] | None = None,
+        status_code: int = 200,
+        text: str = "",
+    ) -> None:
         self._payload = payload or {}
         self.content = content
         self.headers = headers or {}
+        self.status_code = status_code
+        self.text = text
 
     def raise_for_status(self) -> None:
         return None
+
+    @property
+    def is_error(self) -> bool:
+        return self.status_code >= 400
 
     def json(self):
         return self._payload
@@ -277,6 +299,244 @@ def test_vox_chunk_strategy_prefers_single_pass_for_short_scripts():
     )
 
     assert chunks == [{"text": script, "pause_ms": 0, "is_pause": False, "soft_split": False}]
+
+
+def test_model_registry_includes_misotts():
+    assert "misotts" in {model.model_id for model in ModelRegistry.all_models()}
+
+
+def test_model_registry_includes_breeze_tts():
+    assert "breeze_tts" in {model.model_id for model in ModelRegistry.all_models()}
+
+
+def test_breeze_enabled_and_ready_availability_uses_runtime_health(monkeypatch):
+    monkeypatch.setenv("BREEZE_TTS_ENABLED", "true")
+    monkeypatch.setattr(models.httpx, "get", lambda *args, **kwargs: _FakeResponse(payload={"runtime_status": "ready"}))
+    assert BreezeTTSModel().is_available() is True
+
+    monkeypatch.setenv("BREEZE_TTS_ENABLED", "false")
+    assert BreezeTTSModel().is_available() is False
+    assert "disabled" in BreezeTTSModel().availability_error().lower()
+
+
+def test_breeze_design_propagates_instruction_cfg_and_seed(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_post(url: str, *args, **kwargs):
+        captured.update(url=url, data=kwargs["data"], files=kwargs.get("files"))
+        return _FakeResponse(content=b"RIFFfake", headers={"content-type": "audio/wav"})
+
+    monkeypatch.setattr(BreezeTTSModel, "is_available", lambda self: True)
+    monkeypatch.setattr(models.httpx, "post", fake_post)
+
+    output = BreezeTTSModel().synthesize(
+        "A designed voice.",
+        None,
+        {
+            "breeze_mode": "design",
+            "instruction": "A warm, thoughtful narrator.",
+            "cfg_scale": 4.0,
+            "seed": 1234,
+        },
+    )
+
+    assert output == b"RIFFfake"
+    assert captured["url"] == "http://breeze_tts:8000/synthesize"
+    assert captured["data"] == {
+        "text": "A designed voice.",
+        "mode": "design",
+        "seed": "1234",
+        "instruction": "A warm, thoughtful narrator.",
+        "cfg_scale": "4.0",
+    }
+    assert captured["files"] is None
+
+
+def test_breeze_clone_sends_reference_and_transcript_without_instruction(monkeypatch, tmp_path: Path):
+    reference_wav = tmp_path / "reference.wav"
+    _write_pcm_wav(reference_wav, _tone_frames(300))
+    captured: dict[str, object] = {}
+
+    def fake_post(url: str, *args, **kwargs):
+        captured.update(data=kwargs["data"], files=kwargs.get("files") or {})
+        return _FakeResponse(content=b"RIFFfake", headers={"content-type": "audio/wav"})
+
+    monkeypatch.setattr(BreezeTTSModel, "is_available", lambda self: True)
+    monkeypatch.setattr(models.httpx, "post", fake_post)
+
+    output = BreezeTTSModel().synthesize(
+        "Clone this line.",
+        str(reference_wav),
+        {
+            "breeze_mode": "clone",
+            "prompt_text": "Exact reference transcript.",
+            "seed": 88,
+        },
+    )
+
+    assert output == b"RIFFfake"
+    assert captured["data"] == {
+        "text": "Clone this line.",
+        "mode": "clone",
+        "seed": "88",
+        "ref_text": "Exact reference transcript.",
+    }
+    assert list(captured["files"].keys()) == ["reference_audio"]
+
+
+def test_breeze_direction_sends_reference_instruction_cfg_and_seed(monkeypatch, tmp_path: Path):
+    reference_wav = tmp_path / "reference.wav"
+    _write_pcm_wav(reference_wav, _tone_frames(300))
+    captured: dict[str, object] = {}
+
+    def fake_post(url: str, *args, **kwargs):
+        captured.update(data=kwargs["data"], files=kwargs.get("files") or {})
+        return _FakeResponse(content=b"RIFFfake", headers={"content-type": "audio/wav"})
+
+    monkeypatch.setattr(BreezeTTSModel, "is_available", lambda self: True)
+    monkeypatch.setattr(models.httpx, "post", fake_post)
+
+    BreezeTTSModel().synthesize(
+        "Direct this line.",
+        str(reference_wav),
+        {
+            "breeze_mode": "direction",
+            "prompt_text": "Exact reference transcript.",
+            "instruction": "Keep the identity and sound energetic.",
+            "cfg_scale": 4.25,
+            "seed": 99,
+        },
+    )
+
+    assert captured["data"]["mode"] == "direction"
+    assert captured["data"]["instruction"] == "Keep the identity and sound energetic."
+    assert captured["data"]["cfg_scale"] == "4.25"
+    assert captured["data"]["seed"] == "99"
+
+
+def test_breeze_reference_audio_and_text_are_required_together(monkeypatch, tmp_path: Path):
+    reference_wav = tmp_path / "reference.wav"
+    _write_pcm_wav(reference_wav, _tone_frames(300))
+    monkeypatch.setattr(BreezeTTSModel, "is_available", lambda self: True)
+
+    with pytest.raises(ModelUnavailableError, match="reference audio and its exact transcript together"):
+        BreezeTTSModel().synthesize("Missing transcript.", str(reference_wav), {"breeze_mode": "clone"})
+
+
+def test_breeze_clone_rejects_instruction_instead_of_silently_becoming_direction(monkeypatch, tmp_path: Path):
+    reference_wav = tmp_path / "reference.wav"
+    _write_pcm_wav(reference_wav, _tone_frames(300))
+    monkeypatch.setattr(BreezeTTSModel, "is_available", lambda self: True)
+
+    with pytest.raises(ModelUnavailableError, match="use Direction mode"):
+        BreezeTTSModel().synthesize(
+            "Do not redirect this clone.",
+            str(reference_wav),
+            {
+                "breeze_mode": "clone",
+                "prompt_text": "Exact reference transcript.",
+                "instruction": "Energetic.",
+            },
+        )
+
+
+def test_breeze_service_failure_surfaces_useful_detail(monkeypatch):
+    monkeypatch.setattr(BreezeTTSModel, "is_available", lambda self: True)
+    monkeypatch.setattr(
+        models.httpx,
+        "post",
+        lambda *args, **kwargs: _FakeResponse(
+            payload={"detail": "Breeze runtime failed to decode audio"},
+            status_code=500,
+            text="Breeze runtime failed to decode audio",
+        ),
+    )
+
+    with pytest.raises(ModelUnavailableError, match="failed to decode audio"):
+        BreezeTTSModel().synthesize(
+            "A failed request.",
+            None,
+            {"breeze_mode": "design", "instruction": "Natural voice.", "seed": 42, "cfg_scale": 4},
+        )
+
+
+def test_misotts_plain_generation_sends_text_speaker_and_length(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_post(url: str, *args, **kwargs):
+        captured["url"] = url
+        captured["data"] = kwargs["data"]
+        captured["files"] = kwargs.get("files")
+        return _FakeResponse(content=b"RIFFfake", headers={"content-type": "audio/wav"})
+
+    monkeypatch.setattr(MisoTTSModel, "is_available", lambda self: True)
+    monkeypatch.setattr(models.httpx, "post", fake_post)
+
+    output = MisoTTSModel().synthesize(
+        "Hello from Miso.",
+        None,
+        {
+            "speaker_id": 3,
+            "max_audio_length_ms": 12000,
+        },
+    )
+
+    assert output == b"RIFFfake"
+    assert captured["url"] == "http://misotts:8000/synthesize"
+    assert captured["data"] == {
+        "text": "Hello from Miso.",
+        "speaker": "3",
+        "max_audio_length_ms": "12000",
+    }
+    assert captured["files"] is None
+
+
+def test_misotts_prompted_generation_sends_reference_audio_and_transcript(monkeypatch, tmp_path: Path):
+    reference_wav = tmp_path / "reference.wav"
+    _write_pcm_wav(reference_wav, _tone_frames(300))
+
+    captured: dict[str, object] = {}
+
+    def fake_post(url: str, *args, **kwargs):
+        captured["data"] = kwargs["data"]
+        captured["files"] = kwargs.get("files") or {}
+        return _FakeResponse(content=b"RIFFfake", headers={"content-type": "audio/wav"})
+
+    monkeypatch.setattr(MisoTTSModel, "is_available", lambda self: True)
+    monkeypatch.setattr(models.httpx, "post", fake_post)
+
+    output = MisoTTSModel().synthesize(
+        "Continue in this voice.",
+        str(reference_wav),
+        {
+            "prompt_text": "This is the exact transcript of the saved clip.",
+            "speaker_id": 0,
+            "max_audio_length_ms": 10000,
+        },
+    )
+
+    assert output == b"RIFFfake"
+    assert captured["data"] == {
+        "text": "Continue in this voice.",
+        "speaker": "0",
+        "max_audio_length_ms": "10000",
+        "prompt_text": "This is the exact transcript of the saved clip.",
+    }
+    assert list((captured["files"] or {}).keys()) == ["reference_audio"]
+
+
+def test_misotts_prompted_generation_requires_transcript(monkeypatch, tmp_path: Path):
+    reference_wav = tmp_path / "reference.wav"
+    _write_pcm_wav(reference_wav, _tone_frames(300))
+
+    monkeypatch.setattr(MisoTTSModel, "is_available", lambda self: True)
+
+    with pytest.raises(ModelUnavailableError, match="requires the exact transcript"):
+        MisoTTSModel().synthesize(
+            "Continue in this voice.",
+            str(reference_wav),
+            {},
+        )
 
 
 def test_vox_chunk_strategy_uses_larger_semantic_groups_when_chunking_is_needed(monkeypatch):

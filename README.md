@@ -20,6 +20,8 @@ NeonForge combines a Next.js frontend, a FastAPI gateway, Redis/supervisor orche
 | **Faster-Whisper** | Audio transcription (STT) | Always-on baseline service; also used to transcribe reference audio for Fish Speech |
 | **F5-TTS** | Text-to-speech and voiceover synthesis | Most reliable local voiceover backend |
 | **Fish Speech 1.5** | Higher-quality local voiceover synthesis | Optional; enabled with `FISH_SPEECH_ENABLED=true` |
+| **MisoTTS 8B** | Optional local voiceover synthesis with prompt-audio conditioning | Optional; first run downloads `MisoLabs/MisoTTS`; requires substantial free CUDA/UMA memory |
+| **Breeze TTS 2** | Voice design, cloning, and natural-language voice direction | Optional eager PyTorch runtime; enabled with `BREEZE_TTS_ENABLED=true` |
 | **VoxCPM2** | Experimental local voiceover synthesis | Optional; enabled with `VOXCPM2_ENABLED=true` |
 | **LivePortrait** | Face animation from image + driving video | Warm GPU runtime |
 | **Lip-sync** | Audio-driven mouth animation | Warm GPU runtime |
@@ -80,7 +82,7 @@ This diagram focuses on the core gateway/supervisor path. The frontend, optional
 - Frontend, Redis, Gateway, Supervisor, Whisper
 
 **Warm / on-demand model services** -- Containers are typically running, and some runtimes load on first request or destroy models after idle. Healthz responds immediately even when inference will still trigger heavier setup work.
-- F5-TTS, Fish Speech, VoxCPM2, LivePortrait, Lip-sync
+- F5-TTS, Fish Speech, MisoTTS, Breeze TTS 2, VoxCPM2, LivePortrait, Lip-sync
 
 **Lazy-start singleton** -- Container stopped by default. Gateway asks Supervisor to start it on demand. Stopped by idle_manager after 5 min of inactivity. Only one instance ever runs.
 - Wan 2.1
@@ -122,7 +124,7 @@ docker compose up -d f5tts liveportrait lipsync
 
 # 5. (Optional) Start additional runtimes if configured
 # Fish Speech uses a compose image reference rather than a local Dockerfile.
-docker compose up -d fish_speech voxcpm2
+docker compose --profile breeze up -d fish_speech misotts breeze_tts voxcpm2
 
 # 6. Verify
 python3 scripts/verify_dgx.py --smoke
@@ -191,6 +193,11 @@ Voiceover Studio is the isolated long-form narration path in NeonForge. It inten
   - `design`: no reference audio, optional style/control text
   - `clone`: reference audio only, optional style/control text
   - `continuation`: reference audio plus the exact transcript of that clip
+- MisoTTS can run as plain TTS with no saved profile, or condition generation on a saved voice profile plus its stored transcript.
+- MisoTTS model weights are lazy-loaded inside the optional runtime on first use.
+- Generated MisoTTS audio is watermarked by default by the upstream model.
+- Breeze TTS 2 supports `design`, `clone`, and `direction`. Clone and Direction require a saved profile plus its exact transcript; Whisper can fill missing transcripts for review and correction.
+- Breeze uses the official eager PyTorch path on DGX Spark. Seed is reproducible, while CFG Scale is exposed only for Design and Direction.
 - Vox now defaults to normal clone semantics instead of silently auto-entering continuation mode.
 
 See [VOICEOVER_STUDIO.md](VOICEOVER_STUDIO.md) for the product-level notes and [gateway/voiceover/](gateway/voiceover) for the implementation.
@@ -290,6 +297,16 @@ neonforge/
       app.py                  # Experimental local cloned-voice backend
       Dockerfile
       requirements.txt
+    misotts/
+      app.py                  # Optional MisoTTS HTTP runtime with lazy model load
+      Dockerfile
+      pyproject.toml
+      uv.lock
+    breeze_tts/
+      app.py                  # Breeze TTS 2 persistent eager runtime
+      Dockerfile              # NGC ARM64/Blackwell base, uv-locked dependencies
+      pyproject.toml
+      uv.lock
     wan21/
       app.py                  # Wan 2.1, lazy singleton with true destroy
       Dockerfile
@@ -331,9 +348,63 @@ All configuration is via `.env`. Key settings:
 | `WAN21_IDLE_TIMEOUT` | `300` | Seconds before idle Wan container stops |
 | `F5TTS_IDLE_TIMEOUT` | `1800` | Seconds before F5-TTS model is destroyed |
 | `FISH_SPEECH_ENABLED` | `false` | Enables Fish Speech in Voiceover Studio |
+| `TTS_PROVIDER` | `misotts` | Default runtime provider label for the optional MisoTTS container |
+| `MISOTTS_INTERNAL_URL` | `http://misotts:8000` | Internal URL for the optional MisoTTS runtime |
+| `MISOTTS_MODEL_ID` | `MisoLabs/MisoTTS` | Hugging Face repo ID or local model source for MisoTTS |
+| `MISOTTS_DEVICE` | `auto` | `auto`, `cuda`, or `cpu` device selection for MisoTTS |
+| `MISOTTS_MAX_AUDIO_MS` | `10000` | Default maximum audio duration per MisoTTS generation call |
+| `MISOTTS_ENABLE_VOICE_PROMPT` | `true` | Allows prompt-audio voice conditioning in the MisoTTS runtime |
+| `BREEZE_TTS_ENABLED` | `false` | Enables Breeze in the gateway model registry |
+| `BREEZE_TTS_INTERNAL_URL` | `http://breeze_tts:8000` | Internal Breeze service URL |
+| `BREEZE_TTS_MODEL_ID` | `BreezeBlue/Breeze-TTS-2` | Hugging Face checkpoint ID |
+| `BREEZE_TTS_MODEL_PATH` | `/models/breeze_tts/Breeze-TTS-2` | Persistent checkpoint path on the shared models mount |
+| `BREEZE_TTS_AUTO_DOWNLOAD` | `true` | Downloads the checkpoint into the shared model path when missing |
 | `VOXCPM2_ENABLED` | `false` | Enables VoxCPM2 in Voiceover Studio |
 | `COMFYUI_MODEL_ROOTS` | `/models/comfyui,/opt/ComfyUI/custom_nodes/comfyui_controlnet_aux/ckpts` | Read-only model roots scanned for managed ComfyUI templates |
 | `LIPSYNC_BACKEND` | `video-retalking` | Lip-sync backend (or `sadtalker`) |
+
+## MisoTTS Notes
+
+- Start the runtime with `docker compose up -d misotts` when you want it available in Voiceover Studio.
+- The container stays lightweight until the first MisoTTS request. The first request downloads `MisoLabs/MisoTTS` from Hugging Face and then loads the 8B weights.
+- Expect a noticeable first-run delay and significant CUDA/UMA usage. If the runtime returns an out-of-memory error, free GPU workloads and retry.
+- NeonForge uses `uv` for service dependency management. If you run the upstream checkout manually outside NeonForge, the upstream project also documents a `pip install -e .` path.
+- Example gateway request for plain MisoTTS:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/voiceover/jobs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model_id": "misotts",
+    "script": "NeonForge is ready for the next take.",
+    "output_format": "wav",
+    "speaker_id": 0,
+    "max_audio_length_ms": 10000
+  }'
+```
+
+- Example direct MisoTTS service request with prompt audio plus transcript:
+
+```bash
+curl -X POST http://localhost:8000/synthesize \
+  -F 'text=Continue in the same voice.' \
+  -F 'speaker=0' \
+  -F 'max_audio_length_ms=10000' \
+  -F 'prompt_text=This is the exact transcript of the saved prompt clip.' \
+  -F 'reference_audio=@/path/to/prompt.wav' \
+  -F 'output_wav_path=/outputs/tts/misotts_prompt.wav'
+```
+
+- Safety: do not use MisoTTS or any other backend here to impersonate real people or create deceptive audio.
+
+## Breeze TTS 2 Notes
+
+- Set `BREEZE_TTS_ENABLED=true`, then build/start with `docker compose --profile breeze up -d --build breeze_tts gateway frontend`.
+- The service pins the official inference source revision and loads the model once. It uses eager attention and explicitly leaves the H100-oriented CUDA-graph fast path disabled on GB10.
+- Checkpoint files persist under `${MODELS_DIR}/breeze_tts/Breeze-TTS-2`; Hugging Face metadata/cache uses the existing `${HF_CACHE_DIR}` mount.
+- Design needs a voice description. Clone needs profile audio plus its exact transcript and sends no instruction. Direction adds a natural-language instruction and defaults CFG Scale to `4`.
+- The normal sentence/paragraph Voiceover Studio chunker is used for long scripts. No Breeze-specific trimming, crossfading, or DSP is applied.
+- Source code is Apache-2.0, but Breeze TTS 2 weights, derivative models, and self-hosted outputs are licensed for research and non-commercial use only.
 
 ## Hardware Target
 

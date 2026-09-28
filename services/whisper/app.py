@@ -5,12 +5,10 @@ Tier: always-on
 GPU weight: light (~1-2 GB for medium model)
 """
 
-import io
 import logging
 import os
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from pydantic import BaseModel
@@ -18,6 +16,7 @@ from pydantic import BaseModel
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "medium")
 COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "float16")
+DEVICE = os.getenv("WHISPER_DEVICE", "auto")
 BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "5"))
 MODEL_DIR = os.getenv("WHISPER_MODEL_DIR", "/models/whisper")
 
@@ -29,13 +28,32 @@ model_loaded = False
 
 
 def load_model():
-    global model, model_loaded
+    global model, model_loaded, DEVICE, COMPUTE_TYPE
+    import ctranslate2
     from faster_whisper import WhisperModel
-    log.info("Loading faster-whisper model: %s (compute=%s)", MODEL_SIZE, COMPUTE_TYPE)
+
+    cuda_available = ctranslate2.get_cuda_device_count() > 0
+    if DEVICE == "auto":
+        DEVICE = "cuda" if cuda_available else "cpu"
+    if DEVICE == "cuda" and not cuda_available:
+        log.warning(
+            "CTranslate2 has no CUDA support on this ARM64 build; "
+            "falling back to CPU int8"
+        )
+        DEVICE = "cpu"
+    if DEVICE == "cpu" and COMPUTE_TYPE in {"float16", "bfloat16"}:
+        COMPUTE_TYPE = "int8"
+
+    log.info(
+        "Loading faster-whisper model: %s (device=%s, compute=%s)",
+        MODEL_SIZE,
+        DEVICE,
+        COMPUTE_TYPE,
+    )
     t0 = time.time()
     model = WhisperModel(
         MODEL_SIZE,
-        device="cuda",
+        device=DEVICE,
         compute_type=COMPUTE_TYPE,
         download_root=MODEL_DIR,
     )
@@ -63,7 +81,12 @@ async def healthz():
 async def readyz():
     if not model_loaded:
         raise HTTPException(503, "Model not loaded")
-    return {"status": "ready", "model": MODEL_SIZE}
+    return {
+        "status": "ready",
+        "model": MODEL_SIZE,
+        "device": DEVICE,
+        "compute_type": COMPUTE_TYPE,
+    }
 
 
 @app.get("/smoke")
@@ -118,14 +141,27 @@ async def transcribe(audio: UploadFile = File(...)):
             f.name,
             beam_size=BEAM_SIZE,
             vad_filter=True,
+            word_timestamps=True,
         )
         segments = []
+        words = []
         full_text_parts = []
         for seg in segments_gen:
+            segment_words = [
+                {
+                    "start": round(word.start, 3),
+                    "end": round(word.end, 3),
+                    "word": word.word.strip(),
+                    "probability": round(word.probability, 4),
+                }
+                for word in (seg.words or [])
+            ]
+            words.extend(segment_words)
             segments.append({
                 "start": round(seg.start, 3),
                 "end": round(seg.end, 3),
                 "text": seg.text.strip(),
+                "words": segment_words,
             })
             full_text_parts.append(seg.text.strip())
         elapsed = time.time() - t0
@@ -141,4 +177,5 @@ async def transcribe(audio: UploadFile = File(...)):
         "duration": round(info.duration, 2),
         "processing_time": round(elapsed, 2),
         "segments": segments,
+        "words": words,
     }

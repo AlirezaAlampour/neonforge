@@ -31,12 +31,18 @@ Voiceover Studio currently supports:
   - `design`
   - `clone`
   - `continuation`
+- Breeze TTS 2 mode selection:
+  - `design`
+  - `clone`
+  - `direction`
+- backend-aware controls with progressively disclosed advanced settings
+- editable profile transcripts with Whisper fill for Breeze references
 - speed control
 - recent outputs with play/download/delete
 - active job restore after refresh
 - multiple tracked jobs in the UI
 - human-usable output naming:
-  - `{model_id}_{voice_profile_name}_{YYYY-MM-DD_HHMMSS}.{ext}`
+  - `{model_id}_{voice_profile_name}_{script_slug}_{YYYY-MM-DD_HHMMSS}.{ext}`
 
 ## Voice profile ingest and storage
 
@@ -60,6 +66,21 @@ Voiceover Studio currently supports:
 - higher-maintenance runtime than F5
 - should be treated honestly as less boring than F5
 
+### misotts
+- optional plain and prompt-conditioned local backend
+- uses a dedicated lazy-loading runtime
+
+### breeze_tts
+- first-class optional Voiceover Studio backend using `BreezeBlue/Breeze-TTS-2`
+- dedicated persistent service under `services/breeze_tts/`
+- official eager PyTorch runtime on DGX Spark; H100-oriented `--fast-all` is disabled
+- Design requires a voice description and no profile
+- Clone requires saved profile audio + exact transcript and sends no instruction
+- Direction requires profile audio + exact transcript + natural-language direction
+- seed is reproducible and CFG Scale defaults to `4` for Design/Direction
+- service health distinguishes disabled, unavailable, loading, ready, and error
+- weights, derivative models, and self-hosted outputs are research/non-commercial only
+
 ### voxcpm2
 - integrated and selectable
 - default behavior is now normal `clone` mode, not prompt-style continuation
@@ -74,6 +95,8 @@ Voiceover Studio currently supports:
 
 - Production/reliable voiceover: **F5-TTS**
 - Higher-quality alternative: **Fish Speech**
+- Optional prompt-conditioned voice work: **MisoTTS**
+- Designed and directed voices: **Breeze TTS 2**
 - Experimental testing: **VoxCPM2**
 
 ## Environment/config currently relevant to voiceover
@@ -82,6 +105,11 @@ Voiceover Studio currently supports:
 - `OUTPUTS_DIR`
 - `FISH_SPEECH_ENABLED`
 - `FISH_SPEECH_INTERNAL_URL`
+- `BREEZE_TTS_ENABLED`
+- `BREEZE_TTS_INTERNAL_URL`
+- `BREEZE_TTS_MODEL_ID`
+- `BREEZE_TTS_MODEL_PATH`
+- `BREEZE_TTS_AUTO_DOWNLOAD`
 - `VOXCPM2_ENABLED`
 - `VOXCPM2_INTERNAL_URL`
 - `VOXCPM2_MODEL_PATH`

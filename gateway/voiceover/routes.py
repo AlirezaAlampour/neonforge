@@ -27,6 +27,7 @@ from .profiles import (
     host_path_to_container,
     load_registry,
     save_profile,
+    update_profile_reference_transcript,
 )
 from .runner import run_voiceover_job
 
@@ -41,6 +42,17 @@ HOST_OUTPUTS_ROOT = Path("/srv/ai/outputs")
 CONTAINER_OUTPUTS_ROOT = Path(os.getenv("OUTPUTS_ROOT", "/outputs"))
 VOICEOVER_OUTPUTS_RELATIVE_DIR = Path("voiceover")
 VOICEOVER_TEMP_REFERENCE_RELATIVE_DIR = Path("voiceover_temp_references")
+MISO_MODEL_ID = "misotts"
+MISO_PROVIDER_NAME = "MisoTTS 8B"
+DEFAULT_MISO_MAX_AUDIO_LENGTH_MS = 10000
+BREEZE_MODEL_ID = "breeze_tts"
+BREEZE_PROVIDER_NAME = "Breeze TTS 2"
+BREEZE_MODE_DESIGN = "design"
+BREEZE_MODE_CLONE = "clone"
+BREEZE_MODE_DIRECTION = "direction"
+VALID_BREEZE_MODES = {BREEZE_MODE_DESIGN, BREEZE_MODE_CLONE, BREEZE_MODE_DIRECTION}
+DEFAULT_BREEZE_SEED = 42
+DEFAULT_BREEZE_CFG_SCALE = 4.0
 VOX_MODEL_ID = "voxcpm2"
 VOX_MODE_DESIGN = "design"
 VOX_MODE_CLONE = "clone"
@@ -61,11 +73,21 @@ class CreateVoiceoverJobRequest(BaseModel):
     vox_mode: str | None = None
     prompt_text: str | None = None
     style_text: str | None = None
+    speaker_id: int | None = None
+    max_audio_length_ms: int | None = None
+    breeze_mode: str | None = None
+    instruction: str | None = None
+    cfg_scale: float | None = None
+    seed: int | None = None
 
 
 class SaveVoiceoverOutputAsProfileRequest(BaseModel):
     name: str
     notes: str | None = None
+
+
+class UpdateVoiceProfileTranscriptRequest(BaseModel):
+    reference_transcript: str
 
 
 def _now_iso() -> str:
@@ -88,7 +110,7 @@ def _output_host_path_to_container(path_value: str | Path) -> Path:
 def _get_redis_client():
     import app as gateway_app
 
-    return gateway_app.rdb
+    return getattr(gateway_app, "rdb", None)
 
 
 def _get_voiceover_render_lock() -> asyncio.Lock:
@@ -233,6 +255,324 @@ def _normalize_reference_audio_to_wav(input_path: Path, output_path: Path, *, de
 
 def _serialize_profile(profile: VoiceProfile) -> dict[str, Any]:
     return asdict(profile)
+
+
+def _provider_name(model: Any) -> str:
+    if model.model_id == MISO_MODEL_ID:
+        return MISO_PROVIDER_NAME
+    if model.model_id == BREEZE_MODEL_ID:
+        return BREEZE_PROVIDER_NAME
+    return str(model.display_name)
+
+
+def _provider_runtime(model: Any) -> str:
+    if model.model_id == "premium_clone":
+        return "scaffold"
+    return "dedicated-service"
+
+
+def _provider_supports_prompt_audio(model: Any) -> bool:
+    return bool(getattr(model, "supports_reference_audio", False))
+
+
+def _provider_requires_prompt_transcript(model: Any) -> bool:
+    return model.model_id in {MISO_MODEL_ID, BREEZE_MODEL_ID}
+
+
+def _provider_capability_label(model: Any) -> str:
+    return {
+        "f5tts": "Clone",
+        "fish_speech": "Clone",
+        VOX_MODEL_ID: "Design / Clone / Continue",
+        MISO_MODEL_ID: "Text / Prompt",
+        BREEZE_MODEL_ID: "Design / Clone / Direction",
+        "premium_clone": "Clone",
+    }.get(model.model_id, "Voice")
+
+
+def _provider_modes(model: Any) -> list[str]:
+    return {
+        "f5tts": ["clone"],
+        "fish_speech": ["clone"],
+        VOX_MODEL_ID: ["design", "clone", "continuation"],
+        MISO_MODEL_ID: ["plain", "prompted"],
+        BREEZE_MODEL_ID: ["design", "clone", "direction"],
+        "premium_clone": ["clone"],
+    }.get(model.model_id, [])
+
+
+def _is_installation_status_message(message: str) -> bool:
+    lowered = message.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "optional misotts runtime dependencies",
+            "dependencies could not be imported",
+            "source checkout",
+            "clone https://github.com/misolabsai/misotts",
+            "not enabled",
+            "not yet implemented",
+        )
+    )
+
+
+def _is_auth_status_message(message: str) -> bool:
+    lowered = message.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "failed to download or resolve the misotts model weights",
+            "hugging face",
+            "huggingface",
+            "gated repo",
+            "please log in",
+            "meta-llama/llama-3.2-1b",
+            "401 unauthorized",
+            "403 forbidden",
+            "invalid user token",
+            "token",
+            "license",
+        )
+    )
+
+
+def _is_model_runtime_status_message(message: str) -> bool:
+    lowered = message.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "model runtime device mismatch",
+            "expected all tensors to be on the same device",
+            "found at least two devices",
+            "cuda:0 and cpu",
+            "device mismatch",
+        )
+    )
+
+
+def _is_gpu_status_message(message: str) -> bool:
+    lowered = message.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "cuda",
+            "vram",
+            "gpu",
+            "uma",
+            "out of memory",
+            "free memory",
+        )
+    )
+
+
+def _coerce_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return round(float(value), 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _misotts_diagnostics_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    diagnostics = payload.get("diagnostics")
+    if not isinstance(diagnostics, dict):
+        return {}
+
+    top_gpu_process = diagnostics.get("top_gpu_process")
+    top_gpu_process_payload: dict[str, Any] | None = None
+    if isinstance(top_gpu_process, dict):
+        pid = _coerce_int(top_gpu_process.get("pid"))
+        process_name = str(top_gpu_process.get("process_name") or "").strip() or None
+        used_memory_mib = _coerce_int(top_gpu_process.get("used_memory_mib"))
+        if pid is not None or process_name or used_memory_mib is not None:
+            top_gpu_process_payload = {
+                "pid": pid,
+                "process_name": process_name,
+                "used_memory_mib": used_memory_mib,
+            }
+
+    return {
+        "gpu_device_name": str(diagnostics.get("gpu_device") or "").strip() or None,
+        "gpu_total_vram_gb": _coerce_float(diagnostics.get("gpu_total_gb")),
+        "gpu_free_vram_gb": _coerce_float(diagnostics.get("gpu_free_gb")),
+        "top_gpu_process": top_gpu_process_payload,
+        "actionable_hint": str(diagnostics.get("actionable_hint") or "").strip() or None,
+    }
+
+
+def _misotts_status_summary(model: Any) -> dict[str, Any]:
+    try:
+        response = httpx.get(
+            f"{model.base_url.rstrip('/')}/v1/health",
+            timeout=httpx.Timeout(5.0, connect=3.0),
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception:
+        return {
+            "status": "unavailable",
+            "status_badge": "Service offline",
+            "status_detail": "The dedicated MisoTTS service is not reachable.",
+            "available": False,
+        }
+
+    runtime_status = str(payload.get("runtime_status") or "").strip().lower()
+    error_message = str(payload.get("error") or "").strip()
+    diagnostics_payload = _misotts_diagnostics_payload(payload)
+
+    if runtime_status == "loading":
+        return {
+            "status": "loading",
+            "status_badge": "Loading model",
+            "status_detail": "MisoTTS is loading its model weights. The first request can take a while.",
+            "available": False,
+            **diagnostics_payload,
+        }
+
+    if error_message:
+        if _is_model_runtime_status_message(error_message):
+            badge = "Model runtime error"
+        elif _is_gpu_status_message(error_message):
+            badge = "GPU/VRAM error"
+        elif _is_auth_status_message(error_message):
+            badge = "Auth required"
+        elif _is_installation_status_message(error_message):
+            badge = "Not installed"
+        else:
+            badge = "Service offline"
+        return {
+            "status": "error",
+            "status_badge": badge,
+            "status_detail": error_message,
+            "available": False,
+            **diagnostics_payload,
+        }
+
+    if runtime_status in {"ready", "idle"}:
+        return {
+            "status": "available",
+            "status_badge": "Ready",
+            "status_detail": (
+                "MisoTTS is ready. Model weights will load on the first request."
+                if runtime_status == "idle"
+                else "MisoTTS is ready."
+            ),
+            "available": True,
+            **diagnostics_payload,
+        }
+
+    if model.is_available():
+        return {
+            "status": "available",
+            "status_badge": "Ready",
+            "status_detail": "MisoTTS is reachable.",
+            "available": True,
+            **diagnostics_payload,
+        }
+
+    return {
+        "status": "unavailable",
+        "status_badge": "Service offline",
+        "status_detail": "The dedicated MisoTTS service is not reachable.",
+        "available": False,
+    }
+
+
+def _breeze_status_summary(model: Any) -> dict[str, Any]:
+    payload = model.health_payload()
+    runtime_status = str(payload.get("runtime_status") or "unavailable").strip().lower()
+    error_message = str(payload.get("error") or "").strip()
+
+    if runtime_status == "disabled":
+        return {
+            "status": "disabled",
+            "status_badge": "Disabled",
+            "status_detail": "Enable Breeze TTS 2 with BREEZE_TTS_ENABLED=true.",
+            "available": False,
+        }
+    if runtime_status == "loading":
+        return {
+            "status": "loading",
+            "status_badge": "Loading model",
+            "status_detail": "Breeze TTS 2 is loading the eager PyTorch runtime and model weights.",
+            "available": False,
+        }
+    if runtime_status == "ready":
+        return {
+            "status": "ready",
+            "status_badge": "Ready",
+            "status_detail": "Breeze TTS 2 is ready in eager mode.",
+            "available": True,
+        }
+    if runtime_status == "error":
+        return {
+            "status": "error",
+            "status_badge": "Runtime error",
+            "status_detail": error_message or "Breeze TTS 2 failed to load.",
+            "available": False,
+        }
+    return {
+        "status": "unavailable",
+        "status_badge": "Service offline",
+        "status_detail": error_message or "The dedicated Breeze TTS 2 service is not reachable.",
+        "available": False,
+    }
+
+
+def _provider_status_summary(model: Any) -> dict[str, Any]:
+    if model.model_id == MISO_MODEL_ID:
+        return _misotts_status_summary(model)
+    if model.model_id == BREEZE_MODEL_ID:
+        return _breeze_status_summary(model)
+
+    if model.is_available():
+        return {
+            "status": "available",
+            "status_badge": "Ready",
+            "status_detail": f"{_provider_name(model)} is ready.",
+            "available": True,
+        }
+
+    availability_error = str(model.availability_error()).strip() or f"{_provider_name(model)} is unavailable"
+    badge = "Not installed" if _is_installation_status_message(availability_error) else "Service offline"
+    return {
+        "status": "unavailable",
+        "status_badge": badge,
+        "status_detail": availability_error,
+        "available": False,
+    }
+
+
+def _serialize_provider(model: Any) -> dict[str, Any]:
+    payload = {
+        "id": model.model_id,
+        "name": _provider_name(model),
+        "type": "text-to-speech",
+        "runtime": _provider_runtime(model),
+        "supports_plain_tts": True,
+        "supports_prompt_audio": _provider_supports_prompt_audio(model),
+        "requires_prompt_transcript": _provider_requires_prompt_transcript(model),
+        "default_max_audio_length_ms": DEFAULT_MISO_MAX_AUDIO_LENGTH_MS if model.model_id == MISO_MODEL_ID else None,
+        "capability_label": _provider_capability_label(model),
+        "modes": _provider_modes(model),
+        "license_note": (
+            "Research and non-commercial use only for self-hosted model weights and outputs."
+            if model.model_id == BREEZE_MODEL_ID
+            else None
+        ),
+    }
+    payload.update(_provider_status_summary(model))
+    return payload
 
 
 def _voiceover_output_dir() -> Path:
@@ -576,19 +916,58 @@ async def voice_profile_sample(profile_id: str):
     return FileResponse(audio_path, filename=audio_path.name, media_type=media_type)
 
 
+@router.post("/profiles/{profile_id}/transcribe")
+async def transcribe_voice_profile(profile_id: str):
+    profile = get_profile(profile_id)
+    if profile is None:
+        raise HTTPException(404, "Voice profile not found")
+
+    audio_path = host_path_to_container(profile.reference_audio_path)
+    if not audio_path.exists() or not audio_path.is_file():
+        raise HTTPException(404, "Reference audio file is missing")
+    media_type = mimetypes.guess_type(audio_path.name)[0] or "audio/wav"
+    transcript = await _transcribe_audio_with_whisper(audio_path.name, audio_path.read_bytes(), media_type)
+    updated = update_profile_reference_transcript(profile_id, transcript)
+    if updated is None:
+        raise HTTPException(404, "Voice profile not found")
+    return _serialize_profile(updated)
+
+
+@router.patch("/profiles/{profile_id}/transcript")
+async def update_voice_profile_transcript(profile_id: str, request: UpdateVoiceProfileTranscriptRequest):
+    transcript = request.reference_transcript.strip()
+    if not transcript:
+        raise HTTPException(422, "Reference transcript must not be empty")
+    updated = update_profile_reference_transcript(profile_id, transcript)
+    if updated is None:
+        raise HTTPException(404, "Voice profile not found")
+    return _serialize_profile(updated)
+
+
 @router.get("/models")
 async def list_voiceover_models():
     items = []
     for model in ModelRegistry.all_models():
+        provider = _serialize_provider(model)
         items.append(
             {
                 "model_id": model.model_id,
                 "display_name": model.display_name,
                 "supports_reference_audio": model.supports_reference_audio,
-                "available": model.is_available(),
+                "available": provider["available"],
+                "status": provider["status"],
+                "status_badge": provider["status_badge"],
+                "status_detail": provider["status_detail"],
+                "capability_label": provider["capability_label"],
+                "modes": provider["modes"],
             }
         )
     return items
+
+
+@router.get("/providers")
+async def list_voiceover_providers():
+    return [_serialize_provider(model) for model in ModelRegistry.all_models()]
 
 
 @router.get("/outputs")
@@ -626,14 +1005,20 @@ async def create_voiceover_job(request: CreateVoiceoverJobRequest, background_ta
         raise HTTPException(422, model.availability_error())
 
     is_vox_model = request.model_id == VOX_MODEL_ID
+    is_miso_model = request.model_id == MISO_MODEL_ID
+    is_breeze_model = request.model_id == BREEZE_MODEL_ID
     vox_mode = str(request.vox_mode or VOX_MODE_CLONE).strip().lower() or VOX_MODE_CLONE
+    breeze_mode = str(request.breeze_mode or BREEZE_MODE_DESIGN).strip().lower() or BREEZE_MODE_DESIGN
     if is_vox_model and vox_mode not in VALID_VOX_MODES:
         raise HTTPException(422, "Vox mode must be design, clone, or continuation")
+    if is_breeze_model and breeze_mode not in VALID_BREEZE_MODES:
+        raise HTTPException(422, "Breeze mode must be design, clone, or direction")
     if request.temp_reference_id and (not is_vox_model or vox_mode != VOX_MODE_CONTINUATION):
         raise HTTPException(422, "Temporary recorded references are only supported for Vox continuation mode")
 
     cleaned_prompt_text = str(request.prompt_text or "").strip() or None
     cleaned_style_text = str(request.style_text or "").strip() or None
+    cleaned_instruction = str(request.instruction or "").strip() or None
 
     profile: VoiceProfile | None = None
     temp_reference_path = _get_temp_reference_path(request.temp_reference_id)
@@ -658,6 +1043,47 @@ async def create_voiceover_job(request: CreateVoiceoverJobRequest, background_ta
 
         if vox_mode == VOX_MODE_CONTINUATION and not cleaned_prompt_text:
             raise HTTPException(422, "Vox continuation mode requires the exact transcript of the reference clip")
+    elif is_miso_model:
+        if request.voice_profile_id:
+            profile = get_profile(request.voice_profile_id)
+            if profile is None:
+                raise HTTPException(422, "Selected voice profile does not exist")
+
+            if not (cleaned_prompt_text or str(profile.reference_transcript or "").strip()):
+                raise HTTPException(422, "MisoTTS voice prompting requires the exact transcript of the reference clip")
+    elif is_breeze_model:
+        if request.seed is not None and (request.seed < 0 or request.seed > 4_294_967_295):
+            raise HTTPException(422, "Breeze seed must be between 0 and 4294967295")
+        if breeze_mode == BREEZE_MODE_DESIGN:
+            if request.voice_profile_id:
+                raise HTTPException(422, "Breeze Voice Design does not use a voice profile")
+            if not cleaned_instruction:
+                raise HTTPException(422, "Breeze Voice Design requires a voice description")
+        else:
+            if not request.voice_profile_id:
+                raise HTTPException(422, f"Breeze Voice {breeze_mode.title()} requires a saved voice profile")
+            profile = get_profile(request.voice_profile_id)
+            if profile is None:
+                raise HTTPException(422, "Selected voice profile does not exist")
+            effective_reference_text = cleaned_prompt_text or str(profile.reference_transcript or "").strip()
+            if not effective_reference_text:
+                raise HTTPException(
+                    422,
+                    "Breeze requires the exact reference transcript. Transcribe or edit the selected voice profile first.",
+                )
+            cleaned_prompt_text = effective_reference_text
+            if effective_reference_text != str(profile.reference_transcript or "").strip():
+                profile = update_profile_reference_transcript(profile.id, effective_reference_text) or profile
+
+            if breeze_mode == BREEZE_MODE_CLONE and cleaned_instruction:
+                raise HTTPException(422, "Breeze Voice Clone does not accept an instruction; select Direction mode instead")
+            if breeze_mode == BREEZE_MODE_DIRECTION and not cleaned_instruction:
+                raise HTTPException(422, "Breeze Voice Direction requires an instruction")
+
+        if breeze_mode == BREEZE_MODE_CLONE and request.cfg_scale is not None:
+            raise HTTPException(422, "Breeze CFG Scale is only exposed for Design and Direction modes")
+        if request.cfg_scale is not None and request.cfg_scale <= 0:
+            raise HTTPException(422, "Breeze CFG Scale must be greater than zero")
     else:
         if not request.voice_profile_id:
             raise HTTPException(422, "This model requires a saved voice profile")
@@ -679,6 +1105,12 @@ async def create_voiceover_job(request: CreateVoiceoverJobRequest, background_ta
     speed = float(request.speed)
     if speed < 0.8 or speed > 1.25:
         raise HTTPException(422, "Speed must be between 0.8 and 1.25")
+
+    if request.speaker_id is not None and request.speaker_id < 0:
+        raise HTTPException(422, "speaker_id must be 0 or greater")
+
+    if request.max_audio_length_ms is not None and request.max_audio_length_ms <= 0:
+        raise HTTPException(422, "max_audio_length_ms must be greater than zero")
 
     job_id = str(uuid.uuid4())
     staged_reference_path = _stage_temp_reference_for_job(job_id, temp_reference_path) if temp_reference_path is not None else None
@@ -705,10 +1137,20 @@ async def create_voiceover_job(request: CreateVoiceoverJobRequest, background_ta
         speed,
         redis_client,
         vox_mode if is_vox_model else None,
-        cleaned_prompt_text if is_vox_model else None,
+        cleaned_prompt_text if (is_vox_model or is_miso_model or is_breeze_model) else None,
         cleaned_style_text if is_vox_model else None,
         str(staged_reference_path) if staged_reference_path is not None else None,
         "Recorded Reference" if temp_reference_path is not None else None,
+        request.speaker_id if is_miso_model else None,
+        request.max_audio_length_ms if is_miso_model else None,
+        breeze_mode if is_breeze_model else None,
+        cleaned_instruction if is_breeze_model else None,
+        (
+            request.cfg_scale if request.cfg_scale is not None else DEFAULT_BREEZE_CFG_SCALE
+            if is_breeze_model and breeze_mode in {BREEZE_MODE_DESIGN, BREEZE_MODE_DIRECTION}
+            else None
+        ),
+        request.seed if is_breeze_model and request.seed is not None else DEFAULT_BREEZE_SEED if is_breeze_model else None,
     )
 
     return {"job_id": job_id, "status": "queued"}

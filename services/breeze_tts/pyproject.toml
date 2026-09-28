@@ -1,0 +1,28 @@
+[project]
+name = "neonforge-breeze-tts-service"
+version = "0.1.0"
+description = "NeonForge Breeze TTS 2 HTTP runtime"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi==0.115.6",
+    "huggingface-hub==0.36.0",
+    "numpy>=2.0,<3",
+    "python-multipart==0.0.20",
+    "qwen-tts==0.1.1",
+    "soundfile>=0.13,<1",
+    # NGC 26.02 carries the Blackwell-tuned torch build but omits torchaudio.
+    # 2.10 provides the ARM64 kaldi frontend required by qwen-tts and imports
+    # cleanly against the vendor torch 2.11 nightly without replacing it.
+    "torchaudio==2.10.0",
+    "transformers==4.57.3",
+    "uvicorn[standard]==0.34.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx==0.28.1",
+    "pytest==8.3.5",
+]
+
+[tool.uv]
+package = false

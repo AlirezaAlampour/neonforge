@@ -36,11 +36,51 @@ interface VoiceProfile {
   reference_transcript?: string | null
 }
 
-interface VoiceoverModelSummary {
+interface VoiceoverProviderGpuProcess {
+  pid?: number | null
+  process_name?: string | null
+  used_memory_mib?: number | null
+}
+
+interface VoiceoverProviderSummary {
+  id: string
+  name: string
+  type: string
+  runtime: string
+  supports_plain_tts: boolean
+  supports_prompt_audio: boolean
+  requires_prompt_transcript: boolean
+  default_max_audio_length_ms?: number | null
+  capability_label?: string | null
+  modes?: string[]
+  license_note?: string | null
+  status: 'available' | 'ready' | 'disabled' | 'unavailable' | 'loading' | 'error'
+  status_badge: string
+  status_detail?: string | null
+  available: boolean
+  experimental?: boolean
+  gpu_device_name?: string | null
+  gpu_total_vram_gb?: number | null
+  gpu_free_vram_gb?: number | null
+  top_gpu_process?: VoiceoverProviderGpuProcess | null
+  actionable_hint?: string | null
+  model_id: string
+  display_name: string
+  supports_reference_audio: boolean
+}
+
+interface LegacyVoiceoverModelSummary {
   model_id: string
   display_name: string
   supports_reference_audio: boolean
   available: boolean
+  availability_error?: string
+  experimental?: boolean
+  status?: VoiceoverProviderSummary['status']
+  status_badge?: string
+  status_detail?: string
+  capability_label?: string
+  modes?: string[]
 }
 
 interface VoiceoverJobStatus {
@@ -79,6 +119,15 @@ interface PersistedVoiceoverFormState {
   voxContinuationReferenceSource?: VoxContinuationReferenceSource
   voxPromptText?: string
   voxStyleText?: string
+  misoSpeakerId?: number | null
+  misoMaxAudioLengthMs?: number
+  misoUsePromptAudio?: boolean
+  misoPromptText?: string
+  breezeMode?: BreezeMode
+  breezeInstruction?: string
+  breezeReferenceText?: string
+  breezeCfgScale?: number
+  breezeSeed?: number
 }
 
 interface PersistedActiveVoiceoverJob {
@@ -111,6 +160,10 @@ const VOICEOVER_FORM_STATE_KEY = 'neonforge-voiceover-form-state-v1'
 const VOICEOVER_ACTIVE_JOBS_KEY = 'neonforge-voiceover-active-jobs-v1'
 const VOICE_PROFILE_INPUT_DEVICE_KEY = 'neonforge-voice-profile-input-device-v1'
 const VOICE_PROFILE_CAPTURE_MODE_KEY = 'neonforge-voice-profile-capture-mode-v1'
+const MISO_MODEL_ID = 'misotts'
+const BREEZE_MODEL_ID = 'breeze_tts'
+const VOICEOVER_PROVIDERS_URL = '/api/v1/voiceover/providers'
+const VOICEOVER_MODELS_URL = '/api/v1/voiceover/models'
 const VOX_MODEL_ID = 'voxcpm2'
 const VOX_MODE_DESIGN = 'design'
 const VOX_MODE_CLONE = 'clone'
@@ -121,6 +174,7 @@ const VOX_CHUNK_ESTIMATE_SIZE = 650
 const BROWSER_RECORDED_PROFILE_SOURCE = 'browser-recording'
 
 type VoxMode = 'design' | 'clone' | 'continuation'
+type BreezeMode = 'design' | 'clone' | 'direction'
 type VoxContinuationReferenceSource = 'profile' | 'record'
 type VoiceProfileReferenceSource = 'upload' | 'record'
 type VoiceProfileCaptureMode = 'raw' | 'enhanced'
@@ -155,6 +209,23 @@ const VOX_MODE_OPTIONS: Array<{
     shortLabel: 'Continue',
     helper: 'Reference transcript.',
   },
+]
+
+const BREEZE_MODE_OPTIONS: Array<{ value: BreezeMode; label: string; helper: string }> = [
+  { value: 'design', label: 'Design', helper: 'Create a voice from a description.' },
+  { value: 'clone', label: 'Clone', helper: 'Match a saved voice profile.' },
+  { value: 'direction', label: 'Direction', helper: 'Keep the voice and direct the delivery.' },
+]
+
+const BREEZE_DIRECTION_PRESETS: Array<{ label: string; text: string }> = [
+  { label: 'Natural', text: 'Natural, balanced delivery.' },
+  { label: 'Conversational', text: 'Sound conversational and relaxed, with natural phrasing.' },
+  { label: 'Energetic', text: 'Use energetic, confident delivery with lively emphasis.' },
+  { label: 'Calm', text: 'Speak calmly with an unhurried, reassuring delivery.' },
+  { label: 'Serious', text: 'Use a restrained, serious tone with clear articulation.' },
+  { label: 'Warm', text: 'Sound warm, thoughtful, and approachable.' },
+  { label: 'Excited', text: 'Sound genuinely excited with expressive emphasis.' },
+  { label: 'Narrator', text: 'Use polished narrator delivery with measured pacing.' },
 ]
 
 function clampSpeed(value: number): number {
@@ -323,6 +394,166 @@ async function apiRequest<T>(url: string, init?: RequestInit): Promise<T> {
     throw new Error(await readErrorMessage(response))
   }
   return response.json()
+}
+
+function normalizeVoiceoverProviderSummary(
+  provider: Omit<VoiceoverProviderSummary, 'model_id' | 'display_name' | 'supports_reference_audio'>,
+): VoiceoverProviderSummary {
+  return {
+    ...provider,
+    model_id: provider.id,
+    display_name: provider.name,
+    supports_reference_audio: provider.supports_prompt_audio,
+  }
+}
+
+function buildFallbackMisoProvider(overrides?: Partial<VoiceoverProviderSummary>): VoiceoverProviderSummary {
+  return {
+    id: MISO_MODEL_ID,
+    name: 'MisoTTS 8B',
+    type: 'text-to-speech',
+    runtime: 'dedicated-service',
+    supports_plain_tts: true,
+    supports_prompt_audio: true,
+    requires_prompt_transcript: true,
+    default_max_audio_length_ms: 10000,
+    capability_label: 'Text / Prompt',
+    modes: ['plain', 'prompted'],
+    status: 'unavailable',
+    status_badge: 'Service offline',
+    status_detail: 'The MisoTTS service is offline or not installed in this stack.',
+    available: false,
+    experimental: true,
+    model_id: MISO_MODEL_ID,
+    display_name: 'MisoTTS 8B',
+    supports_reference_audio: true,
+    ...overrides,
+  }
+}
+
+function normalizeLegacyVoiceoverModel(model: LegacyVoiceoverModelSummary): VoiceoverProviderSummary {
+  const availabilityError = model.availability_error?.trim() || ''
+  return {
+    id: model.model_id,
+    name: model.model_id === MISO_MODEL_ID ? 'MisoTTS 8B' : model.display_name,
+    type: 'text-to-speech',
+    runtime: 'dedicated-service',
+    supports_plain_tts: true,
+    supports_prompt_audio: model.supports_reference_audio,
+    requires_prompt_transcript: model.model_id === MISO_MODEL_ID,
+    default_max_audio_length_ms: model.model_id === MISO_MODEL_ID ? 10000 : null,
+    capability_label: model.capability_label,
+    modes: model.modes ?? [],
+    status: model.status ?? (model.available ? 'available' : 'unavailable'),
+    status_badge: model.status_badge ?? (model.available ? 'Ready' : 'Service offline'),
+    status_detail:
+      model.status_detail ?? (model.available ? `${model.display_name} is ready.` : availabilityError || `${model.display_name} is unavailable.`),
+    available: model.available,
+    experimental: Boolean(model.experimental) || model.model_id === MISO_MODEL_ID,
+    model_id: model.model_id,
+    display_name: model.model_id === MISO_MODEL_ID ? 'MisoTTS 8B' : model.display_name,
+    supports_reference_audio: model.supports_reference_audio,
+  }
+}
+
+function ensureVisibleFallbackProviders(providers: VoiceoverProviderSummary[]): VoiceoverProviderSummary[] {
+  const byId = new Map(providers.map((provider) => [provider.id, provider]))
+  if (!byId.has(MISO_MODEL_ID)) {
+    byId.set(MISO_MODEL_ID, buildFallbackMisoProvider())
+  }
+  return Array.from(byId.values())
+}
+
+function getProviderStatusBadgeClasses(statusBadge: string): string {
+  switch (statusBadge) {
+    case 'Ready':
+      return 'border-emerald-500/30 bg-emerald-500/12 text-emerald-100'
+    case 'Loading model':
+      return 'border-sky-500/30 bg-sky-500/12 text-sky-100'
+    case 'Disabled':
+      return 'border-slate-400/25 bg-slate-400/10 text-slate-100'
+    case 'Runtime error':
+      return 'border-red-500/30 bg-red-500/12 text-red-100'
+    case 'GPU/VRAM error':
+      return 'border-amber-500/30 bg-amber-500/12 text-amber-100'
+    case 'Not installed':
+      return 'border-slate-400/25 bg-slate-400/10 text-slate-100'
+    case 'Service offline':
+      return 'border-red-500/30 bg-red-500/12 text-red-100'
+    default:
+      return 'border-white/[0.08] bg-white/[0.06] text-muted-foreground'
+  }
+}
+
+function formatGpuMemory(value: number | null | undefined): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 'Unknown'
+  return `${value.toFixed(1)} GB`
+}
+
+function formatTopGpuProcess(process: VoiceoverProviderGpuProcess | null | undefined): string {
+  if (!process) return ''
+
+  const segments: string[] = []
+  if (typeof process.pid === 'number') {
+    segments.push(`PID ${process.pid}`)
+  }
+  if (process.process_name?.trim()) {
+    segments.push(process.process_name.trim())
+  }
+  if (typeof process.used_memory_mib === 'number') {
+    segments.push(`${process.used_memory_mib} MiB`)
+  }
+  return segments.join(' · ')
+}
+
+function getProviderDiagnosticRows(
+  model: VoiceoverProviderSummary,
+): Array<{ key: string; label: string; value: string; hint?: boolean }> {
+  const rows: Array<{ key: string; label: string; value: string; hint?: boolean }> = []
+
+  if (model.gpu_device_name?.trim()) {
+    rows.push({
+      key: 'gpu-device',
+      label: 'GPU',
+      value: model.gpu_device_name.trim(),
+    })
+  }
+
+  if (typeof model.gpu_total_vram_gb === 'number') {
+    rows.push({
+      key: 'gpu-total-vram',
+      label: 'GPU total VRAM',
+      value: formatGpuMemory(model.gpu_total_vram_gb),
+    })
+  }
+
+  if (typeof model.gpu_free_vram_gb === 'number') {
+    rows.push({
+      key: 'gpu-free-vram',
+      label: 'GPU free VRAM',
+      value: formatGpuMemory(model.gpu_free_vram_gb),
+    })
+  }
+
+  const topGpuProcess = formatTopGpuProcess(model.top_gpu_process)
+  if (topGpuProcess) {
+    rows.push({
+      key: 'top-gpu-process',
+      label: 'Top GPU process',
+      value: topGpuProcess,
+    })
+  }
+
+  if (model.actionable_hint?.trim()) {
+    rows.push({
+      key: 'gpu-hint',
+      label: 'Hint',
+      value: model.actionable_hint.trim(),
+      hint: true,
+    })
+  }
+
+  return rows
 }
 
 function uploadVoiceProfile(formData: FormData, onProgress: (value: number) => void): Promise<VoiceProfile> {
@@ -531,6 +762,9 @@ function VoiceoverJobsPanel({
                       : ''}
                     {dateFormatter.format(new Date(latestRecentVoiceover.created_at))}
                   </p>
+                  <audio controls preload="metadata" className="mt-3 h-8 w-full" src={latestRecentVoiceover.output_url}>
+                    Your browser does not support audio playback.
+                  </audio>
                 </div>
               </div>
             )}
@@ -546,6 +780,9 @@ function VoiceoverJobsPanel({
                 <p className="mt-1 text-xs text-muted-foreground">
                   Saved {dateFormatter.format(new Date(latestRecentVoiceover.created_at))}
                 </p>
+                <audio controls preload="metadata" className="mt-3 h-8 w-full" src={latestRecentVoiceover.output_url}>
+                  Your browser does not support audio playback.
+                </audio>
               </div>
             ) : (
               <p className="text-xs text-muted-foreground">Renders will appear here.</p>
@@ -570,8 +807,10 @@ export function VoiceoverStudio() {
   const voxRecordedReferenceTokenRef = useRef(0)
   const voxProcessedRecordingRef = useRef<Blob | null>(null)
   const lastAutoSeededVoxPromptRef = useRef('')
+  const lastAutoSeededMisoPromptRef = useRef('')
+  const lastAutoSeededBreezeReferenceRef = useRef('')
   const [profiles, setProfiles] = useState<VoiceProfile[]>([])
-  const [models, setModels] = useState<VoiceoverModelSummary[]>([])
+  const [models, setModels] = useState<VoiceoverProviderSummary[]>([])
   const [recentVoiceovers, setRecentVoiceovers] = useState<RecentVoiceover[]>([])
   const [profilesLoading, setProfilesLoading] = useState(true)
   const [modelsLoading, setModelsLoading] = useState(true)
@@ -603,6 +842,17 @@ export function VoiceoverStudio() {
   const [voxRecordedReferenceError, setVoxRecordedReferenceError] = useState<string | null>(null)
   const [voxPromptText, setVoxPromptText] = useState('')
   const [voxStyleText, setVoxStyleText] = useState('')
+  const [misoSpeakerId, setMisoSpeakerId] = useState<number | null>(0)
+  const [misoMaxAudioLengthMs, setMisoMaxAudioLengthMs] = useState(10000)
+  const [misoUsePromptAudio, setMisoUsePromptAudio] = useState(false)
+  const [misoPromptText, setMisoPromptText] = useState('')
+  const [breezeMode, setBreezeMode] = useState<BreezeMode>('design')
+  const [breezeInstruction, setBreezeInstruction] = useState('')
+  const [breezeReferenceText, setBreezeReferenceText] = useState('')
+  const [breezeCfgScale, setBreezeCfgScale] = useState(4)
+  const [breezeSeed, setBreezeSeed] = useState(42)
+  const [breezeTranscriptPending, setBreezeTranscriptPending] = useState(false)
+  const [breezeTranscriptSaving, setBreezeTranscriptSaving] = useState(false)
   const [trackedJobs, setTrackedJobs] = useState<TrackedVoiceoverJob[]>([])
   const [submittingJob, setSubmittingJob] = useState(false)
   const [deletingOutputId, setDeletingOutputId] = useState<string | null>(null)
@@ -651,21 +901,50 @@ export function VoiceoverStudio() {
   const refreshModels = useCallback(async () => {
     setModelsLoading(true)
     try {
-      const data = await apiRequest<VoiceoverModelSummary[]>('/api/v1/voiceover/models', {
-        cache: 'no-store',
-      })
+      console.info('[voiceover] requesting providers', VOICEOVER_PROVIDERS_URL)
+      let data: VoiceoverProviderSummary[]
+
+      try {
+        const rawProviders = await apiRequest<
+          Array<Omit<VoiceoverProviderSummary, 'model_id' | 'display_name' | 'supports_reference_audio'>>
+        >(VOICEOVER_PROVIDERS_URL, {
+          cache: 'no-store',
+        })
+        data = ensureVisibleFallbackProviders(rawProviders.map((provider) => normalizeVoiceoverProviderSummary(provider)))
+      } catch (providerError: unknown) {
+        const providerMessage = providerError instanceof Error ? providerError.message : 'Provider discovery failed'
+        console.warn('[voiceover] provider discovery failed, falling back to legacy models', {
+          url: VOICEOVER_PROVIDERS_URL,
+          error: providerMessage,
+        })
+        console.info('[voiceover] requesting fallback models', VOICEOVER_MODELS_URL)
+        const legacyModels = await apiRequest<LegacyVoiceoverModelSummary[]>(VOICEOVER_MODELS_URL, {
+          cache: 'no-store',
+        })
+        data = ensureVisibleFallbackProviders(legacyModels.map((model) => normalizeLegacyVoiceoverModel(model)))
+      }
+
+      console.info(
+        '[voiceover] provider ids',
+        data.map((provider) => provider.id),
+      )
       setModels(data)
       setGenerationError(null)
       setSelectedModelId((current) => {
         const preferredId = current || restoredFormStateRef.current?.selectedModelId || ''
-        const preferredModel = preferredId
-          ? data.find((model) => model.model_id === preferredId && model.available)
-          : null
+        const preferredModel = preferredId ? data.find((model) => model.model_id === preferredId) : null
         if (preferredModel) return preferredModel.model_id
-        return data.find((model) => model.available)?.model_id ?? ''
+        return data.find((model) => model.available)?.model_id ?? data[0]?.model_id ?? ''
       })
     } catch (error: unknown) {
-      setGenerationError(error instanceof Error ? error.message : 'Failed to load voiceover models')
+      const message = error instanceof Error ? error.message : 'Failed to load voiceover providers'
+      console.error('[voiceover] all provider discovery paths failed', {
+        providersUrl: VOICEOVER_PROVIDERS_URL,
+        modelsUrl: VOICEOVER_MODELS_URL,
+        error: message,
+      })
+      setModels(ensureVisibleFallbackProviders([]))
+      setGenerationError(message)
     } finally {
       setModelsLoading(false)
     }
@@ -733,6 +1012,33 @@ export function VoiceoverStudio() {
           }
           if (typeof payload.voxStyleText === 'string') {
             setVoxStyleText(payload.voxStyleText)
+          }
+          if (typeof payload.misoSpeakerId === 'number' || payload.misoSpeakerId === null) {
+            setMisoSpeakerId(payload.misoSpeakerId)
+          }
+          if (typeof payload.misoMaxAudioLengthMs === 'number' && payload.misoMaxAudioLengthMs > 0) {
+            setMisoMaxAudioLengthMs(payload.misoMaxAudioLengthMs)
+          }
+          if (typeof payload.misoUsePromptAudio === 'boolean') {
+            setMisoUsePromptAudio(payload.misoUsePromptAudio)
+          }
+          if (typeof payload.misoPromptText === 'string') {
+            setMisoPromptText(payload.misoPromptText)
+          }
+          if (payload.breezeMode === 'design' || payload.breezeMode === 'clone' || payload.breezeMode === 'direction') {
+            setBreezeMode(payload.breezeMode)
+          }
+          if (typeof payload.breezeInstruction === 'string') {
+            setBreezeInstruction(payload.breezeInstruction)
+          }
+          if (typeof payload.breezeReferenceText === 'string') {
+            setBreezeReferenceText(payload.breezeReferenceText)
+          }
+          if (typeof payload.breezeCfgScale === 'number' && payload.breezeCfgScale > 0) {
+            setBreezeCfgScale(Math.min(8, Math.max(1, payload.breezeCfgScale)))
+          }
+          if (typeof payload.breezeSeed === 'number' && payload.breezeSeed >= 0) {
+            setBreezeSeed(Math.min(4294967295, Math.trunc(payload.breezeSeed)))
           }
         }
       } catch {
@@ -821,10 +1127,39 @@ export function VoiceoverStudio() {
       voxContinuationReferenceSource,
       voxPromptText,
       voxStyleText,
+      misoSpeakerId,
+      misoMaxAudioLengthMs,
+      misoUsePromptAudio,
+      misoPromptText,
+      breezeMode,
+      breezeInstruction,
+      breezeReferenceText,
+      breezeCfgScale,
+      breezeSeed,
     }
 
     window.localStorage.setItem(VOICEOVER_FORM_STATE_KEY, JSON.stringify(payload))
-  }, [formStateRestored, outputFormat, script, selectedModelId, selectedProfileId, speed, voxMode, voxContinuationReferenceSource, voxPromptText, voxStyleText])
+  }, [
+    formStateRestored,
+    breezeCfgScale,
+    breezeInstruction,
+    breezeMode,
+    breezeReferenceText,
+    breezeSeed,
+    misoMaxAudioLengthMs,
+    misoPromptText,
+    misoSpeakerId,
+    misoUsePromptAudio,
+    outputFormat,
+    script,
+    selectedModelId,
+    selectedProfileId,
+    speed,
+    voxMode,
+    voxContinuationReferenceSource,
+    voxPromptText,
+    voxStyleText,
+  ])
 
   useEffect(() => {
     if (!profileRecordingPrefsRestored || typeof window === 'undefined') return
@@ -866,13 +1201,19 @@ export function VoiceoverStudio() {
     () => profiles.find((profile) => profile.id === selectedProfileId) ?? null,
     [profiles, selectedProfileId],
   )
+  const isMisoModel = selectedModel?.model_id === MISO_MODEL_ID
+  const isBreezeModel = selectedModel?.model_id === BREEZE_MODEL_ID
   const isVoxModel = selectedModel?.model_id === VOX_MODEL_ID
   const supportsSpeedControl =
     selectedModel?.model_id === 'f5tts' || selectedModel?.model_id === 'fish_speech' || selectedModel?.model_id === VOX_MODEL_ID
   const isVoxDesignMode = isVoxModel && voxMode === VOX_MODE_DESIGN
   const isVoxContinuationMode = isVoxModel && voxMode === VOX_MODE_CONTINUATION
+  const isBreezeDesignMode = isBreezeModel && breezeMode === 'design'
+  const isBreezeCloneMode = isBreezeModel && breezeMode === 'clone'
+  const isBreezeDirectionMode = isBreezeModel && breezeMode === 'direction'
   const voxContinuationUsesRecordedReference = isVoxContinuationMode && voxContinuationReferenceSource === 'record'
-  const requiresSavedVoiceProfile = !isVoxDesignMode && !voxContinuationUsesRecordedReference
+  const requiresSavedVoiceProfile =
+    !isVoxDesignMode && !voxContinuationUsesRecordedReference && !isMisoModel && !isBreezeDesignMode
   const availableModels = useMemo(() => models.filter((model) => model.available), [models])
   const activeJobs = useMemo(
     () => trackedJobs.filter((job) => !isTerminalJobStatus(job.status?.status)),
@@ -888,6 +1229,11 @@ export function VoiceoverStudio() {
     () => activeJobs.map((job) => job.jobId).sort().join(','),
     [activeJobs],
   )
+
+  useEffect(() => {
+    if (!selectedModelId) return
+    console.info('[voiceover] selected provider id', selectedModelId)
+  }, [selectedModelId])
 
   useEffect(() => {
     setSelectedOutputIds((current) =>
@@ -1057,6 +1403,43 @@ export function VoiceoverStudio() {
     voxContinuationReferenceSource,
   ])
 
+  useEffect(() => {
+    if (!isMisoModel || !misoUsePromptAudio) return
+
+    const transcriptSeed = getProfileTranscriptSeed(selectedProfile)
+    if (!transcriptSeed) return
+
+    setMisoPromptText((current) => {
+      if (current.trim() && current !== lastAutoSeededMisoPromptRef.current) {
+        return current
+      }
+
+      lastAutoSeededMisoPromptRef.current = transcriptSeed
+      return transcriptSeed
+    })
+  }, [isMisoModel, misoUsePromptAudio, selectedProfile])
+
+  useEffect(() => {
+    if (!isBreezeModel || isBreezeDesignMode) return
+
+    const transcriptSeed = getProfileTranscriptSeed(selectedProfile)
+    if (!transcriptSeed) {
+      if (!breezeReferenceText.trim() || breezeReferenceText === lastAutoSeededBreezeReferenceRef.current) {
+        setBreezeReferenceText('')
+        lastAutoSeededBreezeReferenceRef.current = ''
+      }
+      return
+    }
+
+    setBreezeReferenceText((current) => {
+      if (current.trim() && current !== lastAutoSeededBreezeReferenceRef.current) {
+        return current
+      }
+      lastAutoSeededBreezeReferenceRef.current = transcriptSeed
+      return transcriptSeed
+    })
+  }, [breezeReferenceText, isBreezeDesignMode, isBreezeModel, selectedProfile])
+
   const roughChunkEstimate = useMemo(() => {
     const trimmedScript = script.trim()
     if (trimmedScript.length === 0) return 0
@@ -1073,7 +1456,15 @@ export function VoiceoverStudio() {
   }, [script, selectedModelId, voxMode])
   const chunkEstimateLabel =
     roughChunkEstimate === 1 && selectedModelId === VOX_MODEL_ID ? 'Estimated chunks: 1 (single pass)' : `Estimated chunks: ${roughChunkEstimate}`
-  const hasRequiredReference = isVoxDesignMode ? true : voxContinuationUsesRecordedReference ? !!voxRecordedReferenceId : !!selectedProfileId
+  const hasRequiredReference = isVoxDesignMode
+    ? true
+    : voxContinuationUsesRecordedReference
+      ? !!voxRecordedReferenceId
+      : isMisoModel
+        ? !misoUsePromptAudio || !!selectedProfileId
+        : isBreezeModel
+          ? isBreezeDesignMode || !!selectedProfileId
+          : !!selectedProfileId
   const profileInputLevelPercent = Math.round(profileRecorder.inputLevel * 100)
   const profileInputMeterState = useMemo(() => {
     if (!profileRecorder.isRecording) {
@@ -1119,6 +1510,9 @@ export function VoiceoverStudio() {
     hasRequiredReference &&
     !!script.trim() &&
     (!isVoxContinuationMode || !!voxPromptText.trim()) &&
+    (!isMisoModel || !misoUsePromptAudio || !!misoPromptText.trim()) &&
+    (!isBreezeModel || (isBreezeDesignMode ? !!breezeInstruction.trim() : !!breezeReferenceText.trim())) &&
+    (!isBreezeDirectionMode || !!breezeInstruction.trim()) &&
     !!selectedModel?.available &&
     (!voxContinuationUsesRecordedReference || !voxRecordedReferencePending) &&
     !submittingJob
@@ -1202,6 +1596,63 @@ export function VoiceoverStudio() {
     setPreviewUrl(`/api/v1/voiceover/profiles/${profile.id}/sample?v=${Date.now()}`)
   }
 
+  const handleTranscribeBreezeProfile = async () => {
+    if (!selectedProfile) return
+    setBreezeTranscriptPending(true)
+    setGenerationError(null)
+    try {
+      const updated = await apiRequest<VoiceProfile>(`/api/v1/voiceover/profiles/${selectedProfile.id}/transcribe`, {
+        method: 'POST',
+      })
+      setProfiles((current) => current.map((profile) => (profile.id === updated.id ? updated : profile)))
+      setBreezeReferenceText(updated.reference_transcript?.trim() || '')
+      lastAutoSeededBreezeReferenceRef.current = updated.reference_transcript?.trim() || ''
+    } catch (error: unknown) {
+      setGenerationError(error instanceof Error ? error.message : 'Failed to transcribe the reference clip')
+    } finally {
+      setBreezeTranscriptPending(false)
+    }
+  }
+
+  const handleSaveBreezeTranscript = async () => {
+    if (!selectedProfile || !breezeReferenceText.trim()) return
+    setBreezeTranscriptSaving(true)
+    setGenerationError(null)
+    try {
+      const updated = await apiRequest<VoiceProfile>(`/api/v1/voiceover/profiles/${selectedProfile.id}/transcript`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reference_transcript: breezeReferenceText.trim() }),
+      })
+      setProfiles((current) => current.map((profile) => (profile.id === updated.id ? updated : profile)))
+      setBreezeReferenceText(updated.reference_transcript?.trim() || '')
+      lastAutoSeededBreezeReferenceRef.current = updated.reference_transcript?.trim() || ''
+    } catch (error: unknown) {
+      setGenerationError(error instanceof Error ? error.message : 'Failed to save the reference transcript')
+    } finally {
+      setBreezeTranscriptSaving(false)
+    }
+  }
+
+  const applyBreezeDirectionPreset = (preset: string) => {
+    setBreezeInstruction((current) => {
+      const trimmed = current.trim()
+      if (!trimmed) return preset
+      if (trimmed.toLowerCase().includes(preset.toLowerCase())) return current
+      return `${trimmed} ${preset}`
+    })
+  }
+
+  const randomizeBreezeSeed = () => {
+    if (typeof window !== 'undefined' && window.crypto?.getRandomValues) {
+      const value = new Uint32Array(1)
+      window.crypto.getRandomValues(value)
+      setBreezeSeed(value[0])
+      return
+    }
+    setBreezeSeed(Math.floor(Math.random() * 4294967296))
+  }
+
   const handleUseSavedVoiceProfile = () => {
     if (voxContinuationReferenceSource === 'record') {
       clearRecordedReference()
@@ -1227,6 +1678,9 @@ export function VoiceoverStudio() {
     const trimmedScript = script.trim()
     const trimmedVoxPromptText = voxPromptText.trim()
     const trimmedVoxStyleText = voxStyleText.trim()
+    const trimmedMisoPromptText = misoPromptText.trim()
+    const trimmedBreezeInstruction = breezeInstruction.trim()
+    const trimmedBreezeReferenceText = breezeReferenceText.trim()
 
     setSubmittingJob(true)
     setGenerationError(null)
@@ -1241,7 +1695,7 @@ export function VoiceoverStudio() {
         speed: requestedSpeed,
       }
 
-      if (requiresSavedVoiceProfile && selectedProfileId) {
+      if ((requiresSavedVoiceProfile || isMisoModel) && selectedProfileId) {
         payload.voice_profile_id = selectedProfileId
       }
       if (voxContinuationUsesRecordedReference && voxRecordedReferenceId) {
@@ -1258,6 +1712,34 @@ export function VoiceoverStudio() {
         }
       }
 
+      if (isMisoModel) {
+        if (misoUsePromptAudio && selectedProfileId) {
+          payload.voice_profile_id = selectedProfileId
+        }
+        if (misoSpeakerId !== null) {
+          payload.speaker_id = misoSpeakerId
+        }
+        if (misoMaxAudioLengthMs > 0) {
+          payload.max_audio_length_ms = misoMaxAudioLengthMs
+        }
+        if (misoUsePromptAudio && trimmedMisoPromptText) {
+          payload.prompt_text = trimmedMisoPromptText
+        }
+      }
+
+      if (isBreezeModel) {
+        payload.breeze_mode = breezeMode
+        payload.seed = breezeSeed
+        if (isBreezeDesignMode || isBreezeDirectionMode) {
+          payload.instruction = trimmedBreezeInstruction
+          payload.cfg_scale = breezeCfgScale
+        }
+        if (!isBreezeDesignMode) {
+          payload.voice_profile_id = selectedProfileId
+          payload.prompt_text = trimmedBreezeReferenceText
+        }
+      }
+
       const response = await apiRequest<{ job_id: string; status: string }>('/api/v1/voiceover/jobs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1270,7 +1752,12 @@ export function VoiceoverStudio() {
           modelId: selectedModel.model_id,
           modelLabel: selectedModel.display_name,
           profileId: voxContinuationUsesRecordedReference ? voxRecordedReferenceId || 'recorded-reference' : selectedProfileId || 'voice-design',
-          profileName: isVoxDesignMode ? 'Voice Design' : voxContinuationUsesRecordedReference ? 'Recorded Reference' : selectedProfile?.name ?? 'Voice',
+          profileName:
+            isVoxDesignMode || isBreezeDesignMode
+              ? 'Voice Design'
+              : voxContinuationUsesRecordedReference
+                ? 'Recorded Reference'
+                : selectedProfile?.name ?? 'Voice',
           createdAt: new Date().toISOString(),
           status: { status: response.status, completed_chunks: 0, total_chunks: 0 },
         }),
@@ -1982,11 +2469,11 @@ export function VoiceoverStudio() {
         <div className="grid gap-2 md:grid-cols-3">
           {models.map((model) => {
             const isActive = selectedModelId === model.model_id
+            const diagnosticRows = getProviderDiagnosticRows(model)
             return (
               <button
                 key={model.model_id}
                 type="button"
-                disabled={!model.available}
                 aria-pressed={isActive}
                 onClick={() => setSelectedModelId(model.model_id)}
                 className={cn(
@@ -1994,29 +2481,101 @@ export function VoiceoverStudio() {
                   isActive
                     ? 'border-primary/70 bg-primary/10 shadow-[0_0_0_3px_rgba(61,123,255,0.12)]'
                     : 'border-white/[0.06] bg-[#0f1218] hover:border-white/[0.12] hover:bg-[#151823]',
-                  !model.available && 'cursor-not-allowed opacity-45 hover:border-white/[0.06] hover:bg-[#0f1218]',
+                  !model.available && 'border-white/[0.08] bg-[#10131a]',
                 )}
               >
-                <div className="flex items-center gap-2">
-                  {isActive && <span className="h-1.5 w-1.5 rounded-full bg-primary" />}
-                  <span className="truncate text-sm font-semibold">{model.display_name}</span>
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {isActive && <span className="h-1.5 w-1.5 rounded-full bg-primary" />}
+                      <span className="truncate text-sm font-semibold">{model.display_name}</span>
+                      {model.experimental && (
+                        <span className="rounded-full border border-fuchsia-500/30 bg-fuchsia-500/12 px-2 py-0.5 text-[10px] font-semibold tracking-[0.12em] text-fuchsia-100">
+                          EXPERIMENTAL
+                        </span>
+                      )}
+                    </div>
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      {model.capability_label || model.model_id}
+                    </p>
+                  </div>
+                  <span
+                    className={cn(
+                      'shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-medium',
+                      getProviderStatusBadgeClasses(model.status_badge),
+                    )}
+                  >
+                    {model.status_badge}
+                  </span>
                 </div>
-                <p className="mt-1 font-mono text-[11px] text-muted-foreground">
-                  {model.available ? model.model_id : 'unavailable'}
-                </p>
+                {model.status_detail && (
+                  <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                    {model.status_detail}
+                  </p>
+                )}
+                {diagnosticRows.length > 0 && (
+                  <div className="mt-2 space-y-1 text-[11px] leading-5 text-muted-foreground">
+                    {diagnosticRows.map((row) => (
+                      <p key={row.key} className={cn(row.hint && 'text-amber-200/80')}>
+                        <span className="font-medium text-foreground/85">{row.label}:</span> {row.value}
+                      </p>
+                    ))}
+                  </div>
+                )}
+                {!model.available && (
+                  <p className="mt-2 text-[11px] font-medium text-amber-200/80">
+                    You can still select this provider to review its setup requirements.
+                  </p>
+                )}
               </button>
             )
           })}
         </div>
+        {selectedModel && (
+          <div
+            className={cn(
+              'rounded-lg border px-3 py-2 text-sm',
+              selectedModel.available
+                ? 'border-emerald-500/25 bg-emerald-500/8 text-emerald-100'
+                : 'border-amber-500/25 bg-amber-500/10 text-amber-100',
+            )}
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                className={cn(
+                  'rounded-full border px-2 py-0.5 text-[11px] font-medium',
+                  getProviderStatusBadgeClasses(selectedModel.status_badge),
+                )}
+              >
+                {selectedModel.status_badge}
+              </span>
+              <span>{selectedModel.status_detail || `${selectedModel.display_name} is ready.`}</span>
+            </div>
+            {selectedModel.license_note && (
+              <p className="mt-2 text-xs text-muted-foreground" title={selectedModel.license_note}>
+                Self-hosted Breeze use is research/non-commercial only.
+              </p>
+            )}
+            {getProviderDiagnosticRows(selectedModel).length > 0 && (
+              <div className="mt-2 space-y-1 text-xs leading-5">
+                {getProviderDiagnosticRows(selectedModel).map((row) => (
+                  <p key={row.key} className={cn(row.hint && 'text-amber-200/90')}>
+                    <span className="font-medium text-foreground/90">{row.label}:</span> {row.value}
+                  </p>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
         {modelsLoading ? (
-          <p className="text-xs text-muted-foreground">Loading models...</p>
+          <p className="text-xs text-muted-foreground">Loading providers...</p>
         ) : availableModels.length === 0 ? (
           <p className="text-xs text-muted-foreground">No runnable voice models are currently available.</p>
         ) : null}
       </FlowStep>
     )
 
-    const renderProfilePicker = (options?: { compact?: boolean }) => (
+    const renderProfilePicker = (options?: { compact?: boolean; allowNone?: boolean }) => (
       <div className="space-y-2">
         <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr),auto]">
           <select
@@ -2025,7 +2584,7 @@ export function VoiceoverStudio() {
             onChange={(event) => setSelectedProfileId(event.target.value)}
             className="nf-control w-full"
           >
-            <option value="">Select a saved profile</option>
+            <option value="">{options?.allowNone ? 'No voice prompt' : 'Select a saved profile'}</option>
             {profiles.map((profile) => (
               <option key={profile.id} value={profile.id}>
                 {profile.name}
@@ -2039,9 +2598,223 @@ export function VoiceoverStudio() {
           )}
         </div>
         {selectedProfile && (
-          <p className="truncate text-xs text-muted-foreground">
-            {selectedProfile.notes || selectedProfile.reference_transcript || 'Reference ready.'}
+          <div className="flex flex-col gap-2 rounded-md bg-[#0f1218] px-3 py-2 sm:flex-row sm:items-center">
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-medium">{selectedProfile.name}</p>
+              <p className="truncate text-xs text-muted-foreground">
+                {selectedProfile.notes || selectedProfile.reference_transcript || 'Reference ready.'}
+              </p>
+            </div>
+            <audio
+              controls
+              preload="none"
+              className="h-8 w-full sm:w-56"
+              src={`/api/v1/voiceover/profiles/${selectedProfile.id}/sample`}
+            >
+              Your browser does not support audio playback.
+            </audio>
+          </div>
+        )}
+      </div>
+    )
+
+    const renderMisoPromptAudioControls = () => (
+      <div className="space-y-4">
+        <div className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-white/[0.06] bg-[#0f1218] p-3">
+          <div className="min-w-0">
+            <Label htmlFor="miso-use-prompt-audio">Prompt Audio</Label>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              Leave this off for plain text generation, or turn it on to condition MisoTTS with a saved prompt clip.
+            </p>
+          </div>
+          <button
+            id="miso-use-prompt-audio"
+            type="button"
+            aria-pressed={misoUsePromptAudio}
+            onClick={() => setMisoUsePromptAudio((current) => !current)}
+            className={cn(
+              'rounded-full border px-3 py-1.5 text-xs font-medium transition-colors',
+              misoUsePromptAudio
+                ? 'border-primary/60 bg-primary/12 text-foreground'
+                : 'border-white/[0.08] bg-[#0a0c12] text-muted-foreground hover:text-foreground',
+            )}
+          >
+            {misoUsePromptAudio ? 'Enabled' : 'Plain TTS'}
+          </button>
+        </div>
+
+        {misoUsePromptAudio ? (
+          <>
+            {renderProfilePicker()}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <Label htmlFor="miso-prompt-text">Prompt Transcript</Label>
+                {selectedProfileTranscript ? (
+                  <span className="rounded-full border border-white/[0.08] px-2 py-0.5 text-[11px] text-muted-foreground">
+                    Profile filled
+                  </span>
+                ) : null}
+              </div>
+              <Textarea
+                id="miso-prompt-text"
+                value={misoPromptText}
+                onChange={(event) => setMisoPromptText(event.target.value)}
+                placeholder="Exact words spoken in the prompt audio clip."
+                rows={4}
+                className="min-h-[92px] border-white/[0.08] bg-[#0f1218]"
+              />
+              <p className="text-xs text-muted-foreground">Required when prompt audio is attached.</p>
+              {!selectedProfileId && (
+                <p className="text-xs text-amber-300">Pick a saved voice profile to attach prompt audio.</p>
+              )}
+            </div>
+          </>
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            Plain text generation can be submitted without a saved voice profile.
           </p>
+        )}
+      </div>
+    )
+
+    const renderBreezeDirectionInput = () => (
+      <div className="space-y-2">
+        <Label htmlFor="breeze-instruction">
+          {isBreezeDesignMode ? 'Voice Description' : 'Direction'}
+        </Label>
+        <Textarea
+          id="breeze-instruction"
+          value={breezeInstruction}
+          onChange={(event) => setBreezeInstruction(event.target.value)}
+          placeholder={
+            isBreezeDesignMode
+              ? 'A warm, thoughtful male voice with clear articulation, relaxed confidence, and natural conversational pacing.'
+              : 'Keep the same speaker identity. Sound energetic and conversational, with natural emphasis.'
+          }
+          rows={4}
+          className="min-h-[104px] border-white/[0.08] bg-[#0f1218]"
+        />
+        <div className="flex flex-wrap gap-1.5" aria-label="Direction presets">
+          {BREEZE_DIRECTION_PRESETS.map((preset) => (
+            <button
+              key={preset.label}
+              type="button"
+              className="rounded-full border border-white/[0.08] bg-[#0f1218] px-2.5 py-1 text-[11px] text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
+              onClick={() => applyBreezeDirectionPreset(preset.text)}
+            >
+              {preset.label}
+            </button>
+          ))}
+        </div>
+      </div>
+    )
+
+    const renderBreezeTranscriptEditor = () => {
+      const storedTranscript = selectedProfileTranscript.trim()
+      const hasTranscript = !!breezeReferenceText.trim()
+      const transcriptChanged = hasTranscript && breezeReferenceText.trim() !== storedTranscript
+
+      return (
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <Label htmlFor="breeze-reference-text">Exact Reference Transcript</Label>
+            <span className={cn('text-[11px]', hasTranscript ? 'text-emerald-300' : 'text-amber-300')}>
+              {hasTranscript ? (transcriptChanged ? 'Edited' : 'Saved with profile') : 'Required'}
+            </span>
+          </div>
+          <Textarea
+            id="breeze-reference-text"
+            value={breezeReferenceText}
+            onChange={(event) => setBreezeReferenceText(event.target.value)}
+            placeholder="Exact words spoken in the reference clip."
+            rows={4}
+            className="min-h-[96px] border-white/[0.08] bg-[#0f1218]"
+          />
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-muted-foreground">Correct any transcription errors before generating.</p>
+            <div className="flex gap-2">
+              {!storedTranscript && selectedProfile && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="gap-2"
+                  disabled={breezeTranscriptPending}
+                  onClick={() => void handleTranscribeBreezeProfile()}
+                >
+                  {breezeTranscriptPending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                  {breezeTranscriptPending ? 'Transcribing...' : 'Transcribe with Whisper'}
+                </Button>
+              )}
+              {selectedProfile && hasTranscript && transcriptChanged && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="gap-2"
+                  disabled={breezeTranscriptSaving}
+                  onClick={() => void handleSaveBreezeTranscript()}
+                >
+                  {breezeTranscriptSaving && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                  {breezeTranscriptSaving ? 'Saving...' : 'Save to Profile'}
+                </Button>
+              )}
+            </div>
+          </div>
+        </div>
+      )
+    }
+
+    const renderBreezeModeControls = () => (
+      <div className="space-y-4">
+        <div className="grid gap-2 md:grid-cols-3">
+          {BREEZE_MODE_OPTIONS.map((option) => {
+            const isActive = breezeMode === option.value
+            return (
+              <button
+                key={option.value}
+                type="button"
+                aria-pressed={isActive}
+                onClick={() => setBreezeMode(option.value)}
+                className={cn(
+                  'rounded-lg border px-3 py-2.5 text-left transition-colors',
+                  isActive
+                    ? 'border-primary/70 bg-primary/10 shadow-[0_0_0_3px_rgba(61,123,255,0.12)]'
+                    : 'border-white/[0.06] bg-[#0f1218] hover:border-white/[0.12] hover:bg-[#151823]',
+                )}
+              >
+                <p className="text-sm font-semibold">{option.label}</p>
+                <p className="mt-1 text-xs text-muted-foreground">{option.helper}</p>
+              </button>
+            )
+          })}
+        </div>
+
+        {isBreezeDesignMode ? (
+          renderBreezeDirectionInput()
+        ) : (
+          <div className="space-y-4">
+            {renderProfilePicker()}
+            {isBreezeDirectionMode && renderBreezeDirectionInput()}
+            {isBreezeCloneMode && renderBreezeTranscriptEditor()}
+            {isBreezeDirectionMode && selectedProfile && !breezeReferenceText.trim() && (
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-500/25 bg-amber-500/10 p-3">
+                <p className="text-sm text-amber-100">This profile needs an exact transcript before Direction can run.</p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="gap-2"
+                  disabled={breezeTranscriptPending}
+                  onClick={() => void handleTranscribeBreezeProfile()}
+                >
+                  {breezeTranscriptPending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                  {breezeTranscriptPending ? 'Transcribing...' : 'Transcribe with Whisper'}
+                </Button>
+              </div>
+            )}
+            {!selectedProfileId && <p className="text-xs text-amber-300">Choose a saved voice profile to continue.</p>}
+          </div>
         )}
       </div>
     )
@@ -2172,10 +2945,18 @@ export function VoiceoverStudio() {
     const renderModeReferenceStep = () => {
       if (!hasSelectedModel) return null
 
+      if (isBreezeModel) {
+        return (
+          <FlowStep number={2} title="Mode / Voice">
+            {renderBreezeModeControls()}
+          </FlowStep>
+        )
+      }
+
       if (!isVoxModel) {
         return (
-          <FlowStep number={2} title="Reference">
-            {renderProfilePicker()}
+          <FlowStep number={2} title={isMisoModel ? 'Prompt Audio' : 'Reference'}>
+            {isMisoModel ? renderMisoPromptAudioControls() : renderProfilePicker({ allowNone: false })}
           </FlowStep>
         )
       }
@@ -2235,6 +3016,21 @@ export function VoiceoverStudio() {
           <span>{script.length} characters</span>
           <span>{chunkEstimateLabel}</span>
         </div>
+        {isBreezeModel && (
+          <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+            <span>Vocal events:</span>
+            {['(laugh)', '(sigh)', '(cough)', '(clears throat)'].map((eventHint) => (
+              <button
+                key={eventHint}
+                type="button"
+                className="rounded-full border border-white/[0.08] px-2 py-0.5 transition-colors hover:text-foreground"
+                onClick={() => setScript((current) => `${current}${current && !current.endsWith(' ') ? ' ' : ''}${eventHint} `)}
+              >
+                {eventHint}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
     )
 
@@ -2284,68 +3080,161 @@ export function VoiceoverStudio() {
             </details>
           )}
 
+          {hasSelectedModel && isBreezeModel && (
+            <details className="ml-0 rounded-lg border border-white/[0.06] bg-[#0f1218] p-3 sm:ml-[60px]">
+              <summary className="cursor-pointer list-none text-sm font-semibold">Advanced controls</summary>
+              <div className="mt-4 space-y-4">
+                {isBreezeDirectionMode && renderBreezeTranscriptEditor()}
+                <div className={cn('grid gap-4', !isBreezeCloneMode && 'md:grid-cols-2')}>
+                  {!isBreezeCloneMode && (
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <Label>Direction strength</Label>
+                        <span className="font-mono text-xs text-muted-foreground">{breezeCfgScale.toFixed(2)}</span>
+                      </div>
+                      <Slider
+                        value={breezeCfgScale}
+                        onChange={(value) => setBreezeCfgScale(Number(Math.min(8, Math.max(1, value)).toFixed(2)))}
+                        min={1}
+                        max={8}
+                        step={0.25}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Higher values follow the direction more strongly. 4 is the recommended starting point.
+                      </p>
+                    </div>
+                  )}
+                  <div className="space-y-2">
+                    <Label htmlFor="breeze-seed">Seed</Label>
+                    <div className="flex gap-2">
+                      <Input
+                        id="breeze-seed"
+                        type="number"
+                        min={0}
+                        max={4294967295}
+                        step={1}
+                        value={breezeSeed}
+                        onChange={(event) => {
+                          const parsed = Number(event.target.value)
+                          setBreezeSeed(Number.isFinite(parsed) ? Math.min(4294967295, Math.max(0, Math.trunc(parsed))) : 42)
+                        }}
+                        className="border-white/[0.08] bg-[#0a0c12] font-mono"
+                      />
+                      <Button type="button" variant="outline" onClick={randomizeBreezeSeed}>
+                        Randomize
+                      </Button>
+                    </div>
+                    <p className="text-xs text-muted-foreground">Keep the seed to compare delivery across script changes.</p>
+                  </div>
+                </div>
+              </div>
+            </details>
+          )}
+
           {hasSelectedModel && (
             <FlowStep number={4} title="Render">
-              <div
-                className={cn(
-                  'grid gap-3 md:items-end',
-                  supportsSpeedControl
-                    ? 'md:grid-cols-[160px,minmax(0,1fr),auto]'
-                    : 'md:grid-cols-[160px,auto]',
+              <div className="space-y-4">
+                {isMisoModel && (
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label htmlFor="miso-speaker-id">Speaker ID</Label>
+                      <Input
+                        id="miso-speaker-id"
+                        type="number"
+                        min={0}
+                        step={1}
+                        value={misoSpeakerId ?? ''}
+                        onChange={(event) => {
+                          const value = event.target.value.trim()
+                          setMisoSpeakerId(value === '' ? null : Math.max(0, Math.trunc(Number(value) || 0)))
+                        }}
+                        className="border-white/[0.08] bg-[#0f1218]"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="miso-max-audio-length-ms">Max audio length ms</Label>
+                      <Input
+                        id="miso-max-audio-length-ms"
+                        type="number"
+                        min={1}
+                        step={100}
+                        value={misoMaxAudioLengthMs}
+                        onChange={(event) => {
+                          const value = event.target.value.trim()
+                          if (!value) {
+                            setMisoMaxAudioLengthMs(10000)
+                            return
+                          }
+                          const nextValue = Math.max(1, Math.trunc(Number(value) || 0))
+                          setMisoMaxAudioLengthMs(nextValue)
+                        }}
+                        className="border-white/[0.08] bg-[#0f1218]"
+                      />
+                    </div>
+                  </div>
                 )}
-              >
-                <div className="space-y-2">
-                  <Label htmlFor="voiceover-output-format">Format</Label>
-                  <select
-                    id="voiceover-output-format"
-                    value={outputFormat}
-                    onChange={(event) => setOutputFormat(event.target.value === 'mp3' ? 'mp3' : 'wav')}
-                    className="nf-control w-full"
-                  >
-                    <option value="wav">wav</option>
-                    <option value="mp3">mp3</option>
-                  </select>
-                </div>
 
-                {supportsSpeedControl && (
-                  <details className="rounded-lg border border-white/[0.06] bg-[#0f1218] p-3">
-                    <summary className="cursor-pointer list-none text-sm font-semibold">Speed</summary>
-                    <div className="mt-3 space-y-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <Label htmlFor="voiceover-speed">Value</Label>
-                        <Input
-                          id="voiceover-speed"
-                          type="number"
+                <div
+                  className={cn(
+                    'grid gap-3 md:items-end',
+                    supportsSpeedControl
+                      ? 'md:grid-cols-[160px,minmax(0,1fr),auto]'
+                      : 'md:grid-cols-[160px,auto]',
+                  )}
+                >
+                  <div className="space-y-2">
+                    <Label htmlFor="voiceover-output-format">Format</Label>
+                    <select
+                      id="voiceover-output-format"
+                      value={outputFormat}
+                      onChange={(event) => setOutputFormat(event.target.value === 'mp3' ? 'mp3' : 'wav')}
+                      className="nf-control w-full"
+                    >
+                      <option value="wav">wav</option>
+                      <option value="mp3">mp3</option>
+                    </select>
+                  </div>
+
+                  {supportsSpeedControl && (
+                    <details className="rounded-lg border border-white/[0.06] bg-[#0f1218] p-3">
+                      <summary className="cursor-pointer list-none text-sm font-semibold">Speed</summary>
+                      <div className="mt-3 space-y-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <Label htmlFor="voiceover-speed">Value</Label>
+                          <Input
+                            id="voiceover-speed"
+                            type="number"
+                            min={MIN_SPEED}
+                            max={MAX_SPEED}
+                            step={SPEED_STEP}
+                            value={speedInput}
+                            onChange={(event) => setSpeedInput(event.target.value)}
+                            onBlur={() => updateSpeed(parseFloat(speedInput))}
+                            className="w-24 border-white/[0.08] bg-[#0a0c12] font-mono text-sm"
+                          />
+                        </div>
+                        <Slider
+                          value={speed}
+                          onChange={(value) => updateSpeed(value)}
                           min={MIN_SPEED}
                           max={MAX_SPEED}
                           step={SPEED_STEP}
-                          value={speedInput}
-                          onChange={(event) => setSpeedInput(event.target.value)}
-                          onBlur={() => updateSpeed(parseFloat(speedInput))}
-                          className="w-24 border-white/[0.08] bg-[#0a0c12] font-mono text-sm"
                         />
                       </div>
-                      <Slider
-                        value={speed}
-                        onChange={(value) => updateSpeed(value)}
-                        min={MIN_SPEED}
-                        max={MAX_SPEED}
-                        step={SPEED_STEP}
-                      />
-                    </div>
-                  </details>
-                )}
+                    </details>
+                  )}
 
-                <Button
-                  type="button"
-                  size="lg"
-                  className="w-full gap-2 px-8 font-semibold md:min-w-[168px]"
-                  disabled={!canGenerate}
-                  onClick={handleGenerate}
-                >
-                  {submittingJob ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />}
-                  {submittingJob ? 'Queueing...' : activeJobs.length > 0 ? 'Add to Queue' : 'Render'}
-                </Button>
+                  <Button
+                    type="button"
+                    size="lg"
+                    className="w-full gap-2 px-8 font-semibold md:min-w-[168px]"
+                    disabled={!canGenerate}
+                    onClick={handleGenerate}
+                  >
+                    {submittingJob ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />}
+                    {submittingJob ? 'Queueing...' : activeJobs.length > 0 ? 'Add to Queue' : 'Render'}
+                  </Button>
+                </div>
               </div>
             </FlowStep>
           )}

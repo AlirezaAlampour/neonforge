@@ -109,6 +109,10 @@ services:
       FISH_SPEECH_INTERNAL_URL: ${FISH_SPEECH_INTERNAL_URL:-http://fish_speech:8000}
       LIVEPORTRAIT_URL: http://liveportrait:8000
       LIPSYNC_URL: http://lipsync:8000
+      MISOTTS_BASE_URL: ${MISOTTS_BASE_URL:-http://misotts:8000}
+      MISOTTS_INTERNAL_URL: ${MISOTTS_INTERNAL_URL:-http://misotts:8000}
+      BREEZE_TTS_ENABLED: ${BREEZE_TTS_ENABLED:-false}
+      BREEZE_TTS_INTERNAL_URL: ${BREEZE_TTS_INTERNAL_URL:-http://breeze_tts:8000}
       VOXCPM2_ENABLED: ${VOXCPM2_ENABLED:-false}
       VOXCPM2_INTERNAL_URL: ${VOXCPM2_INTERNAL_URL:-http://voxcpm2:8000}
       WAN21_URL: http://wan21:8000
@@ -233,6 +237,65 @@ services:
       timeout: 60s
       retries: 3
       start_period: 180s
+    networks:
+      - ai-net
+
+  misotts:
+    build:
+      context: ./services/misotts
+      dockerfile: Dockerfile
+    container_name: ai-misotts
+    restart: unless-stopped
+    <<: *common-gpu
+    environment:
+      <<: *common-env
+      TTS_PROVIDER: ${TTS_PROVIDER:-misotts}
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-${HF_TOKEN:-}}
+      NO_TORCH_COMPILE: ${NO_TORCH_COMPILE:-1}
+      MISOTTS_MODEL_ID: ${MISOTTS_MODEL_ID:-MisoLabs/MisoTTS}
+      MISOTTS_DEVICE: ${MISOTTS_DEVICE:-auto}
+      MISOTTS_MAX_AUDIO_MS: ${MISOTTS_MAX_AUDIO_MS:-10000}
+      MISOTTS_ENABLE_VOICE_PROMPT: ${MISOTTS_ENABLE_VOICE_PROMPT:-true}
+      MISOTTS_ENABLE_WATERMARK: ${MISOTTS_ENABLE_WATERMARK:-true}
+      MISOTTS_CHECKOUT_DIR: ${MISOTTS_CHECKOUT_DIR:-/opt/misotts-src}
+      MISOTTS_MIN_CUDA_FREE_GB: ${MISOTTS_MIN_CUDA_FREE_GB:-12}
+    volumes: *common-volumes
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      <<: *healthcheck-defaults
+      start_period: 180s
+    networks:
+      - ai-net
+
+  breeze_tts:
+    build:
+      context: ./services/breeze_tts
+      dockerfile: Dockerfile
+      args:
+        BREEZE_TTS_SOURCE_REV: ${BREEZE_TTS_SOURCE_REV:-008f769016b0a24711becd7a4925030bc93f608c}
+    container_name: ai-breeze-tts
+    restart: unless-stopped
+    <<: *common-gpu
+    environment:
+      <<: *common-env
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-${HF_TOKEN:-}}
+      BREEZE_TTS_SERVICE_ENABLED: "true"
+      BREEZE_TTS_MODEL_ID: ${BREEZE_TTS_MODEL_ID:-BreezeBlue/Breeze-TTS-2}
+      BREEZE_TTS_MODEL_PATH: ${BREEZE_TTS_MODEL_PATH:-/models/breeze_tts/Breeze-TTS-2}
+      BREEZE_TTS_AUTO_DOWNLOAD: ${BREEZE_TTS_AUTO_DOWNLOAD:-true}
+      BREEZE_TTS_SOURCE_DIR: /opt/breeze-tts-src
+    volumes: *common-volumes
+    profiles:
+      - breeze
+      - full
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
     networks:
       - ai-net
 
