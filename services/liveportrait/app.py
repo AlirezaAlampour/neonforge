@@ -12,6 +12,7 @@ import asyncio
 import gc
 import logging
 import os
+import importlib.util
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -24,6 +25,7 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 IDLE_TIMEOUT = int(os.getenv("LIVEPORTRAIT_IDLE_TIMEOUT", "1800"))
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "/outputs/liveportrait"))
 MODEL_DIR = Path(os.getenv("MODEL_DIR", "/models/liveportrait"))
+SOURCE_DIR = Path(os.getenv("LIVEPORTRAIT_SOURCE_DIR", "/opt/LivePortrait"))
 
 logging.basicConfig(level=LOG_LEVEL)
 log = logging.getLogger("liveportrait")
@@ -32,6 +34,49 @@ _pipeline = None
 _model_loaded = False
 _last_activity = time.time()
 _load_lock = asyncio.Lock()
+
+
+def runtime_preflight() -> dict:
+    """Check the exact adapter and weights used by this service."""
+    missing: list[str] = []
+    if not SOURCE_DIR.is_dir():
+        missing.append(str(SOURCE_DIR))
+
+    model_files = []
+    if MODEL_DIR.is_dir():
+        model_files = [
+            path
+            for path in MODEL_DIR.rglob("*")
+            if path.is_file() and path.suffix.lower() in {".ckpt", ".pth", ".pt", ".onnx", ".safetensors"}
+        ]
+    if not model_files:
+        missing.append(str(MODEL_DIR))
+
+    try:
+        adapter_available = importlib.util.find_spec("liveportrait.api") is not None
+    except (AttributeError, ImportError, ModuleNotFoundError, ValueError):
+        adapter_available = False
+    if not adapter_available:
+        missing.append("python module liveportrait.api")
+
+    if missing:
+        status = "missing_model" if model_files == [] else "runtime_error"
+        return {
+            "available": False,
+            "status": status,
+            "detail": (
+                "LivePortrait is preserved as a legacy workflow, but its runtime adapter or weights are incomplete. "
+                "See docs/models.md before enabling it."
+            ),
+            "missing": missing,
+        }
+
+    return {
+        "available": True,
+        "status": "ready" if _model_loaded else "idle",
+        "detail": "Legacy LivePortrait runtime is installed and can load on demand.",
+        "missing": [],
+    }
 
 
 def _mem_used_gb() -> float:
@@ -55,6 +100,9 @@ def load_model():
     log.info("Loading LivePortrait from %s (UMA used: %.1f GB)...", MODEL_DIR, mem_before)
     t0 = time.time()
     try:
+        preflight = runtime_preflight()
+        if not preflight["available"]:
+            raise RuntimeError(preflight["detail"] + f" Missing: {', '.join(preflight['missing'])}")
         from liveportrait.api import LivePortraitPipeline
         _pipeline = LivePortraitPipeline(
             model_dir=str(MODEL_DIR),
@@ -141,13 +189,18 @@ app = FastAPI(title="LivePortrait Service", lifespan=lifespan)
 
 @app.get("/healthz")
 async def healthz():
-    return {"status": "alive"}
+    return {"status": "alive", "legacy": True}
 
 
 @app.get("/readyz")
 async def readyz():
+    preflight = runtime_preflight()
     return {
-        "status": "ready" if _model_loaded else "idle",
+        "status": preflight["status"],
+        "available": preflight["available"],
+        "detail": preflight["detail"],
+        "missing": preflight["missing"],
+        "legacy": True,
         "model_loaded": _model_loaded,
         "uma_used_gb": _mem_used_gb(),
     }
@@ -155,7 +208,10 @@ async def readyz():
 
 @app.get("/smoke")
 async def smoke():
-    await _ensure_model()
+    try:
+        await _ensure_model()
+    except Exception as exc:
+        raise HTTPException(503, str(exc)) from exc
     return {"status": "ok", "model_loaded": _model_loaded, "uma_used_gb": _mem_used_gb()}
 
 
@@ -167,7 +223,10 @@ async def animate(
     global _last_activity
     _last_activity = time.time()
 
-    await _ensure_model()
+    try:
+        await _ensure_model()
+    except Exception as exc:
+        raise HTTPException(503, str(exc)) from exc
 
     out_id = str(uuid.uuid4())
     src_path = OUTPUT_DIR / f"{out_id}_src.png"

@@ -8,11 +8,10 @@ Checks:
   3. /smoke on all services (lightweight deterministic test) with latency
   4. Host memory: MemAvailable, SwapFree, used%, swap%
   5. Per-container RSS via docker stats
-  6. Per-process GPU memory via nvidia-smi pmon (if available)
-  7. Latency percentiles (p50/p95/p99) for smoke tests
+  6. Latency percentiles (p50/p95/p99) for smoke tests
 
 Usage:
-  python3 scripts/verify_dgx.py [--gateway-url http://localhost:8080] [--smoke]
+  uv run scripts/verify_dgx.py [--gateway-url http://localhost:8080] [--smoke]
 
 Exit codes:
   0 = all checks passed
@@ -240,78 +239,6 @@ def report_container_rss() -> list[dict]:
     return containers
 
 
-def report_gpu_processes() -> list[dict]:
-    print(f"\n{c('bold', '--- GPU Processes (per-process memory) ---')}")
-    gpu_procs = []
-
-    # Method 1: nvidia-smi pmon (per-process GPU utilization + framebuffer memory)
-    try:
-        result = subprocess.run(
-            ["nvidia-smi", "pmon", "-c", "1", "-s", "um"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            lines = result.stdout.strip().split("\n")
-            header_shown = False
-            for line in lines:
-                if line.startswith("#"):
-                    if not header_shown:
-                        clean = line.lstrip("# ").strip()
-                        if clean:
-                            print(f"  {c('dim', clean)}")
-                            header_shown = True
-                    continue
-                parts = line.split()
-                if len(parts) >= 4 and parts[1] != "-":
-                    pid = parts[1]
-                    gpu_mem = parts[3] if len(parts) > 3 else "?"
-                    proc_type = parts[2] if len(parts) > 2 else "?"
-                    cmd = parts[-1] if len(parts) > 7 else "?"
-                    print(f"  PID {pid:<8} type={proc_type:<4} fb_mem={gpu_mem:<8}MB cmd={cmd}")
-                    gpu_procs.append({
-                        "pid": pid, "type": proc_type,
-                        "fb_mem_mb": gpu_mem, "cmd": cmd,
-                    })
-            if not gpu_procs:
-                print(f"  {c('cyan', 'No active GPU processes (or UMA does not report per-process memory)')}")
-        else:
-            # Fallback: query-compute-apps
-            result = subprocess.run(
-                ["nvidia-smi", "--query-compute-apps=pid,name,used_memory",
-                 "--format=csv,noheader"],
-                capture_output=True, text=True, timeout=10,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                print(f"  {'PID':<10} {'Process':<40} {'GPU Memory'}")
-                for line in result.stdout.strip().split("\n"):
-                    print(f"  {line.strip()}")
-            else:
-                print(f"  {c('cyan', 'No GPU compute processes or UMA does not report per-process memory')}")
-    except FileNotFoundError:
-        print(f"  {c('yellow', 'nvidia-smi not found (run on host, not in container)')}")
-    except Exception as e:
-        print(f"  {c('yellow', f'GPU process query failed: {e}')}")
-
-    # GPU temperature / utilization / clocks
-    try:
-        result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=temperature.gpu,utilization.gpu,power.draw,clocks.gr,clocks.mem",
-             "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            parts = [p.strip() for p in result.stdout.strip().split(",")]
-            if len(parts) >= 3:
-                temp, util, power = parts[0], parts[1], parts[2]
-                clk = parts[3] if len(parts) > 3 else "?"
-                mem_clk = parts[4] if len(parts) > 4 else "?"
-                print(f"\n  GPU: {temp}C | Util: {util}% | Power: {power}W | Clk: {clk}/{mem_clk} MHz")
-    except Exception:
-        pass
-
-    return gpu_procs
-
-
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -374,13 +301,21 @@ def main():
     # -- 3. Smoke tests --
     if args.smoke:
         print(f"\n{c('bold', '--- Smoke Tests ---')}")
-        for name, info in (svc_status or {}).items():
-            if info.get("alive"):
-                ok, latency = check_smoke_via_exec(name)
-                results.setdefault(name, {})["smoke"] = ok
-                smoke_latencies.setdefault(name, []).append(latency)
-                if not ok:
-                    all_passed = False
+        meminfo = read_meminfo()
+        available_gb = meminfo.get("MemAvailable", 0) / 1048576
+        if available_gb < 40.0:
+            print(c("red", f"  BLOCKED: only {available_gb:.1f} GB MemAvailable; smoke tests require 40.0 GB."))
+            results["smoke_guard"] = {"passed": False, "available_gb": round(available_gb, 1)}
+            all_passed = False
+        else:
+            print(f"  Memory guard passed: {available_gb:.1f} GB available")
+            for name, info in (svc_status or {}).items():
+                if info.get("alive") and info.get("ready"):
+                    ok, latency = check_smoke_via_exec(name)
+                    results.setdefault(name, {})["smoke"] = ok
+                    smoke_latencies.setdefault(name, []).append(latency)
+                    if not ok:
+                        all_passed = False
 
         if smoke_latencies:
             print(f"\n  {c('bold', 'Smoke Test Latency Percentiles:')}")
@@ -409,7 +344,6 @@ def main():
     # -- 5. Host metrics --
     mem_report = report_host_memory()
     container_rss = report_container_rss()
-    gpu_procs = report_gpu_processes()
 
     # -- 6. Summary --
     print(f"\n{c('bold', '=' * 64)}")
@@ -426,7 +360,6 @@ def main():
             "services": results,
             "host_memory": mem_report,
             "containers": container_rss,
-            "gpu_processes": gpu_procs,
             "smoke_latency_percentiles": {
                 name: percentiles(lats) for name, lats in smoke_latencies.items()
             } if smoke_latencies else {},

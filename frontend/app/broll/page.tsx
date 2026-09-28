@@ -1,8 +1,9 @@
 'use client'
 
 import { useState } from 'react'
-import { Video, Send, ChevronDown, ChevronUp, Sparkles } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, Video, Send, ChevronDown, ChevronUp, Sparkles } from 'lucide-react'
 import { useJobPoller } from '@/hooks/use-job-poller'
+import { useSystemStatus } from '@/hooks/use-system-status'
 import { submitWan21 } from '@/lib/api'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -11,8 +12,9 @@ import { Label } from '@/components/ui/label'
 import { Slider } from '@/components/ui/slider'
 import { Input } from '@/components/ui/input'
 import { JobTracker } from '@/components/job-tracker'
+import { Badge } from '@/components/ui/badge'
 
-export default function BRollStudioPage() {
+export default function VideoGenerationPage() {
   const [prompt, setPrompt] = useState('')
   const [negativePrompt, setNegativePrompt] = useState('')
   const [numFrames, setNumFrames] = useState(16)
@@ -25,9 +27,14 @@ export default function BRollStudioPage() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const { jobs, trackJob, dismissJob } = useJobPoller()
+  const { memory, services } = useSystemStatus(10000)
+  const wanStatus = services?.wan21
+  const wanStateLabel = wanStatus?.state_label || (wanStatus ? (wanStatus.ready ? 'Ready' : 'Disabled') : 'Checking')
+  const hasMemory = Boolean(memory && memory.available_gb >= memory.thresholds.reserve_heavy_gb)
+  const canGenerate = Boolean(wanStatus?.ready && hasMemory)
 
   const handleSubmit = async () => {
-    if (!prompt.trim()) return
+    if (!prompt.trim() || !canGenerate) return
     setError(null)
     setSubmitting(true)
 
@@ -56,16 +63,39 @@ export default function BRollStudioPage() {
       <div>
         <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
           <Video className="h-6 w-6 text-primary" />
-          B-Roll Studio
+          Video Generation
         </h1>
         <p className="text-sm text-muted-foreground mt-1">
-          Generate cinematic B-roll clips with Wan 2.1 text-to-video.
+          Create short local video clips with the configured Wan backend.
         </p>
       </div>
 
       <div className="grid gap-6 lg:grid-cols-[1fr,380px]">
         {/* Main Form */}
         <div className="space-y-6">
+          <Card className={canGenerate ? 'border-emerald-500/20' : 'border-amber-500/30'}>
+            <CardContent className="flex items-start gap-3 p-4">
+              {canGenerate ? (
+                <CheckCircle2 className="mt-0.5 h-5 w-5 text-emerald-400" />
+              ) : (
+                <AlertTriangle className="mt-0.5 h-5 w-5 text-amber-400" />
+              )}
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="text-sm font-semibold">Wan service</p>
+                  <Badge variant={wanStatus?.ready ? 'success' : 'secondary'}>
+                    {wanStateLabel}
+                  </Badge>
+                </div>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {!hasMemory && memory
+                    ? `${memory.available_gb.toFixed(1)} GB available; heavy jobs require ${memory.thresholds.reserve_heavy_gb.toFixed(0)} GB free.`
+                    : wanStatus?.detail || 'Checking the on-demand video runtime.'}
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+
           {/* Prompt */}
           <Card>
             <CardHeader>
@@ -191,15 +221,15 @@ export default function BRollStudioPage() {
 
           {/* Submit */}
           <div className="flex items-center gap-4">
-            <Button onClick={handleSubmit} disabled={!prompt.trim() || submitting} className="gap-2 px-6" size="lg">
+            <Button onClick={handleSubmit} disabled={!prompt.trim() || !canGenerate || submitting} className="gap-2 px-6" size="lg">
               <Send className="h-4 w-4" />
-              {submitting ? 'Submitting...' : 'Generate B-Roll'}
+              {submitting ? 'Submitting...' : 'Generate Video'}
             </Button>
             {error && <p className="text-sm text-red-400">{error}</p>}
           </div>
 
           <p className="text-xs text-muted-foreground/60">
-            Wan 2.1 is lazy-start: the first generation may take longer while the model loads (~8-40 GB UMA).
+            The configured Wan runtime starts on demand. Its first generation may include model download and load time.
           </p>
         </div>
 

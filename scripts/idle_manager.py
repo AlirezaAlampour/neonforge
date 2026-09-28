@@ -15,7 +15,7 @@ Features:
   - Does NOT use IPMI/BMC — relies on nvidia-smi and /proc/meminfo
 
 Usage:
-  python3 scripts/idle_manager.py [--interval 60] [--dry-run]
+  uv run scripts/idle_manager.py [--interval 60] [--dry-run]
 """
 
 import argparse
@@ -25,6 +25,7 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -37,7 +38,7 @@ log = logging.getLogger("idle-manager")
 CHECK_INTERVAL = int(os.getenv("IDLE_CHECK_INTERVAL", "60"))
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
-COMPOSE_DIR = os.getenv("COMPOSE_DIR", "/home/xxfactionsxx/dgx-ai-stack")
+COMPOSE_DIR = os.getenv("COMPOSE_DIR", str(Path(__file__).resolve().parents[1]))
 
 # Service idle timeouts (seconds). 0 = never stop.
 SERVICE_TIMEOUTS = {

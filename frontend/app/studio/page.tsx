@@ -51,11 +51,10 @@ import type {
   StudioTool,
 } from '@/lib/types'
 
-const tabs: Array<{ id: StudioTool; label: string; icon: typeof Mic }> = [
-  { id: 'character-swap', label: 'Character Swap', icon: Boxes },
-  { id: 'f5tts', label: 'F5-TTS', icon: Mic },
-  { id: 'liveportrait', label: 'LivePortrait', icon: Video },
-  { id: 'reactor', label: 'ReActor', icon: Clapperboard },
+const legacyTabs: Array<{ id: StudioTool; label: string; icon: typeof Mic }> = [
+  { id: 'f5tts', label: 'F5-TTS (Legacy)', icon: Mic },
+  { id: 'liveportrait', label: 'LivePortrait (Legacy)', icon: Video },
+  { id: 'reactor', label: 'ReActor (Experimental)', icon: Clapperboard },
 ]
 
 export default function StudioPage() {
@@ -461,30 +460,44 @@ export default function StudioPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight">Creative Studio</h1>
+        <h1 className="text-2xl font-bold tracking-tight">Character</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Persistent tab state, reusable assets, history gallery, one-click presets, and ComfyUI workflow templates.
+          Replace a character from a reference image while preserving motion from a driving video.
         </p>
       </div>
 
       <Card>
-        <CardContent className="flex flex-wrap gap-2 p-4">
-          {tabs.map((tab) => {
-            const Icon = tab.icon
-            const active = activeTab === tab.id
-            return (
-              <Button
-                key={tab.id}
-                type="button"
-                variant={active ? 'default' : 'outline'}
-                className="gap-2"
-                onClick={() => setActiveTab(tab.id)}
-              >
-                <Icon className="h-4 w-4" />
-                {tab.label}
-              </Button>
-            )
-          })}
+        <CardContent className="flex flex-wrap items-start gap-2 p-4">
+          <Button
+            type="button"
+            variant={activeTab === 'character-swap' ? 'default' : 'outline'}
+            className="gap-2"
+            onClick={() => setActiveTab('character-swap')}
+          >
+            <Boxes className="h-4 w-4" />
+            Replace
+          </Button>
+          <details className="rounded-md border border-border/60 px-3 py-2 text-sm text-muted-foreground">
+            <summary className="cursor-pointer select-none font-medium">Legacy &amp; experimental tools</summary>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {legacyTabs.map((tab) => {
+                const Icon = tab.icon
+                const active = activeTab === tab.id
+                return (
+                  <Button
+                    key={tab.id}
+                    type="button"
+                    variant={active ? 'default' : 'outline'}
+                    className="gap-2"
+                    onClick={() => setActiveTab(tab.id)}
+                  >
+                    <Icon className="h-4 w-4" />
+                    {tab.label}
+                  </Button>
+                )
+              })}
+            </div>
+          </details>
         </CardContent>
       </Card>
 
@@ -545,10 +558,10 @@ export default function StudioPage() {
                   <div>
                     <CardTitle className="flex items-center gap-2 text-base">
                       <Boxes className="h-4 w-4 text-primary" />
-                      Character Swap Templates
+                      Character workflow
                     </CardTitle>
                     <CardDescription>
-                      Choose a managed ComfyUI workflow template, validate required models, and queue a real tracked job.
+                      Wan2.2 Animate replacement through the managed ComfyUI workflow.
                     </CardDescription>
                   </div>
                   <Button type="button" variant="outline" size="sm" className="gap-2" onClick={handleRefreshComfy}>
@@ -677,7 +690,7 @@ export default function StudioPage() {
                       <div>
                         <Label>Reference Image</Label>
                         <p className="mt-1 text-xs text-muted-foreground">
-                          Upload or select the still image to patch into template node `57.inputs.image`.
+                          Upload or select the character you want to place into the driving clip.
                         </p>
                       </div>
                       <select
@@ -724,7 +737,7 @@ export default function StudioPage() {
                       <div>
                         <Label>Driving Video</Label>
                         <p className="mt-1 text-xs text-muted-foreground">
-                          Upload or select the source clip to patch into template node `63.inputs.video`.
+                          Upload or select the clip whose motion and scene should be preserved.
                         </p>
                       </div>
                       <select
@@ -876,7 +889,7 @@ export default function StudioPage() {
 
                   <Button type="button" className="gap-2" onClick={handleCharacterSwapSubmit} disabled={!canSubmitCharacterSwap}>
                     <Send className="h-4 w-4" />
-                    {submitting ? 'Submitting...' : 'Queue Character Swap'}
+                    {submitting ? 'Submitting...' : 'Generate Character Video'}
                   </Button>
                 </CardContent>
               </Card>

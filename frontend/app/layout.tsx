@@ -7,8 +7,8 @@ import { Sidebar } from '@/components/sidebar'
 const inter = Inter({ subsets: ['latin'], variable: '--font-inter' })
 
 export const metadata: Metadata = {
-  title: 'NeonForge Console',
-  description: "Director's Console for DGX Spark AI Stack",
+  title: 'NeonForge',
+  description: 'Local-first voice and video creation for NVIDIA DGX Spark',
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

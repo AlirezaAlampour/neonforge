@@ -76,7 +76,7 @@ const initialReactor: ReactorFormState = {
   loraStrength: 0.75,
 }
 
-const CHARACTER_SWAP_STORE_VERSION = 2
+const CHARACTER_SWAP_STORE_VERSION = 3
 const LEGACY_CHARACTER_SWAP_STEPS_DEFAULT = 6
 const LEGACY_CHARACTER_SWAP_DENOISE_DEFAULT = 5
 const LEGACY_CHARACTER_SWAP_SUBJECT_POINTS_JSON =
@@ -161,7 +161,7 @@ function migrateCharacterSwapState(value: unknown, version: number): Record<stri
 export const useStudioStore = create<StudioState>()(
   persist(
     (set, get) => ({
-      activeTab: 'f5tts',
+      activeTab: 'character-swap',
       f5tts: initialF5TTS,
       liveportrait: initialLivePortrait,
       reactor: initialReactor,
@@ -264,6 +264,7 @@ export const useStudioStore = create<StudioState>()(
         const payload = toRecord(persistedState)
         return {
           ...payload,
+          activeTab: 'character-swap',
           characterSwap: migrateCharacterSwapState(payload.characterSwap, version),
         }
       },

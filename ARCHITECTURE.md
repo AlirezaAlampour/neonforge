@@ -1,63 +1,84 @@
 # Architecture
 
-## Overview
+NeonForge is a single-host, local-first media studio for DGX Spark. This modernization pass keeps the existing Next.js, FastAPI, Redis, Docker Compose, model-service, and ComfyUI boundaries intact.
 
-- `neonforge` is a single-host DGX Spark AI stack orchestrated from the root `docker-compose.yml`.
-- The runtime model is Docker Compose on the internal bridge network `ai-net`, with shared host mounts for models, Hugging Face cache, outputs, and logs.
-- The gateway includes an isolated `gateway/voiceover/` subsystem for reusable voice profiles, long-form narration jobs, and recent voiceover output management.
-- Public entry points are the frontend on `:3000`, the gateway on `:8080`, Redis on `:6379`, and optional ComfyUI on `:8188`.
-- Most backend services are internal FastAPI apps listening on port `8000`; the gateway is the main routed API surface.
+```mermaid
+flowchart TD
+    Browser[Creator browser] --> Frontend[Next.js frontend]
+    Frontend --> Gateway[FastAPI gateway / control plane]
+    Gateway <--> Redis[(Redis job and activity state)]
+    Gateway --> Supervisor[Internal lifecycle supervisor]
+    Supervisor --> Compose[Docker Compose]
+
+    Gateway --> Voice[Voiceover services]
+    Gateway --> Whisper[Faster-Whisper]
+    Gateway --> Lip[Lip Sync - Legacy]
+    Gateway --> Live[LivePortrait - Legacy]
+    Gateway --> Wan[Wan video - lazy]
+    Gateway --> Comfy[ComfyUI Character workflow]
+    Gateway -. future after validation .-> Avatar[Avatar]
+
+    Voice & Whisper & Lip & Live & Wan & Comfy --> Storage[(Models / HF cache / assets / outputs)]
+    Voice & Whisper & Lip & Live & Wan & Comfy --> UMA[NVIDIA GPU + shared UMA]
+```
+
+## Request and lifecycle flow
+
+1. The browser loads the workflow-first Next.js UI and sends API requests through its gateway rewrites.
+2. The FastAPI gateway validates inputs, checks shared-memory admission, creates job/history state, and calls the relevant model service.
+3. Redis stores job and activity state where the existing implementation requires it.
+4. For managed lazy services, the gateway asks the internal supervisor to use Docker Compose. The gateway does not mount the Docker socket.
+5. Model services read shared weights/cache and write shared outputs. The browser receives progress and result URLs through the gateway.
+
+## Product surfaces
+
+| Surface | Backend path | Lifecycle |
+| --- | --- | --- |
+| Voiceover | Gateway `voiceover/` subsystem → F5/Fish/Miso/Breeze/Vox | F5 baseline; additional engines optional/profile-gated; model-level lazy loading where supported |
+| Video Generation | Gateway → Wan 2.1 service | `wan21` profile, supervisor-managed, singleton, lazy load/unload |
+| Character | Gateway managed template → ComfyUI | `comfyui` profile; heavyweight and memory-gated |
+| Avatar | No backend until LongCat or another candidate passes DGX validation | UI reports Disabled |
+| Lip Sync | Gateway → video-retalking adapter | `legacy` profile; preflight-gated |
+| Utilities & Status | Gateway memory/service/model inspection | Always available with the control plane |
+| Transcription | Gateway → Faster-Whisper | Baseline service |
+
+LivePortrait, the earlier F5 workflow surface, and ReActor are preserved inside Character's collapsed Legacy/experimental tools. They are not primary navigation destinations.
 
 ## Services
 
-| Service | Path | Dockerfile | Exposes / Talks To | Primary Dependencies |
-| --- | --- | --- | --- | --- |
-| Redis | Root compose only | No local Dockerfile (`redis:7.4-alpine` image) | Host `:6379`; used by gateway and host idle manager for job/activity state | Redis, named volume `redis-data` |
-| Frontend | `frontend/` | `frontend/Dockerfile` | Host `:3000`; rewrites `/api/v1/*`, `/jobs/*`, `/memory`, `/services/*`, `/healthz` to `gateway:8000` | Next.js 14, React 18, Tailwind |
-| Gateway | `gateway/` | `gateway/Dockerfile` | Host `:8080` to container `:8000`; proxies requests to AI services, owns voiceover routes, queries Redis, and calls supervisor for lifecycle operations | FastAPI, Redis, `httpx`, `python-multipart`, `ffmpeg`, shared `/outputs` and `/app/data/assets` |
-| Supervisor | `supervisor/` | `supervisor/Dockerfile` | Internal-only `supervisor:8000`; gateway calls `/start/{service}`, `/stop/{service}`, `/status/{service}` | FastAPI, `httpx`, Docker socket, read-only mount of repo compose project |
-| Whisper | `services/whisper/` | `services/whisper/Dockerfile` | Internal `whisper:8000`; gateway proxies `/api/v1/whisper/transcribe` to `/transcribe` | Faster-Whisper, FastAPI, shared model/cache/output mounts |
-| F5-TTS | `services/f5tts/` | `services/f5tts/Dockerfile` | Internal `f5tts:8000`; gateway proxies direct TTS routes and Voiceover Studio can call it as a long-form backend | FastAPI, `librosa`, `soundfile`, shared model/cache/output mounts |
-| Fish Speech | Compose image only (`dgx-ai-stack-fish_speech`) | No local Dockerfile in this repo | Internal `fish_speech:8000`; Voiceover Studio can call it when `FISH_SPEECH_ENABLED=true` | External/prebuilt image, shared model/cache/output mounts, Whisper-assisted reference transcription |
-| VoxCPM2 | `services/voxcpm2/` | `services/voxcpm2/Dockerfile` | Internal `voxcpm2:8000`; Voiceover Studio can call it when `VOXCPM2_ENABLED=true` | FastAPI, PyTorch, shared model/cache/output mounts |
-| MisoTTS | `services/misotts/` | `services/misotts/Dockerfile` | Internal `misotts:8000`; optional plain/prompt-conditioned Voiceover Studio backend | FastAPI, NGC PyTorch, uv-locked dependencies, shared model/cache/output mounts |
-| Breeze TTS 2 | `services/breeze_tts/` | `services/breeze_tts/Dockerfile` | Internal `breeze_tts:8000`; optional Design/Clone/Direction backend when `BREEZE_TTS_ENABLED=true` | Official Breeze eager runtime, NGC PyTorch, uv-locked dependencies, shared model/cache/output mounts |
-| LivePortrait | `services/liveportrait/` | `services/liveportrait/Dockerfile` | Internal `liveportrait:8000`; gateway proxies `/api/v1/liveportrait/animate` to `/animate`; supervisor can start/stop it | FastAPI, PyTorch, ONNX Runtime, InsightFace, MediaPipe, shared mounts |
-| Lip-sync | `services/lipsync/` | `services/lipsync/Dockerfile` | Internal `lipsync:8000`; gateway proxies `/api/v1/lipsync/sync` to `/sync`; supervisor can start/stop it | FastAPI, PyTorch, OpenCV, video-retalking stack, GFPGAN/Real-ESRGAN, shared mounts |
-| Wan 2.1 | `services/wan21/` | `services/wan21/Dockerfile` | Internal `wan21:8000`; gateway proxies `/api/v1/wan21/generate` to `/generate`; lazy-start profile started by supervisor and stopped after idle | FastAPI, PyTorch, Diffusers, Transformers, Accelerate, shared mounts, heavy UMA memory budget |
-| ComfyUI (optional) | `comfyUI/` | `comfyUI/Dockerfile` with build context `.` | Host `:8188`; direct browser/API access; not routed through gateway | Upstream ComfyUI checkout, custom dependency resolver, shared `/models/comfyui` and `/outputs/comfyui/*` |
-| Wan UI (optional) | `Wan2.2-Animate/` | `Wan2.2-Animate/Dockerfile` | Host `:7860`; separate Gradio UI for Wan experimentation | Custom Wan 2.2 UI stack, shared HF cache and ComfyUI model mount |
-| Idle Manager (host) | `scripts/idle_manager.py`, `systemd/` | Not containerized | No API; reads Redis activity keys and uses Docker CLI to stop idle containers | Python, local Redis, Docker CLI, `/proc/meminfo`, `nvidia-smi` |
+| Service | Repository path | Responsibility |
+| --- | --- | --- |
+| Frontend | `frontend/` | Next.js 16 UI, API rewrites, local workflow state |
+| Gateway | `gateway/` | FastAPI control plane, validation, memory gates, jobs, history, uploads, Voiceover, ComfyUI template patching |
+| Supervisor | `supervisor/` | Internal-only Compose lifecycle operations; sole Docker-socket holder |
+| Redis | Compose image | Job/activity state and readiness dependency |
+| Whisper | `services/whisper/` | Speech-to-text |
+| F5-TTS | `services/f5tts/` | Default/reliability-first voice synthesis |
+| Fish Speech | Prebuilt local image | Optional higher-quality voice synthesis |
+| MisoTTS | `services/misotts/` | Optional prompt-conditioned voice synthesis |
+| Breeze TTS 2 | `services/breeze_tts/` | Optional voice design/clone/direction |
+| VoxCPM2 | `services/voxcpm2/` | Experimental design/clone/continuation |
+| Lip Sync | `services/lipsync/` | Legacy subprocess adapter with strict runtime/model preflight |
+| LivePortrait | `services/liveportrait/` | Legacy portrait adapter with strict import/model preflight |
+| Wan 2.1 | `services/wan21/` | On-demand text-to-video |
+| ComfyUI | `comfyUI/` | Managed Wan2.2 Character graph execution |
 
-## Communication
+The untracked `Wan2.2-Animate/` checkout is a separate cloud/API-backed Gradio experiment. It is isolated behind `cloud-experimental` and is not the supported Character implementation.
 
-- Browser clients usually enter through `frontend:3000`, which rewrites API traffic to `gateway:8000`.
-- External API clients can call the gateway directly on host port `8080`.
-- The gateway talks to Redis for readiness and activity state, then proxies work to `whisper`, `f5tts`, `fish_speech`, `misotts`, `breeze_tts`, `voxcpm2`, `liveportrait`, `lipsync`, and `wan21` over `ai-net`.
-- Voiceover Studio routes live inside the gateway and persist reusable profile assets under `/srv/ai/assets/voice_profiles`.
-- New voice-profile uploads accept WAV, MP3, and M4A, then normalize to a PCM WAV master on ingest before downstream model use.
-- The gateway does not mount the Docker socket. It delegates lifecycle operations to the internal supervisor service over HTTP.
-- The supervisor holds the Docker socket and runs `docker compose` to start or stop managed services (`wan21`, `f5tts`, `liveportrait`, `lipsync`).
-- The host idle manager polls Redis activity timestamps and stops idle managed containers from outside Docker via the local Docker CLI.
-- All GPU-backed services and ComfyUI share the same host-backed storage for models, cache, outputs, and logs.
-- Breeze stays within the gateway-first job path: the frontend submits a normal voiceover job, the gateway resolves the saved profile/transcript, and the dedicated service returns WAV. The service loads its model once and serializes inference internally.
-- Breeze uses the standard sentence/paragraph chunker and WAV stitcher. Vox-only silence trimming/crossfades are not applied.
+## Storage and network
 
-## Shared Infrastructure
+| Host path | Container path | Use |
+| --- | --- | --- |
+| `/srv/ai/models` | `/models` | Explicit model checkpoints |
+| `/srv/ai/cache/hf` | `/cache/hf` | Shared Hugging Face cache |
+| `/srv/ai/outputs` | `/outputs` | Generated media, history data, ComfyUI I/O |
+| `/srv/ai/assets` | `/app/data/assets` | Uploaded reusable assets and voice profiles |
+| `/srv/ai/logs` | `/logs` | Service logs |
 
-- Compose root: `docker-compose.yml`
-- Internal network: `ai-net`
-- Shared host mounts:
-  - `/srv/ai/models -> /models`
-  - `/srv/ai/cache/hf -> /cache/hf`
-  - `/srv/ai/outputs -> /outputs`
-  - `/srv/ai/assets -> /app/data/assets`
-  - `/srv/ai/logs -> /logs`
-- Redis persistence: named volume `redis-data`
-- Runtime assumptions: single NVIDIA GPU, ARM64, and UMA memory-aware admission logic in the gateway
+All services communicate over the `ai-net` bridge. The frontend and gateway bind to loopback by default. Redis also remains loopback-only; ComfyUI exposes a host port only when its profile is enabled.
 
-## Notes
+## Resource safety
 
-- `comfyUI` is optional and only starts when the `comfyui` or `full` Compose profile is enabled.
-- `wan21` is also profile-gated and is designed for on-demand start through the supervisor rather than always-on startup.
-- Several docs and host-side unit files still reference the older path `~/dgx-ai-stack` or `/home/xxfactionsxx/dgx-ai-stack`; the current repository path is `/home/xxfactionsxx/neonforge`.
+DGX Spark CPU and GPU allocations share unified memory. Admission uses `/proc/meminfo`, not discrete-VRAM fields. The default reserve is 40 GB for heavy Wan/ComfyUI work, 10 GB for medium services, and 2 GB for light work. Model services retain their existing idle teardown where implemented; optional containers are profile-gated so a base launch does not keep every model resident.
+
+This is intentionally a small control plane, not a scheduler or plugin framework.

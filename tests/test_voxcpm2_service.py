@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import types
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -9,6 +10,24 @@ from fastapi.testclient import TestClient
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVICE_APP_PATH = ROOT / "services" / "voxcpm2" / "app.py"
+
+
+try:
+    import soundfile  # noqa: F401
+except ModuleNotFoundError:
+    sys.modules["soundfile"] = types.SimpleNamespace(write=lambda *_args, **_kwargs: None)
+
+try:
+    import torch  # noqa: F401
+except ModuleNotFoundError:
+    @contextmanager
+    def _inference_mode():
+        yield
+
+    sys.modules["torch"] = types.SimpleNamespace(
+        inference_mode=_inference_mode,
+        cuda=types.SimpleNamespace(empty_cache=lambda: None),
+    )
 
 spec = importlib.util.spec_from_file_location("voxcpm2_service_app", SERVICE_APP_PATH)
 assert spec is not None and spec.loader is not None

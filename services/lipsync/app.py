@@ -41,6 +41,8 @@ IDLE_TIMEOUT = int(os.getenv("LIPSYNC_IDLE_TIMEOUT", "1800"))
 BACKEND = os.getenv("LIPSYNC_BACKEND", "video-retalking")
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "/outputs/lipsync"))
 MODEL_DIR = Path(os.getenv("MODEL_DIR", "/models/lipsync"))
+VIDEO_RETALKING_DIR = Path(os.getenv("VIDEO_RETALKING_DIR", "/opt/video-retalking"))
+SADTALKER_DIR = Path(os.getenv("SADTALKER_DIR", "/opt/SadTalker"))
 
 logging.basicConfig(level=LOG_LEVEL)
 log = logging.getLogger("lipsync")
@@ -51,6 +53,55 @@ _load_lock = asyncio.Lock()
 
 # For backends that load in-process models (SadTalker), track object refs here.
 _pipeline = None
+
+
+def backend_preflight() -> dict:
+    """Report whether the configured legacy backend can accept real work."""
+    if BACKEND == "video-retalking":
+        runtime_path = VIDEO_RETALKING_DIR / "inference.py"
+        checkpoint_root = MODEL_DIR / "video-retalking" / "checkpoints"
+    elif BACKEND == "sadtalker":
+        runtime_path = SADTALKER_DIR / "inference.py"
+        checkpoint_root = MODEL_DIR / "sadtalker" / "checkpoints"
+    else:
+        return {
+            "available": False,
+            "status": "runtime_error",
+            "detail": f"Unsupported lip-sync backend: {BACKEND}",
+            "missing": [],
+        }
+
+    missing: list[str] = []
+    if not runtime_path.is_file():
+        missing.append(str(runtime_path))
+
+    checkpoint_files = []
+    if checkpoint_root.is_dir():
+        checkpoint_files = [
+            path
+            for path in checkpoint_root.rglob("*")
+            if path.is_file() and path.suffix.lower() in {".ckpt", ".pth", ".pt", ".safetensors"}
+        ]
+    if not checkpoint_files:
+        missing.append(str(checkpoint_root))
+
+    if missing:
+        return {
+            "available": False,
+            "status": "missing_model" if runtime_path.is_file() else "runtime_error",
+            "detail": (
+                "The legacy lip-sync backend is installed incompletely. "
+                "See docs/models.md before enabling this workflow."
+            ),
+            "missing": missing,
+        }
+
+    return {
+        "available": True,
+        "status": "ready" if _model_loaded else "idle",
+        "detail": "Legacy backend is installed and can load on demand.",
+        "missing": [],
+    }
 
 
 def _mem_used_gb() -> float:
@@ -75,19 +126,14 @@ def load_model():
     log.info("Loading lip-sync backend: %s (UMA used: %.1f GB)", BACKEND, mem_before)
     t0 = time.time()
 
+    preflight = backend_preflight()
+    if not preflight["available"]:
+        raise RuntimeError(preflight["detail"] + f" Missing: {', '.join(preflight['missing'])}")
+
     if BACKEND == "video-retalking":
         # video-retalking runs inference as a subprocess, so "loading"
         # means verifying checkpoints are present. The actual GPU memory
         # is allocated/freed per invocation by the subprocess.
-        required = ["checkpoints"]
-        missing = []
-        for d in required:
-            p = MODEL_DIR / "video-retalking" / d
-            if not p.exists():
-                missing.append(str(p))
-        if missing:
-            log.warning("Missing model directories: %s", missing)
-
         _model_loaded = True
         log.info("video-retalking backend ready in %.1fs", time.time() - t0)
 
@@ -168,14 +214,19 @@ app = FastAPI(title="Lip-sync Service", lifespan=lifespan)
 
 @app.get("/healthz")
 async def healthz():
-    return {"status": "alive", "backend": BACKEND}
+    return {"status": "alive", "backend": BACKEND, "legacy": True}
 
 
 @app.get("/readyz")
 async def readyz():
+    preflight = backend_preflight()
     return {
-        "status": "ready" if _model_loaded else "idle",
+        "status": preflight["status"],
         "backend": BACKEND,
+        "legacy": True,
+        "available": preflight["available"],
+        "detail": preflight["detail"],
+        "missing": preflight["missing"],
         "model_loaded": _model_loaded,
         "uma_used_gb": _mem_used_gb(),
     }
@@ -183,7 +234,10 @@ async def readyz():
 
 @app.get("/smoke")
 async def smoke():
-    await _ensure_model()
+    try:
+        await _ensure_model()
+    except Exception as exc:
+        raise HTTPException(503, str(exc)) from exc
     return {"status": "ok", "backend": BACKEND, "uma_used_gb": _mem_used_gb()}
 
 
@@ -195,7 +249,10 @@ async def sync(
     global _last_activity
     _last_activity = time.time()
 
-    await _ensure_model()
+    try:
+        await _ensure_model()
+    except Exception as exc:
+        raise HTTPException(503, str(exc)) from exc
 
     out_id = str(uuid.uuid4())
     vid_path = OUTPUT_DIR / f"{out_id}_input.mp4"
@@ -212,7 +269,7 @@ async def sync(
 
         if BACKEND == "video-retalking":
             cmd = [
-                "python", "/app/video-retalking/inference.py",
+                "python", str(VIDEO_RETALKING_DIR / "inference.py"),
                 "--face", str(vid_path),
                 "--audio", str(aud_path),
                 "--outfile", str(out_path),
@@ -229,7 +286,7 @@ async def sync(
 
         elif BACKEND == "sadtalker":
             cmd = [
-                "python", "/app/sadtalker/inference.py",
+                "python", str(SADTALKER_DIR / "inference.py"),
                 "--driven_audio", str(aud_path),
                 "--source_image", str(vid_path),
                 "--result_dir", str(OUTPUT_DIR),

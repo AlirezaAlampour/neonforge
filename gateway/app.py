@@ -2327,31 +2327,114 @@ async def memory():
     return get_memory_status()
 
 
+SERVICE_STATE_LABELS = {
+    "ready": "Ready",
+    "loading": "Loading",
+    "disabled": "Disabled",
+    "missing_model": "Missing model",
+    "runtime_error": "Runtime error",
+    "in_use": "In use",
+}
+BLOCKING_SERVICE_STATES = {"missing_model", "runtime_error", "disabled"}
+
+
+async def inspect_service_status(name: str, url: str) -> dict[str, Any]:
+    """Return a creator-facing state while retaining the legacy booleans."""
+    health_payload: dict[str, Any] = {}
+    ready_payload: dict[str, Any] = {}
+    health_error: Optional[str] = None
+
+    try:
+        response = await http_client.get(f"{url}/healthz", timeout=3.0)
+        alive = response.status_code == 200
+        if alive:
+            try:
+                health_payload = response.json()
+            except ValueError:
+                health_payload = {}
+    except Exception as exc:
+        alive = False
+        health_error = str(exc)
+
+    if alive:
+        try:
+            response = await http_client.get(f"{url}/readyz", timeout=3.0)
+            if response.status_code == 200:
+                try:
+                    ready_payload = response.json()
+                except ValueError:
+                    ready_payload = {}
+        except Exception as exc:
+            health_error = str(exc)
+
+    raw_state = str(ready_payload.get("status", "")).strip().lower()
+    if name == "wan21" and not alive:
+        state = "ready"
+        detail = "Stopped between jobs; the supervisor starts it on demand after the UMA memory gate passes."
+    elif not alive:
+        state = "disabled"
+        detail = "Service is stopped."
+    elif raw_state in {"missing_model", "missing_models"}:
+        state = "missing_model"
+        detail = str(ready_payload.get("detail") or "Required model files are missing.")
+    elif raw_state in {"loading", "starting"}:
+        state = "loading"
+        detail = str(ready_payload.get("detail") or "Model is loading.")
+    elif raw_state in {"busy", "in_use", "running"}:
+        state = "in_use"
+        detail = str(ready_payload.get("detail") or "Service is processing a job.")
+    elif raw_state == "disabled":
+        state = "disabled"
+        detail = str(ready_payload.get("detail") or "Service is disabled.")
+    elif raw_state in {"error", "runtime_error", "unavailable", "failed"}:
+        state = "runtime_error"
+        detail = str(
+            ready_payload.get("detail")
+            or ready_payload.get("error")
+            or "Runtime failed its readiness check."
+        )
+    elif not ready_payload:
+        state = "runtime_error"
+        detail = health_error or "Readiness endpoint did not return a usable response."
+    elif raw_state in {"ready", "idle", "ok", "alive"}:
+        # "idle" means the runtime is installed and can load on demand.
+        state = "ready"
+        detail = str(
+            ready_payload.get("detail")
+            or ("Model is loaded." if ready_payload.get("model_loaded") else "Runtime is ready and loads on demand.")
+        )
+    else:
+        state = "runtime_error"
+        detail = str(ready_payload.get("detail") or f"Unrecognized readiness state: {raw_state or '<empty>'}.")
+
+    # Wan is intentionally stopped between jobs and started by the supervisor.
+    can_accept_jobs = state not in BLOCKING_SERVICE_STATES
+
+    last_activity = None
+    if rdb:
+        timestamp = await rdb.get(f"activity:{name}")
+        if timestamp:
+            last_activity = float(timestamp)
+
+    return {
+        "alive": alive,
+        "ready": can_accept_jobs,
+        "state": state,
+        "state_label": SERVICE_STATE_LABELS[state],
+        "detail": detail,
+        "last_activity": last_activity,
+        "backend": ready_payload.get("backend") or health_payload.get("backend"),
+        "legacy": bool(ready_payload.get("legacy") or health_payload.get("legacy")),
+        "model_loaded": ready_payload.get("model_loaded"),
+        "missing": ready_payload.get("missing", []),
+    }
+
+
 @app.get("/services/status")
 async def services_status():
     results = {}
     for name, url in SERVICE_URLS.items():
-        try:
-            resp = await http_client.get(f"{url}/healthz", timeout=3.0)
-            alive = resp.status_code == 200
-        except Exception:
-            alive = False
-
-        ready = False
-        if alive:
-            try:
-                resp = await http_client.get(f"{url}/readyz", timeout=3.0)
-                ready = resp.status_code == 200
-            except Exception:
-                pass
-
-        last_activity = None
-        if rdb:
-            ts = await rdb.get(f"activity:{name}")
-            if ts:
-                last_activity = float(ts)
-
-        results[name] = {"alive": alive, "ready": ready, "last_activity": last_activity}
+        results[name] = await inspect_service_status(name, url)
     return results
 
 
@@ -2540,6 +2623,17 @@ async def liveportrait_animate(
     source_image: UploadFile = File(...),
     driving_video: UploadFile = File(...),
 ):
+    availability = await inspect_service_status("liveportrait", SERVICE_URLS["liveportrait"])
+    if not availability["ready"]:
+        raise HTTPException(
+            503,
+            detail={
+                "error": availability["detail"],
+                "service": "liveportrait",
+                "state": availability["state"],
+                "missing": availability["missing"],
+            },
+        )
     src_data = await source_image.read()
     drv_data = await driving_video.read()
     files = {
@@ -2551,6 +2645,17 @@ async def liveportrait_animate(
 
 @app.post("/api/v1/lipsync/sync")
 async def lipsync_sync(request: Request, video: UploadFile = File(...), audio: UploadFile = File(...)):
+    availability = await inspect_service_status("lipsync", SERVICE_URLS["lipsync"])
+    if not availability["ready"]:
+        raise HTTPException(
+            503,
+            detail={
+                "error": availability["detail"],
+                "service": "lipsync",
+                "state": availability["state"],
+                "missing": availability["missing"],
+            },
+        )
     vid_data = await video.read()
     aud_data = await audio.read()
     files = {

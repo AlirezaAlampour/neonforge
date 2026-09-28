@@ -4,6 +4,10 @@
 
 # Python
 __pycache__/
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
 *.py[cod]
 *$py.class
 *.egg-info/
@@ -15,6 +19,7 @@ build/
 # Node.js / Frontend
 node_modules/
 .next/
+*.tsbuildinfo
 frontend/certs/
 
 # IDE
@@ -37,6 +42,17 @@ Thumbs.db
 /outputs/
 /cache/
 /logs/
+*.safetensors
+*.ckpt
+*.pth
+*.onnx
+
+# Local-only experimental checkout (not part of the supported stack)
+/Wan2.2-Animate/
+
+# Generated media and diagnostics
+docs/images/*.tmp.png
+*.patched.json
 
 # Temporary files
 *.tmp

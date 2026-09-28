@@ -2,7 +2,7 @@
 
 Voiceover Studio is the isolated long-form cloned voiceover path in NeonForge.
 
-It is intentionally separate from the older Creative Studio / Voice Studio F5-TTS flow.
+It remains isolated from the older direct F5-TTS surface, which is preserved only under Character's collapsed Legacy/experimental tools.
 
 ## Why it exists
 
@@ -117,7 +117,7 @@ Output naming format:
 
 ## Important constraints
 
-- preserve old Creative Studio TTS flow
+- preserve the older direct F5-TTS flow for compatibility, but keep it out of primary navigation
 - treat Voiceover Studio as isolated
 - prefer small, reversible changes
 - avoid broad refactors unless necessary

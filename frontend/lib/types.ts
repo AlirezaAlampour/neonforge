@@ -19,6 +19,13 @@ export interface MemoryStatus {
 export interface ServiceStatus {
   alive: boolean
   ready: boolean
+  state?: 'ready' | 'loading' | 'disabled' | 'missing_model' | 'runtime_error' | 'in_use'
+  state_label?: string
+  detail?: string
+  backend?: string | null
+  legacy?: boolean
+  model_loaded?: boolean | null
+  missing?: string[]
   last_activity: number | null
 }
 

@@ -2,7 +2,7 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { Activity, Mic, Video, Clapperboard, ChevronLeft, ChevronRight, LayoutGrid } from 'lucide-react'
+import { Activity, Boxes, Clapperboard, Mic, UserRound, Video, ChevronLeft, ChevronRight } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { cn } from '@/lib/utils'
 import { MemoryGauge } from './memory-gauge'
@@ -10,12 +10,12 @@ import { MemoryGauge } from './memory-gauge'
 const SIDEBAR_COLLAPSED_KEY = 'neonforge-sidebar-collapsed-v1'
 
 const navItems = [
-  { href: '/status', label: 'System Status', icon: Activity },
-  { href: '/studio', label: 'Creative Studio', icon: LayoutGrid },
-  { href: '/voice', label: 'Voice Studio', icon: Mic },
-  { href: '/voiceover', label: 'Voiceover Studio', icon: Mic },
-  { href: '/broll', label: 'B-Roll Studio', icon: Video },
-  { href: '/lipsync', label: 'Lip Sync Studio', icon: Clapperboard },
+  { href: '/voiceover', label: 'Voiceover', icon: Mic },
+  { href: '/broll', label: 'Video Generation', icon: Video },
+  { href: '/studio', label: 'Character', icon: Boxes },
+  { href: '/avatar', label: 'Avatar', icon: UserRound },
+  { href: '/lipsync', label: 'Lip Sync', icon: Clapperboard },
+  { href: '/status', label: 'Utilities & Status', icon: Activity },
 ]
 
 function NeonForgeLogo({ collapsed }: { collapsed: boolean }) {

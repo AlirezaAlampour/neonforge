@@ -18,15 +18,15 @@ const serviceLabels: Record<string, { label: string; tier: string; icon: typeof 
 }
 
 export default function StatusPage() {
-  const { memory, services, loading, refresh } = useSystemStatus()
+  const { services, loading, error, refresh } = useSystemStatus()
 
   return (
     <div className="space-y-8">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">System Status</h1>
-          <p className="text-sm text-muted-foreground mt-1">DGX Spark UMA memory and model status</p>
+          <h1 className="text-2xl font-bold tracking-tight">Utilities &amp; Status</h1>
+          <p className="text-sm text-muted-foreground mt-1">Shared memory and workflow readiness</p>
         </div>
         <Button variant="outline" size="sm" onClick={refresh} className="gap-2">
           <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
@@ -49,6 +49,12 @@ export default function StatusPage() {
         </CardContent>
       </Card>
 
+      {error && (
+        <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
+          {error}
+        </div>
+      )}
+
       {/* Services Grid */}
       <div>
         <h2 className="text-lg font-semibold mb-4">Model Services</h2>
@@ -62,31 +68,27 @@ export default function StatusPage() {
               }
               const Icon = meta.icon
 
-              let state: 'active' | 'idle' | 'offline'
-              let stateLabel: string
-              let badgeVariant: 'success' | 'warning' | 'danger'
-
-              if (status.ready) {
-                state = 'active'
-                stateLabel = 'Active'
-                badgeVariant = 'success'
-              } else if (status.alive) {
-                state = 'idle'
-                stateLabel = 'Idle'
-                badgeVariant = 'warning'
-              } else {
-                state = 'offline'
-                stateLabel = 'Asleep'
-                badgeVariant = 'danger'
-              }
+              const serviceState = status.state || (status.ready ? 'ready' : status.alive ? 'loading' : 'disabled')
+              const healthy = serviceState === 'ready'
+              const busy = serviceState === 'loading' || serviceState === 'in_use'
+              const failed = serviceState === 'missing_model' || serviceState === 'runtime_error'
+              const stateLabel = status.state_label || (healthy ? 'Ready' : status.alive ? 'Loading' : 'Disabled')
+              const badgeVariant: 'success' | 'warning' | 'danger' | 'secondary' = healthy
+                ? 'success'
+                : busy
+                  ? 'warning'
+                  : failed
+                    ? 'danger'
+                    : 'secondary'
 
               return (
                 <Card
                   key={name}
                   className={cn(
                     'transition-all duration-200 hover:border-border',
-                    state === 'active' && 'border-emerald-500/20',
-                    state === 'offline' && 'opacity-60',
+                    healthy && 'border-emerald-500/20',
+                    failed && 'border-red-500/20',
+                    serviceState === 'disabled' && 'opacity-70',
                   )}
                 >
                   <CardContent className="p-5">
@@ -95,35 +97,45 @@ export default function StatusPage() {
                         <div
                           className={cn(
                             'flex h-10 w-10 items-center justify-center rounded-lg',
-                            state === 'active' && 'bg-emerald-500/10 text-emerald-400',
-                            state === 'idle' && 'bg-amber-500/10 text-amber-400',
-                            state === 'offline' && 'bg-secondary text-muted-foreground',
+                            healthy && 'bg-emerald-500/10 text-emerald-400',
+                            busy && 'bg-amber-500/10 text-amber-400',
+                            failed && 'bg-red-500/10 text-red-400',
+                            serviceState === 'disabled' && 'bg-secondary text-muted-foreground',
                           )}
                         >
                           <Icon className="h-5 w-5" />
                         </div>
                         <div>
                           <p className="font-semibold text-sm">{meta.label}</p>
-                          <p className="text-xs text-muted-foreground">{meta.tier}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {meta.tier}{status.legacy ? ' · Legacy' : ''}
+                          </p>
                         </div>
                       </div>
                       <Badge variant={badgeVariant}>{stateLabel}</Badge>
                     </div>
 
-                    <div className="mt-4 flex items-center gap-4 text-xs text-muted-foreground">
+                    <p className="mt-4 text-xs leading-relaxed text-muted-foreground">
+                      {status.detail || (status.alive ? 'Service process is responding.' : 'Service is stopped.')}
+                    </p>
+
+                    <div className="mt-3 flex flex-wrap items-center gap-4 text-xs text-muted-foreground">
                       <div className="flex items-center gap-1.5">
                         <span
                           className={cn(
                             'h-1.5 w-1.5 rounded-full',
-                            state === 'active'
+                            healthy
                               ? 'bg-emerald-400 animate-pulse-slow'
-                              : state === 'idle'
+                              : busy
                                 ? 'bg-amber-400'
-                                : 'bg-slate-600',
+                                : failed
+                                  ? 'bg-red-400'
+                                  : 'bg-slate-600',
                           )}
                         />
                         {status.alive ? 'Process alive' : 'Container stopped'}
                       </div>
+                      {status.backend && <span>Backend: {status.backend}</span>}
                       {status.last_activity && (
                         <span>Last: {formatRelativeTime(status.last_activity)}</span>
                       )}

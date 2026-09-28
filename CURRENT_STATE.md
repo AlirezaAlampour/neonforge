@@ -1,124 +1,96 @@
-# Current state
+# Current Audited State
 
-## Product surfaces
+Audit date: 2026-09-28. This document records observed runtime evidence from the current DGX Spark; it does not infer readiness from stale documentation or HTTP liveness alone.
 
-NeonForge currently exposes these primary UI surfaces:
+## Decision summary
 
-- System Status
-- Creative Studio
-- Voice Studio
-- Voiceover Studio
-- B-Roll Studio
-- Lip Sync Studio
+| Workflow | Decision | Observed state |
+| --- | --- | --- |
+| Voiceover | Keep and protect as the reference workflow | F5, Fish, Miso, Breeze, and Vox were exposed by the gateway; Breeze was loaded and ready. Existing Voiceover behavior is unchanged. |
+| Lip Sync | Keep current backend as Legacy; do not add LatentSync yet | Container process was alive, but `/opt/video-retalking/inference.py` and its checkpoint directory were absent. It previously reported false readiness. |
+| Avatar | Add an honest product destination; do not integrate LongCat yet | LongCat 1.5 was not installed or runtime-tested. The host did not have enough safe shared-memory headroom. |
+| Character | Keep and focus the existing Wan2.2 Animate replacement path | Managed template and most weights were present. Two pose-preprocessor files were missing and the Compose-managed ComfyUI service was stopped. |
+| Video Generation | Keep Wan 2.1; no LTX work in this pass | Service is lazy/profile-gated; no explicit local checkpoint was present and no render was attempted. |
+| LivePortrait | Preserve service code as Legacy/experimental | Source checkout existed, but adapter import and model-path checks failed. |
 
-## Important architecture split
+## Runtime inventory
 
-The older Creative Studio / Voice Studio F5-TTS flow remains separate from Voiceover Studio.
+At audit time, the NeonForge gateway, frontend, Redis, supervisor, Whisper, F5-TTS, Fish Speech, MisoTTS, Breeze TTS, VoxCPM2, LivePortrait, Lip Sync, and a separate Wan cloud UI container were running. The Compose-managed `ai-comfyui` and `ai-wan21` containers were stopped. A different `content-factory-comfyui` container was running, but it is not the configured NeonForge Character backend and was not treated as interchangeable.
 
-- **Do not collapse them together by default.**
-- Legacy F5-TTS routes and UI behavior should remain stable.
-- Voiceover Studio is the isolated long-form narration path.
+Gateway `/healthz` and `/readyz` passed. Whisper was ready. The voice model catalog reported F5, Fish, VoxCPM2, MisoTTS, and Breeze available; Breeze reported its model loaded. Bounded container logs showed health/readiness polling, not successful media inference, so they were not used as generation evidence.
 
-## Voiceover Studio summary
+## Integration audit
 
-Voiceover Studio currently supports:
+### Frontend
 
-- reusable voice profiles
-- voice profile uploads from `.wav`, `.mp3`, and `.m4a`
-- long-form script rendering
-- sentence-boundary-first chunking
-- VoxCPM2 mode selection:
-  - `design`
-  - `clone`
-  - `continuation`
-- Breeze TTS 2 mode selection:
-  - `design`
-  - `clone`
-  - `direction`
-- backend-aware controls with progressively disclosed advanced settings
-- editable profile transcripts with Whisper fill for Breeze references
-- speed control
-- recent outputs with play/download/delete
-- active job restore after refresh
-- multiple tracked jobs in the UI
-- human-usable output naming:
-  - `{model_id}_{voice_profile_name}_{script_slug}_{YYYY-MM-DD_HHMMSS}.{ext}`
+Before this pass, primary navigation exposed System Status, Creative Studio, Voice Studio, Voiceover Studio, B-Roll Studio, and Lip Sync Studio. The old model-oriented surfaces duplicated creator goals. Navigation is now Voiceover, Video Generation, Character, Avatar, Lip Sync, and Utilities & Status. The older F5, LivePortrait, and ReActor tools remain available inside Character under a collapsed Legacy/experimental section.
 
-## Voice profile ingest and storage
+The core interaction pattern remains local and direct: select inputs, adjust a small settings surface, generate, monitor the tracked job, and preview/download the result. No generalized workflow engine was introduced.
 
-- accepted voice profile uploads are decoded once with `ffmpeg` and saved as a PCM WAV master
-- new saved voice profiles always persist as `.wav`, even if the source upload was MP3 or M4A
-- ingest does **not** force `24 kHz` mono; keep the highest-quality practical master and do runtime-specific conversion later if needed
-- reference clips longer than 30 seconds are rejected when duration tools are available
-- older already-saved MP3/WAV profile assets should remain readable for backward compatibility
-- the gateway image now depends on `ffmpeg` for safe voice-profile ingest normalization
+### Gateway
 
-## Voiceover backends
+The gateway already owned Redis-backed jobs, upload/history handling, service proxying, memory admission, supervisor calls, Voiceover routes, and managed ComfyUI template patching. Those boundaries were retained.
 
-### f5tts
-- working
-- safest / most boring default
-- preferred when reliability matters most
+This pass normalizes service status to creator-facing `ready`, `loading`, `disabled`, `missing_model`, `runtime_error`, and `in_use` states. Lip Sync and LivePortrait proxy routes now reject unavailable backends before accepting/reading uploads and include the backend's preflight detail.
 
-### fish_speech
-- working
-- higher-quality alternative
-- higher-maintenance runtime than F5
-- should be treated honestly as less boring than F5
+### Docker and lifecycle
 
-### misotts
-- optional plain and prompt-conditioned local backend
-- uses a dedicated lazy-loading runtime
+Shared paths remain `/srv/ai/models`, `/srv/ai/cache/hf`, `/srv/ai/outputs`, `/srv/ai/assets`, and `/srv/ai/logs`. The gateway still has no Docker socket; the internal supervisor retains lifecycle ownership.
 
-### breeze_tts
-- first-class optional Voiceover Studio backend using `BreezeBlue/Breeze-TTS-2`
-- dedicated persistent service under `services/breeze_tts/`
-- official eager PyTorch runtime on DGX Spark; H100-oriented `--fast-all` is disabled
-- Design requires a voice description and no profile
-- Clone requires saved profile audio + exact transcript and sends no instruction
-- Direction requires profile audio + exact transcript + natural-language direction
-- seed is reproducible and CFG Scale defaults to `4` for Design/Direction
-- service health distinguishes disabled, unavailable, loading, ready, and error
-- weights, derivative models, and self-hosted outputs are research/non-commercial only
+Optional services are separated into Compose profiles:
 
-### voxcpm2
-- integrated and selectable
-- default behavior is now normal `clone` mode, not prompt-style continuation
-- normal clone mode sends only reference audio
-- continuation mode is explicit and requires the exact transcript of the saved reference clip
-- voice design mode can run without a saved voice profile
-- usable for experimentation and some medium-form testing
-- should still be treated as experimental for longer cloned narration quality
-- do not oversell it as solved for all long scripts
+- `voice-extras`: Fish Speech, MisoTTS, VoxCPM2
+- `breeze`: Breeze TTS 2
+- `legacy`: LivePortrait and the older Lip Sync backend
+- `comfyui`: managed Character runtime
+- `wan21`: on-demand video runtime
+- `cloud-experimental`: unrelated cloud-backed Wan Gradio checkout
 
-## Practical recommendation
+Public UI/API/ComfyUI bindings now default to `127.0.0.1` and can be explicitly changed with `BIND_ADDRESS`.
 
-- Production/reliable voiceover: **F5-TTS**
-- Higher-quality alternative: **Fish Speech**
-- Optional prompt-conditioned voice work: **MisoTTS**
-- Designed and directed voices: **Breeze TTS 2**
-- Experimental testing: **VoxCPM2**
+### Lip Sync
 
-## Environment/config currently relevant to voiceover
+The current service is a subprocess adapter for `video-retalking` with a SadTalker branch. The audited image did not contain `/opt/video-retalking/inference.py`, and `/srv/ai/models/lipsync/video-retalking/checkpoints` did not exist. Previously the endpoint reported Ready after assigning a placeholder dictionary; it did not prove a usable model.
 
-- `ASSETS_DIR`
-- `OUTPUTS_DIR`
-- `FISH_SPEECH_ENABLED`
-- `FISH_SPEECH_INTERNAL_URL`
-- `BREEZE_TTS_ENABLED`
-- `BREEZE_TTS_INTERNAL_URL`
-- `BREEZE_TTS_MODEL_ID`
-- `BREEZE_TTS_MODEL_PATH`
-- `BREEZE_TTS_AUTO_DOWNLOAD`
-- `VOXCPM2_ENABLED`
-- `VOXCPM2_INTERNAL_URL`
-- `VOXCPM2_MODEL_PATH`
+The service now performs a runtime-and-checkpoint preflight and returns a non-ready state/503 with exact missing requirements. Existing endpoints and backend selection are preserved. The frontend labels it Legacy and disables Generate when preflight fails.
 
-## Constraints for future coding passes
+LatentSync 1.6 was evaluated but not integrated. Its official 512-pixel model is roughly 9.64 GB and documents an 18 GB inference minimum, while its environment includes CUDA/PyTorch pins and several native packages that still require ARM64/GB10 validation. The current machine had only 16.7 GB `MemAvailable`, below NeonForge's 40 GB safety floor, so no credible end-to-end test could be performed.
 
-- preserve old Creative Studio TTS flow
-- treat Voiceover Studio as isolated
-- prefer small, reversible changes
-- avoid broad refactors unless necessary
-- be careful with Fish runtime maintenance
-- treat Vox quality tuning as experimental
+### Avatar and LivePortrait
+
+LongCat-Video-Avatar 1.5 was evaluated as the preferred single future Avatar backend. Its upstream checkpoint repository is roughly 74.9 GB and its published Python/PyTorch/FlashAttention stack has not been validated on this ARM64/GB10 host. It is not installed, no service/API has been fabricated, and the new Avatar page clearly reports Disabled.
+
+LivePortrait remains in the repository and `legacy` profile. `/opt/LivePortrait` existed, but its current source tree provides `src/live_portrait_pipeline.py`, not the `liveportrait.api` module expected by the adapter. `/srv/ai/models/liveportrait` was also absent. Its readiness endpoint now exposes these blockers rather than claiming availability.
+
+### Character and ComfyUI
+
+The managed template is `gateway/templates/comfyui/wan-character-swap.workflow.json`, described by its adjacent manifest. It already supports reference-image/driving-video asset mapping, read-only model validation, parameter patching, corrected output-node wiring, and opt-in patched-graph/debug artifact output. That infrastructure was retained.
+
+The installed ComfyUI model root contained the principal Wan2.2 Animate, Wan image-to-video, VAE, text/vision encoder, SAM2, and LightX2V LoRA assets. Validation reported these missing files:
+
+- `yolox_l.torchscript.pt`
+- `dw-ll_ucoco_384_bs5.torchscript.pt`
+
+The Compose-managed `ai-comfyui` service was stopped. Therefore Character was not generation-tested and is correctly described as blocked, not stable.
+
+### Video Generation
+
+The current Wan 2.1 FastAPI service remains the default video family. It is singleton, loads lazily, has a 1.3B default, uses attention/VAE slicing, and tears its pipeline down after idle. The expected explicit paths are `/srv/ai/models/wan21/1.3B` or `/srv/ai/models/wan21/14B`; neither was present. LTX was intentionally not evaluated in this pass.
+
+### Dependencies and tests
+
+MisoTTS, Breeze TTS, and Whisper retain service-specific `uv.lock` files. A root `pyproject.toml` and `uv.lock` now pin the CPU-safe gateway/test environment, and the frontend now has `package-lock.json` plus `npm ci` in its Dockerfile. Existing NVIDIA/NGC PyTorch bases were not replaced.
+
+The repository already had gateway tests for memory admission, voiceover, history, lifecycle, and ComfyUI template patching. This pass adds readiness preflight and workflow/navigation source tests plus a lightweight CI workflow. GPU generation remains a manual DGX acceptance stage.
+
+## Resource evidence and validation limit
+
+The gateway reported 121.7 GB total shared memory, 16.7 GB available, 105.0 GB used (86.3%), and about 9.9 GB swap in use. `/proc/meminfo` is authoritative on this UMA system. The optional idle-manager systemd unit was not installed, so active model containers were not stopped without operator approval.
+
+Because available memory was below 40 GB:
+
+- no LatentSync, LongCat, Wan, Character, or other heavyweight model was started;
+- no heavy end-to-end generation was claimed;
+- affected Docker services were not restarted merely to make the deployment appear updated.
+
+See [docs/models.md](docs/models.md) for sources, paths, sizes, variables, first-load behavior, and license boundaries.

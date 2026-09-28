@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main, MisoTTS]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  control-plane:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+      - run: uv sync --locked --dev
+      - name: Run CPU-safe tests
+        run: >-
+          uv run pytest
+          tests/test_chunker.py
+          tests/test_voiceover_frontend_source.py
+          tests/test_media_frontend_source.py
+          tests/test_media_readiness.py
+          tests/test_service_status.py
+          tests/test_voiceover_isolated.py
+          tests/test_voiceover_routes.py
+          tests/test_breeze_tts_service.py
+          tests/test_misotts_service.py
+          tests/test_voxcpm2_service.py
+          gateway/tests/test_comfyui_jobs.py
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --ignore-scripts
+      - run: npm run build

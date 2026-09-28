@@ -1,0 +1,30 @@
+[Unit]
+Description=NeonForge idle service manager for %i
+Documentation=file:///home/%i/neonforge/scripts/idle_manager.py
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=%i
+Group=docker
+WorkingDirectory=/home/%i/neonforge
+Environment=COMPOSE_DIR=/home/%i/neonforge
+Environment=REDIS_HOST=localhost
+Environment=REDIS_PORT=6379
+Environment=LOG_LEVEL=INFO
+Environment=PATH=/home/%i/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env uv run --locked python scripts/idle_manager.py --interval 60
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=neonforge-idle-manager
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/%i/neonforge /srv/ai
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

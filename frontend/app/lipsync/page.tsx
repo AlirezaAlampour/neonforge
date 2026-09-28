@@ -1,11 +1,13 @@
 'use client'
 
 import { useState } from 'react'
-import { Clapperboard, Send } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, Clapperboard, Loader2, Send } from 'lucide-react'
 import { useJobPoller } from '@/hooks/use-job-poller'
+import { useSystemStatus } from '@/hooks/use-system-status'
 import { submitLipSync } from '@/lib/api'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
 import { FileDropzone } from '@/components/file-dropzone'
 import { JobTracker } from '@/components/job-tracker'
 
@@ -15,9 +17,13 @@ export default function LipSyncStudioPage() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const { jobs, trackJob, dismissJob } = useJobPoller()
+  const { services, loading: statusLoading } = useSystemStatus(10000)
+  const serviceStatus = services?.lipsync
+  const workflowReady = Boolean(serviceStatus?.ready)
+  const stateLabel = statusLoading ? 'Checking' : serviceStatus?.state_label || 'Unavailable'
 
   const handleSubmit = async () => {
-    if (!videoFile || !audioFile) return
+    if (!videoFile || !audioFile || !workflowReady) return
     setError(null)
     setSubmitting(true)
 
@@ -41,16 +47,45 @@ export default function LipSyncStudioPage() {
       <div>
         <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
           <Clapperboard className="h-6 w-6 text-primary" />
-          Lip Sync Studio
+          Lip Sync
         </h1>
         <p className="text-sm text-muted-foreground mt-1">
-          Sync lip movements to audio using Video-Retalking or SadTalker.
+          Match mouth movement in a source video to generated or uploaded speech.
         </p>
       </div>
 
       <div className="grid gap-6 lg:grid-cols-[1fr,380px]">
         {/* Main Form */}
         <div className="space-y-6">
+          <Card className={workflowReady ? 'border-emerald-500/20' : 'border-amber-500/30'}>
+            <CardContent className="flex items-start gap-3 p-4">
+              {statusLoading ? (
+                <Loader2 className="mt-0.5 h-5 w-5 animate-spin text-muted-foreground" />
+              ) : workflowReady ? (
+                <CheckCircle2 className="mt-0.5 h-5 w-5 text-emerald-400" />
+              ) : (
+                <AlertTriangle className="mt-0.5 h-5 w-5 text-amber-400" />
+              )}
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="text-sm font-semibold">Backend status</p>
+                  <Badge variant={workflowReady ? 'success' : 'warning'}>{stateLabel}</Badge>
+                  {serviceStatus?.legacy && <Badge variant="secondary">Legacy</Badge>}
+                </div>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {serviceStatus?.detail || 'Checking the configured lip-sync runtime.'}
+                </p>
+                {(serviceStatus?.backend || serviceStatus?.missing?.length) && (
+                  <details className="mt-2 text-xs text-muted-foreground">
+                    <summary className="cursor-pointer">Diagnostics</summary>
+                    {serviceStatus.backend && <p className="mt-2">Backend: {serviceStatus.backend}</p>}
+                    {serviceStatus.missing?.map((item) => <p key={item} className="font-mono">Missing: {item}</p>)}
+                  </details>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+
           {/* Source Video */}
           <Card>
             <CardHeader>
@@ -113,7 +148,7 @@ export default function LipSyncStudioPage() {
           <div className="flex items-center gap-4">
             <Button
               onClick={handleSubmit}
-              disabled={!videoFile || !audioFile || submitting}
+              disabled={!videoFile || !audioFile || !workflowReady || submitting}
               className="gap-2 px-6"
               size="lg"
             >
@@ -123,9 +158,11 @@ export default function LipSyncStudioPage() {
             {error && <p className="text-sm text-red-400">{error}</p>}
           </div>
 
-          <p className="text-xs text-muted-foreground/60">
-            Processing time depends on video length. Expect 1-5 minutes for a typical clip.
-          </p>
+          {!workflowReady && !statusLoading && (
+            <p className="text-xs text-amber-300/80">
+              Generation stays disabled until the backend runtime and model files pass readiness checks.
+            </p>
+          )}
         </div>
 
         {/* Right Sidebar: Jobs */}
