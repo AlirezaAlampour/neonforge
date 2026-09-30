@@ -75,11 +75,11 @@ export default function LipSyncStudioPage() {
                 <p className="mt-1 text-sm text-muted-foreground">
                   {serviceStatus?.detail || 'Checking the configured lip-sync runtime.'}
                 </p>
-                {(serviceStatus?.backend || serviceStatus?.missing?.length) && (
+                {(Boolean(serviceStatus?.backend) || Boolean(serviceStatus?.missing?.length)) && (
                   <details className="mt-2 text-xs text-muted-foreground">
                     <summary className="cursor-pointer">Diagnostics</summary>
-                    {serviceStatus.backend && <p className="mt-2">Backend: {serviceStatus.backend}</p>}
-                    {serviceStatus.missing?.map((item) => <p key={item} className="font-mono">Missing: {item}</p>)}
+                    {serviceStatus?.backend && <p className="mt-2">Backend: {serviceStatus.backend}</p>}
+                    {serviceStatus?.missing?.map((item) => <p key={item} className="font-mono">Missing: {item}</p>)}
                   </details>
                 )}
               </div>
@@ -121,7 +121,7 @@ export default function LipSyncStudioPage() {
             <CardHeader>
               <CardTitle className="text-base">Driving Audio</CardTitle>
               <CardDescription>
-                The audio track to sync the lips to. This can be a TTS output from Voice Studio.
+                The audio track to sync the lips to. This can be a TTS output from Voiceover Studio.
               </CardDescription>
             </CardHeader>
             <CardContent>

@@ -18,26 +18,39 @@ import logging
 import os
 import re
 import subprocess
+import uuid
 
 import httpx
 from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+from resource_manager import ResourceManager, ServicePolicy
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 COMPOSE_DIR = os.getenv("COMPOSE_DIR", "/project")
 READYZ_TIMEOUT = int(os.getenv("READYZ_TIMEOUT", "300"))
 COMFYUI_CONTAINER_NAME = os.getenv("COMFYUI_CONTAINER_NAME", "ai-comfyui")
 
-# Map service names to their internal Docker network URLs
-SERVICE_URLS = {
-    "wan21": os.getenv("WAN21_URL", "http://wan21:8000"),
-    "f5tts": os.getenv("F5TTS_URL", "http://f5tts:8000"),
-    "liveportrait": os.getenv("LIVEPORTRAIT_URL", "http://liveportrait:8000"),
-    "lipsync": os.getenv("LIPSYNC_URL", "http://lipsync:8000"),
-    "whisper": os.getenv("WHISPER_URL", "http://whisper:8000"),
+# Explicit policies are the lifecycle security boundary. No caller-supplied
+# container name is ever passed through to Docker.
+POLICIES = {
+    "f5tts": ServicePolicy("f5tts", "ai-f5tts", None, os.getenv("F5TTS_URL", "http://f5tts:8000"), "/healthz", "voice", 12, int(os.getenv("F5TTS_IDLE_TIMEOUT", "900"))),
+    "fish_speech": ServicePolicy("fish_speech", "ai-fish-speech", "voice-extras", os.getenv("FISH_SPEECH_URL", "http://fish_speech:8000"), "/v1/health", "voice", 24, int(os.getenv("FISH_SPEECH_IDLE_TIMEOUT", "900"))),
+    "voxcpm2": ServicePolicy("voxcpm2", "ai-voxcpm2", "voice-extras", os.getenv("VOXCPM2_URL", "http://voxcpm2:8000"), "/v1/health", "voice", 16, int(os.getenv("VOXCPM2_IDLE_TIMEOUT", "900"))),
+    "misotts": ServicePolicy("misotts", "ai-misotts", "voice-extras", os.getenv("MISOTTS_URL", "http://misotts:8000"), "/healthz", "voice", 24, int(os.getenv("MISOTTS_IDLE_TIMEOUT", "900"))),
+    "breeze_tts": ServicePolicy("breeze_tts", "ai-breeze-tts", "breeze", os.getenv("BREEZE_TTS_URL", "http://breeze_tts:8000"), "/healthz", "voice", 24, int(os.getenv("BREEZE_TTS_IDLE_TIMEOUT", "900"))),
+    "comfyui": ServicePolicy("comfyui", COMFYUI_CONTAINER_NAME, "comfyui", os.getenv("COMFYUI_URL", "http://comfyui:8188"), "/", "video / character", 48, int(os.getenv("COMFYUI_IDLE_TIMEOUT", "300"))),
+    "liveportrait": ServicePolicy("liveportrait", "ai-liveportrait", "legacy", os.getenv("LIVEPORTRAIT_URL", "http://liveportrait:8000"), "/healthz", "legacy", 12, int(os.getenv("LIVEPORTRAIT_IDLE_TIMEOUT", "300"))),
+    "lipsync": ServicePolicy("lipsync", "ai-lipsync", "lipsync", os.getenv("LIPSYNC_URL", "http://lipsync:8000"), "/healthz", "lip-sync", 32, int(os.getenv("LIPSYNC_IDLE_TIMEOUT", "300"))),
+    "wan21": ServicePolicy("wan21", "ai-wan21", "wan21", os.getenv("WAN21_URL", "http://wan21:8000"), "/healthz", "video", 40, int(os.getenv("WAN21_IDLE_TIMEOUT", "300"))),
+    "wan-ui": ServicePolicy("wan-ui", "ai-wan-ui", "cloud-experimental", os.getenv("WAN_UI_URL", "http://wan-ui:7860"), "/", "character-experimental", 40, int(os.getenv("WAN_UI_IDLE_TIMEOUT", "300"))),
 }
-
-# Only these services can be started/stopped via supervisor
-MANAGED_SERVICES = {"wan21", "f5tts", "liveportrait", "lipsync"}
+PROTECTED_SERVICES = {"gateway", "frontend", "redis", "supervisor", "whisper"}
+MANAGED_SERVICES = set(POLICIES)
+WORKLOAD_MINIMUMS = {
+    ("comfyui", "wan-character-swap"): 48.0,
+    ("comfyui", "hunyuan-video-15-t2v"): 40.0,
+}
 SCAN_TARGETS = {
     "comfyui": COMFYUI_CONTAINER_NAME,
     COMFYUI_CONTAINER_NAME: COMFYUI_CONTAINER_NAME,
@@ -48,6 +61,36 @@ log = logging.getLogger("supervisor")
 
 app = FastAPI(title="DGX AI Supervisor", version="1.0.0")
 _http = httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0))
+resource_manager = ResourceManager(
+    compose_dir=COMPOSE_DIR,
+    policies=POLICIES,
+    protected_services=PROTECTED_SERVICES,
+    ready_timeout_sec=READYZ_TIMEOUT,
+    memory_wait_sec=int(os.getenv("MEMORY_RECLAIM_TIMEOUT", "90")),
+    idle_scan_sec=int(os.getenv("IDLE_SCAN_INTERVAL", "15")),
+)
+
+
+class PrepareRequest(BaseModel):
+    job_id: str | None = None
+    claim_id: str | None = None
+    model_label: str | None = None
+    workload_id: str | None = None
+
+
+class ReleaseRequest(BaseModel):
+    claim_id: str
+
+
+@app.on_event("startup")
+async def start_resource_manager():
+    resource_manager.start_idle_loop()
+
+
+@app.on_event("shutdown")
+async def stop_resource_manager():
+    await resource_manager.close()
+    await _http.aclose()
 
 
 def _validate_service(service: str):
@@ -144,13 +187,17 @@ print(json.dumps(payload))
 
 @app.get("/healthz")
 async def healthz():
-    return {"status": "alive", "managed": sorted(MANAGED_SERVICES)}
+    return {
+        "status": "alive",
+        "managed": sorted(MANAGED_SERVICES),
+        "protected": sorted(PROTECTED_SERVICES),
+    }
 
 
 @app.get("/status/{service}")
 async def status(service: str):
     _validate_service(service)
-    container = f"ai-{service}"
+    container = POLICIES[service].container
     try:
         result = subprocess.run(
             ["docker", "inspect", "-f", "{{.State.Status}}", container],
@@ -251,65 +298,57 @@ async def container_files(target: str, root: str):
     return payload
 
 
+@app.post("/prepare/{service}")
+async def prepare(service: str, request: PrepareRequest):
+    _validate_service(service)
+    try:
+        return await resource_manager.prepare(
+            service,
+            job_id=request.job_id,
+            claim_id=request.claim_id,
+            model_label=request.model_label,
+            minimum_available_gb=WORKLOAD_MINIMUMS.get((service, request.workload_id)),
+        )
+    except TimeoutError as exc:
+        raise HTTPException(504, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@app.post("/release/{service}")
+async def release(service: str, request: ReleaseRequest):
+    _validate_service(service)
+    try:
+        return await resource_manager.release(service, request.claim_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/workloads/status")
+async def workloads_status():
+    return await resource_manager.status()
+
+
 @app.post("/start/{service}")
 async def start(service: str, wait_ready: bool = True):
-    """Start a compose service. Optionally wait for /readyz."""
+    """Compatibility endpoint; prepare then hand the service to idle cleanup."""
     _validate_service(service)
-
-    # Check if already running and ready
-    url = SERVICE_URLS.get(service)
-    if url:
-        try:
-            resp = await _http.get(f"{url}/healthz", timeout=3.0)
-            if resp.status_code == 200:
-                log.info("Service %s is already running", service)
-                return {"service": service, "action": "already_running"}
-        except (httpx.ConnectError, httpx.TimeoutException):
-            pass
-
-    log.info("Starting service: %s", service)
-    proc = await asyncio.create_subprocess_exec(
-        "docker", "compose", "--profile", service, "--profile", "full",
-        "up", "-d", service,
-        cwd=COMPOSE_DIR,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        log.error("Failed to start %s: %s", service, stderr.decode()[:500])
-        raise HTTPException(502, f"docker compose up failed: {stderr.decode()[:300]}")
-
-    if not wait_ready or not url:
-        return {"service": service, "action": "started", "ready": False}
-
-    # Wait for readyz with backoff
-    for attempt in range(60):
-        await asyncio.sleep(min(2 * (attempt + 1), 10))
-        try:
-            resp = await _http.get(f"{url}/readyz", timeout=5.0)
-            if resp.status_code == 200:
-                log.info("Service %s ready (attempt %d)", service, attempt + 1)
-                return {"service": service, "action": "started", "ready": True}
-        except (httpx.ConnectError, httpx.TimeoutException):
-            continue
-
-        # Check for /healthz (model may be idle but container is alive)
-        try:
-            resp = await _http.get(f"{url}/healthz", timeout=3.0)
-            if resp.status_code == 200:
-                log.info("Service %s alive but model idle (attempt %d)", service, attempt + 1)
-                return {"service": service, "action": "started", "ready": False, "alive": True}
-        except (httpx.ConnectError, httpx.TimeoutException):
-            continue
-
-    log.error("Service %s did not become ready within timeout", service)
-    raise HTTPException(504, f"Service {service} did not become ready in {READYZ_TIMEOUT}s")
+    token = f"compat-{uuid.uuid4()}"
+    try:
+        result = await resource_manager.prepare(service, claim_id=token, model_label=service)
+        await resource_manager.release(service, token)
+        return {**result, "action": "started", "ready": True}
+    except TimeoutError as exc:
+        raise HTTPException(504, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
 
 
 @app.post("/stop/{service}")
 async def stop(service: str):
     _validate_service(service)
+    if any(claim.service == service for claim in resource_manager.claims.values()):
+        raise HTTPException(409, f"Service {service} has an active workload and cannot be stopped")
     log.info("Stopping service: %s", service)
     proc = await asyncio.create_subprocess_exec(
         "docker", "compose", "stop", service,

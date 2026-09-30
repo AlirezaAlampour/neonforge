@@ -116,10 +116,24 @@ MODEL_NAME_BY_SERVICE = {
     "whisper": "Faster-Whisper",
     "f5tts": "F5-TTS",
     "liveportrait": "LivePortrait",
-    "lipsync": os.getenv("LIPSYNC_BACKEND", "video-retalking"),
+    "lipsync": os.getenv("LIPSYNC_BACKEND", "LatentSync 1.6"),
     "wan21": f"Wan 2.1 {os.getenv('WAN21_MODEL_VARIANT', '1.3B')}",
     "reactor": "ComfyUI/ReActor",
     "comfyui": "ComfyUI Template Workflow",
+}
+
+# Model-aware admission is enforced by the supervisor's immutable allowlist.
+# These labels are creator-facing; minimums and stop authority remain server-side.
+WORKLOAD_MODEL_LABELS = {
+    "f5tts": "F5-TTS",
+    "fish_speech": "Fish Speech",
+    "voxcpm2": "VoxCPM 2",
+    "misotts": "MisoTTS 8B",
+    "breeze_tts": "Breeze TTS 2",
+    "comfyui": "Wan 2.2 Animate / Replace",
+    "liveportrait": "LivePortrait",
+    "lipsync": os.getenv("LIPSYNC_BACKEND", "LatentSync 1.6"),
+    "wan21": f"Wan 2.1 {os.getenv('WAN21_MODEL_VARIANT', '1.3B')}",
 }
 
 GPU_HEAVY_SERVICES = {"wan21"}
@@ -712,6 +726,8 @@ def list_asset_files(asset_dir: Path, extensions: set[str]) -> list[dict[str, An
 # ---------------------------------------------------------------------------
 
 class JobStatus(str, Enum):
+    PREPARING = "preparing"
+    LOADING = "loading"
     QUEUED = "queued"
     RUNNING = "running"
     COMPLETED = "completed"
@@ -1997,8 +2013,10 @@ async def run_comfyui_job(job_id: str):
     job_row = get_comfyui_job_or_404(job_id)
     manifest = get_comfyui_template(job_row.template_id)
     semaphore = _gpu_sem_for_tier(job_row.gpu_tier)
+    workload_claim_id: str | None = None
 
     async def _execute():
+        nonlocal workload_claim_id
         current_job = job_row
         validation = validate_template_models(manifest)
         if validation["missing"]:
@@ -2013,18 +2031,24 @@ async def run_comfyui_job(job_id: str):
             )
             return
 
-        allowed, mem, reason = memory_allows_job(current_job.gpu_tier)
-        if not allowed and current_job.gpu_tier != "light":
-            await update_comfyui_job(
-                job_id,
-                status=JobStatus.FAILED.value,
-                validation_json=json.dumps(validation, ensure_ascii=False),
-                error=reason,
-                status_message=f"Blocked by UMA memory gate ({mem['used_pct']}%)",
-                completed_at=_now_utc(),
-            )
-            return
-
+        await update_comfyui_job(
+            job_id,
+            status=JobStatus.PREPARING.value,
+            validation_json=json.dumps(validation, ensure_ascii=False),
+            status_message="Preparing GPU memory…",
+        )
+        prepared = await prepare_workload(
+            "comfyui",
+            job_id=job_id,
+            workload_id=manifest.id,
+            model_label=manifest.name,
+        )
+        workload_claim_id = prepared["claim_id"]
+        await update_comfyui_job(
+            job_id,
+            status=JobStatus.LOADING.value,
+            status_message=f"Loading {manifest.name}…",
+        )
         await ensure_comfyui_reachable()
 
         input_asset_ids = _safe_json_loads(current_job.inputs_json, {})
@@ -2105,6 +2129,8 @@ async def run_comfyui_job(job_id: str):
         )
 
         started_monotonic = time.monotonic()
+        seen_in_queue = False
+        missing_after_seen = 0
         while True:
             if time.monotonic() - started_monotonic > COMFYUI_JOB_TIMEOUT_SEC:
                 raise HTTPException(504, "ComfyUI job timed out while waiting for completion.")
@@ -2146,11 +2172,31 @@ async def run_comfyui_job(job_id: str):
                     raise HTTPException(502, _history_error_message(history_entry) or "ComfyUI job failed.")
 
             queue_status = await get_comfyui_queue_status(prompt_id)
+            if queue_status is not None:
+                seen_in_queue = True
+                missing_after_seen = 0
+            elif seen_in_queue:
+                missing_after_seen += 1
+                if missing_after_seen == 3:
+                    try:
+                        await ensure_comfyui_reachable()
+                    except HTTPException as exc:
+                        raise HTTPException(
+                            502,
+                            "ComfyUI stopped responding after the prompt began. "
+                            "The backend may have exhausted memory; the workload claim was released.",
+                        ) from exc
+                if missing_after_seen >= 30:
+                    raise HTTPException(
+                        502,
+                        "ComfyUI removed the active prompt but did not publish history within 60 seconds; "
+                        "the workload claim was released.",
+                    )
             if queue_status == "running" and current_job.status != JobStatus.RUNNING.value:
                 current_job = await update_comfyui_job(
                     job_id,
                     status=JobStatus.RUNNING.value,
-                    status_message="Generating video",
+                    status_message="Generating…",
                 )
             elif queue_status == "queued" and current_job.status != JobStatus.QUEUED.value:
                 current_job = await update_comfyui_job(
@@ -2198,13 +2244,20 @@ async def run_comfyui_job(job_id: str):
                 job_id,
                 _http_error_text(update_exc.detail),
             )
+    finally:
+        await release_workload("comfyui", workload_claim_id)
 
 
 async def resume_incomplete_comfyui_jobs():
     with SessionLocal() as db:
         rows = db.execute(
             select(ComfyUIJobRecordDB).where(
-                ComfyUIJobRecordDB.status.in_([JobStatus.QUEUED.value, JobStatus.RUNNING.value])
+                ComfyUIJobRecordDB.status.in_([
+                    JobStatus.PREPARING.value,
+                    JobStatus.LOADING.value,
+                    JobStatus.QUEUED.value,
+                    JobStatus.RUNNING.value,
+                ])
             )
         ).scalars().all()
 
@@ -2219,35 +2272,60 @@ async def resume_incomplete_comfyui_jobs():
 # Supervisor delegation (NO Docker socket in this container)
 # ---------------------------------------------------------------------------
 
-async def ensure_service_running(service: str) -> bool:
-    """Ask the supervisor sidecar to start a lazy service."""
-    url = SERVICE_URLS.get(service)
-    if not url:
-        return False
-
+async def prepare_workload(
+    service: str,
+    *,
+    job_id: str | None = None,
+    claim_id: str | None = None,
+    workload_id: str | None = None,
+    model_label: str | None = None,
+) -> dict[str, Any]:
+    """Claim a managed runtime after safe, allowlist-only UMA reclamation."""
     try:
-        resp = await http_client.get(f"{url}/healthz", timeout=3.0)
-        if resp.status_code == 200:
-            return True
-    except (httpx.ConnectError, httpx.TimeoutException):
-        pass
-
-    log.info("Requesting supervisor to start: %s", service)
-    try:
-        resp = await http_client.post(
-            f"{SUPERVISOR_URL}/start/{service}",
-            params={"wait_ready": "true"},
-            timeout=httpx.Timeout(360.0, connect=10.0),
+        response = await http_client.post(
+            f"{SUPERVISOR_URL.rstrip('/')}/prepare/{service}",
+            json={
+                "job_id": job_id,
+                "claim_id": claim_id,
+                "model_label": model_label or WORKLOAD_MODEL_LABELS.get(service, service),
+                "workload_id": workload_id,
+            },
+            timeout=httpx.Timeout(480.0, connect=10.0),
         )
-        if resp.status_code == 200:
-            data = resp.json()
-            log.info("Supervisor response for %s: %s", service, data)
-            return data.get("ready", False) or data.get("alive", False)
+    except Exception as exc:
+        raise HTTPException(503, f"Resource manager is unavailable: {exc}") from exc
+    if response.status_code != 200:
+        try:
+            detail = response.json().get("detail")
+        except ValueError:
+            detail = response.text
+        raise HTTPException(response.status_code, detail or f"Unable to prepare {service}")
+    return response.json()
 
-        log.error("Supervisor failed to start %s: HTTP %d", service, resp.status_code)
-        return False
-    except Exception as e:
-        log.error("Supervisor communication failed: %s", e)
+
+async def release_workload(service: str, claim_id: str | None) -> None:
+    if not claim_id:
+        return
+    try:
+        response = await http_client.post(
+            f"{SUPERVISOR_URL.rstrip('/')}/release/{service}",
+            json={"claim_id": claim_id},
+            timeout=15.0,
+        )
+        if response.status_code != 200:
+            log.warning("Supervisor release failed for %s/%s: HTTP %s", service, claim_id, response.status_code)
+    except Exception as exc:
+        log.warning("Supervisor release failed for %s/%s: %s", service, claim_id, exc)
+
+
+async def ensure_service_running(service: str) -> bool:
+    """Backward-compatible readiness helper for callers not yet claim-aware."""
+    try:
+        prepared = await prepare_workload(service)
+        await release_workload(service, prepared.get("claim_id"))
+        return prepared.get("state") == "ready"
+    except HTTPException as exc:
+        log.error("Supervisor failed to prepare %s: %s", service, _http_error_text(exc.detail))
         return False
 
 
@@ -2324,7 +2402,32 @@ async def readyz():
 
 @app.get("/memory")
 async def memory():
-    return get_memory_status()
+    status = get_memory_status()
+    status["workload_minimums_gb"] = {
+        "voice": 12,
+        "fish_speech": 24,
+        "voxcpm2": 16,
+        "misotts": 24,
+        "breeze_tts": 24,
+        "character_wan22": 48,
+        "video_hunyuan15": 40,
+        "lip_sync": 32,
+        "video": 40,
+    }
+    return status
+
+
+@app.get("/workloads/status")
+async def workload_lifecycle_status():
+    try:
+        response = await http_client.get(
+            f"{SUPERVISOR_URL.rstrip('/')}/workloads/status",
+            timeout=30.0,
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception as exc:
+        raise HTTPException(503, f"Resource manager status is unavailable: {exc}") from exc
 
 
 SERVICE_STATE_LABELS = {
@@ -2368,9 +2471,9 @@ async def inspect_service_status(name: str, url: str) -> dict[str, Any]:
             health_error = str(exc)
 
     raw_state = str(ready_payload.get("status", "")).strip().lower()
-    if name == "wan21" and not alive:
+    if name in {"wan21", "lipsync"} and not alive:
         state = "ready"
-        detail = "Stopped between jobs; the supervisor starts it on demand after the UMA memory gate passes."
+        detail = "Stopped between jobs; the supervisor starts it on demand after the model-aware UMA memory gate passes."
     elif not alive:
         state = "disabled"
         detail = "Service is stopped."
@@ -2466,21 +2569,6 @@ async def proxy_to_service(
     await store_job(job)
 
     tier = "heavy" if is_gpu_heavy else "medium" if is_gpu_medium else "light"
-    allowed, mem, reason = memory_allows_job(tier)
-    if not allowed and tier != "light":
-        job.status = JobStatus.FAILED
-        job.error = reason
-        await store_job(job)
-        raise HTTPException(503, detail={"error": reason, "memory": mem, "job_id": job_id})
-
-    if service in GPU_HEAVY_SERVICES:
-        ready = await ensure_service_running(service)
-        if not ready:
-            job.status = JobStatus.FAILED
-            job.error = "Service failed to start via supervisor"
-            await store_job(job)
-            raise HTTPException(503, f"Service {service} failed to start")
-
     sem = gpu_heavy_sem if is_gpu_heavy else gpu_medium_sem if is_gpu_medium else None
     url = f"{SERVICE_URLS[service]}{path}"
 
@@ -2501,13 +2589,25 @@ async def proxy_to_service(
 
     async def do_request():
         nonlocal payload_for_history
-
-        job.status = JobStatus.RUNNING
-        job.started_at = _now_utc().isoformat()
-        await store_job(job)
-        await record_service_activity(service)
+        workload_claim_id: str | None = None
 
         try:
+            if service in WORKLOAD_MODEL_LABELS:
+                job.status = JobStatus.PREPARING
+                job.message = "Preparing GPU memory…"
+                await store_job(job)
+                prepared = await prepare_workload(service, job_id=job_id)
+                workload_claim_id = prepared["claim_id"]
+                job.status = JobStatus.LOADING
+                job.message = f"Loading {WORKLOAD_MODEL_LABELS[service]}…"
+                await store_job(job)
+
+            job.status = JobStatus.RUNNING
+            job.message = "Generating…"
+            job.started_at = _now_utc().isoformat()
+            await store_job(job)
+            await record_service_activity(service)
+
             if files:
                 resp = await http_client.post(url, files=files, data=data or {})
             elif json_body is not None:
@@ -2547,6 +2647,11 @@ async def proxy_to_service(
 
             result["job_id"] = job_id
             return result
+        except HTTPException as e:
+            job.status = JobStatus.FAILED
+            job.error = _http_error_text(e.detail)
+            await store_job(job)
+            raise
         except httpx.HTTPStatusError as e:
             job.status = JobStatus.FAILED
             job.error = str(e)
@@ -2557,6 +2662,8 @@ async def proxy_to_service(
             job.error = str(e)
             await store_job(job)
             raise HTTPException(502, f"Backend error: {e}")
+        finally:
+            await release_workload(service, workload_claim_id)
 
     if sem:
         async with sem:

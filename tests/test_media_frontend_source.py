@@ -16,11 +16,19 @@ def test_primary_navigation_is_workflow_first():
 
 def test_unavailable_media_workflows_surface_readiness():
     lip_sync = (ROOT / "frontend" / "app" / "lipsync" / "page.tsx").read_text(encoding="utf-8")
-    video = (ROOT / "frontend" / "app" / "broll" / "page.tsx").read_text(encoding="utf-8")
+    video = (ROOT / "frontend" / "app" / "video" / "page.tsx").read_text(encoding="utf-8")
     avatar = (ROOT / "frontend" / "app" / "avatar" / "page.tsx").read_text(encoding="utf-8")
 
     assert "serviceStatus?.ready" in lip_sync
     assert "!workflowReady" in lip_sync
-    assert "memory.available_gb >= memory.thresholds.reserve_heavy_gb" in video
-    assert "LongCat-Video-Avatar 1.5" in avatar
+    assert "memory.available_gb >= memory.thresholds.reserve_heavy_gb" not in video
+    assert "HunyuanVideo 1.5" in video
+    assert "EchoMimicV3-Flash" in avatar
     assert "Backend not validated on this host" in avatar
+
+
+def test_system_status_proxies_workload_lifecycle_endpoint():
+    next_config = (ROOT / "frontend" / "next.config.mjs").read_text(encoding="utf-8")
+
+    assert "source: '/workloads/status'" in next_config
+    assert "destination: `${gateway}/workloads/status`" in next_config

@@ -1,33 +1,67 @@
 # NeonForge
 
-Local-first voice and video creation for NVIDIA DGX Spark: a focused Next.js studio backed by FastAPI, Redis, model-specific services, and managed ComfyUI workflows.
+Local-first voice and video creation for NVIDIA DGX Spark. NeonForge combines a focused Next.js studio with a FastAPI gateway, Redis, model-specific services, managed ComfyUI workflows, and an allowlist-only workload supervisor.
 
 [![CI](https://github.com/AlirezaAlampour/neonforge/actions/workflows/ci.yml/badge.svg?branch=MisoTTS)](https://github.com/AlirezaAlampour/neonforge/actions/workflows/ci.yml)
 ![Docker Compose](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776AB?logo=python&logoColor=white)
-![Next.js](https://img.shields.io/badge/Next.js-16-000000?logo=nextdotjs&logoColor=white)
 ![Platform](https://img.shields.io/badge/platform-ARM64%20%7C%20NVIDIA-76B900?logo=nvidia&logoColor=white)
 
 ![NeonForge Voiceover Studio](docs/images/voiceover-studio.png)
 
-NeonForge is designed around creator goals, not a catalog of every local model. Voiceover Studio is the most polished surface; video, character, avatar, lip-sync, transcription, and system tools remain deliberately scoped and report when their runtimes are not ready.
+The primary application has exactly six creator destinations: **Voiceover**, **Video Generation**, **Character**, **Avatar**, **Lip Sync**, and **Utilities & Status**. Older `/studio`, `/broll`, and `/voice` routes remain reachable for compatibility but are not primary navigation.
 
-## Features
+## Current workflow status
 
-- **Voiceover** — reusable voice profiles, long-form chunking, job recovery, and immediate audio review.
-- **Video Generation** — gateway-managed Wan jobs with shared-memory admission control.
-- **Character** — Wan2.2 Animate replacement through a validated ComfyUI template.
-- **Avatar** — reserved product workflow; LongCat-Video-Avatar 1.5 is not exposed until it passes real DGX Spark validation.
-- **Lip Sync** — source video plus audio, with honest backend readiness and the existing implementation retained as legacy.
-- **Utilities & Status** — shared UMA pressure and creator-facing service states: Ready, Loading, Disabled, Missing model, and Runtime error.
+“Validated” means a real generation completed on the current 128 GB DGX Spark, not merely that a health endpoint responded.
 
-## Screenshots
+| Workflow | Selected backend | DGX result |
+| --- | --- | --- |
+| Voiceover | F5-TTS plus optional Fish, Miso, Breeze, and VoxCPM2 | Existing workflow preserved; real MisoTTS regression render passed |
+| Video Generation | HunyuanVideo 1.5, 480p CFG-distilled FP8 | **Validated:** 512×288, 17-frame H.264 render |
+| Character Replace | Wan2.2 Animate 14B managed ComfyUI graph | **Validated:** 1280×720, 17-frame H.264 render |
+| Character Animate | Wan2.2 Animate | Disabled until its distinct graph is validated |
+| Lip Sync | LatentSync 1.6 | **Validated:** 1080×1920, 2.08-second H.264/AAC render |
+| Avatar | EchoMimicV3-Flash | Selected, not integrated; upstream ARM64 dependency set is not reproducible yet |
 
-| Voiceover Studio | Video Generation memory gate |
+## Automatic UMA lifecycle
+
+NeonForge automatically unloads conflicting local inference runtimes as needed. Users normally do not need to manage GPU/UMA memory manually.
+
+For each managed job, the gateway asks the supervisor to:
+
+1. read `MemAvailable` from `/proc/meminfo`;
+2. reclaim only idle, explicitly allowlisted NeonForge model services;
+3. wait for memory to return;
+4. start and verify the requested backend;
+5. hold a workload claim during generation;
+6. log observed memory and duration; and
+7. stop the backend after a configurable idle period.
+
+The supervisor can manage F5-TTS, Fish Speech, VoxCPM2, MisoTTS, Breeze TTS, ComfyUI, LatentSync, legacy LivePortrait, legacy Wan 2.1, and the experimental Wan UI. It never stops the gateway, frontend, Redis, supervisor, Whisper, arbitrary processes, or unrelated containers.
+
+Measured acceptance runs:
+
+| Backend | Available before | Lowest observed | Duration | Idle result |
+| --- | ---: | ---: | ---: | --- |
+| Wan2.2 Character | 58.1 GiB | 3.8 GiB | 233.4 s | ComfyUI stopped; 43.0 GiB recovered |
+| LatentSync 1.6 | 59.8 GiB | 40.0 GiB | 111.0 s | Service stopped after 300 s |
+| HunyuanVideo 1.5 cold run | 58.8 GiB | 26.7 GiB | 168.4 s | ComfyUI released for idle cleanup |
+| MisoTTS voiceover | 57.2 GiB | 26.6 GiB | 110.6 s | Claim released; model retained for configured voice warm window |
+
+The final deployed reclamation check began with 27.3 GiB available, stopped only idle MisoTTS, recovered to 57.8 GiB, started ComfyUI for the 40 GiB Hunyuan policy, and released the claim successfully. The five-minute idle sweep then stopped ComfyUI and recovered its remaining 1.1 GiB wrapper footprint. Protected and unrelated services were untouched.
+
+The Character acceptance run also found an unsafe longer-input case that reached the host OOM killer. ComfyUI now uses `restart: "no"`, stale jobs fail visibly, the launch floor is 48 GiB, and the validated Character preview path is capped at 17 input frames.
+
+## Deployed workflow screenshots
+
+| Video Generation | Character Replace |
 | --- | --- |
-| ![Voiceover Studio model selection](docs/images/voiceover-studio.png) | ![Video Generation blocked safely under memory pressure](docs/images/video-generation.png) |
+| ![Video Generation workspace](docs/images/video-generation.png) | ![Character Replace workspace](docs/images/character.png) |
 
-Screenshots are captured from the running application. No mock interface or personal media is used.
+| Lip Sync | Utilities & Status |
+| --- | --- |
+| ![Lip Sync workspace](docs/images/lip-sync.png) | ![Utilities and Status](docs/images/utilities-status.png) |
 
 ## Architecture
 
@@ -35,28 +69,21 @@ Screenshots are captured from the running application. No mock interface or pers
 flowchart TD
     Browser --> Frontend[Next.js frontend]
     Frontend --> Gateway[FastAPI gateway]
-    Gateway --> Redis[(Redis jobs and activity)]
-    Gateway --> Supervisor[Lifecycle supervisor]
+    Gateway <--> Redis[(Redis)]
+    Gateway --> Supervisor[Allowlist lifecycle supervisor]
+    Supervisor --> Compose[Docker Compose]
     Gateway --> Voice[Voice services]
-    Gateway --> Lip[Lip Sync]
-    Gateway --> Avatar[Avatar - disabled until validated]
-    Gateway --> Character[Character / ComfyUI]
-    Gateway --> Video[Wan video]
+    Gateway --> Comfy[ComfyUI: Hunyuan + Wan Character]
+    Gateway --> Lip[LatentSync 1.6]
     Gateway --> Whisper[Faster-Whisper]
-    Voice & Lip & Character & Video & Whisper --> Shared[(Shared models, HF cache, outputs)]
-    Supervisor --> Docker[Docker Compose services]
+    Voice & Comfy & Lip & Whisper --> Shared[(Models / cache / assets / outputs)]
 ```
 
-The gateway has no Docker socket. The internal supervisor owns lifecycle operations; all GPU services share host-backed model, cache, asset, and output directories. See [ARCHITECTURE.md](ARCHITECTURE.md).
+The gateway has no Docker socket. Only the internal supervisor can perform targeted Compose lifecycle operations. See [ARCHITECTURE.md](ARCHITECTURE.md).
 
-## Quick Start
+## Quick start
 
-### Prerequisites
-
-- NVIDIA DGX Spark or a compatible NVIDIA Linux host
-- ARM64-compatible NVIDIA Container Toolkit and Docker Compose
-- Git and at least 20 GB free for the base images and cache
-- Additional disk space for optional models (video workflows can require tens of GB)
+Requirements: DGX Spark or compatible NVIDIA Linux/ARM64 host, NVIDIA Container Toolkit, Docker Compose v2, Git, and sufficient storage under `/srv/ai`.
 
 ```bash
 git clone https://github.com/AlirezaAlampour/neonforge.git
@@ -66,101 +93,57 @@ cp .env.example .env
 sudo install -d -o "$USER" -g "$USER" \
   /srv/ai/models /srv/ai/cache/hf /srv/ai/outputs /srv/ai/assets /srv/ai/logs
 
-# Starts the control plane, frontend, Whisper, and the lazy F5-TTS container.
+docker compose config --quiet
 docker compose up -d
-
-docker compose ps
 curl --fail http://127.0.0.1:8080/readyz
 curl --fail http://127.0.0.1:3000/
 ```
 
-The safe default binds the UI and gateway to loopback. Set `BIND_ADDRESS` in `.env` to a specific LAN or Tailscale address when remote access is intended. Do not use `0.0.0.0` without appropriate host firewalling.
+The default bindings are loopback-only. Set `BIND_ADDRESS` to a specific trusted LAN or Tailscale address when remote access is intended.
 
-Optional heavyweight services are installed and started separately; a base launch does not require every model. Follow [docs/installation.md](docs/installation.md) before enabling a profile.
+Heavy backends are profile-gated and normally started by the supervisor when a creator submits a job. Model provisioning details, hashes, sizes, and license boundaries are in [docs/models.md](docs/models.md).
 
-## Supported Workflows
-
-“Tested” below means exercised on the current DGX Spark, not merely that a health endpoint responded.
-
-| Workflow | Backend | Current status | Input | DGX Spark | License note |
-| --- | --- | --- | --- | --- | --- |
-| Voiceover | F5-TTS / Fish / Breeze / Miso / Vox | Available; Voiceover UI regression-tested | Script; optional reference audio | Existing runtimes available | Model-specific; several default weights are non-commercial or require separate review |
-| Lip Sync | video-retalking legacy fallback | **Blocked** — runtime and checkpoints absent | Video + audio | Not generation-tested | Upstream/project asset terms apply |
-| Avatar | LongCat-Video-Avatar 1.5 candidate | **Not integrated** — validation blocked by memory/runtime requirements | Image + audio | Not tested | MIT model/repository terms |
-| Character | Wan2.2 Animate replacement | **Blocked** — two pose preprocessors missing and configured ComfyUI stopped | Image + driving video | Template/model scan only | Apache-2.0 upstream; conversion/LoRA terms may differ |
-| Video | Wan 2.1 | **Unverified** — local checkpoint absent | Text prompt | Not tested in this pass | Wan model license applies |
-| STT | Faster-Whisper medium | Ready (CPU int8 in audited runtime) | Audio | Health/readiness verified | MIT code; model terms apply |
-
-Exact audit evidence and blockers live in [CURRENT_STATE.md](CURRENT_STATE.md). Model paths, sources, sizes, first-load behavior, and licensing notes live in [docs/models.md](docs/models.md).
-
-## Hardware and Resource Safety
-
-NeonForge targets a single GB10/ARM64 machine with unified CPU/GPU memory. `/proc/meminfo` is the source of truth; do not use discrete-VRAM assumptions. Heavy jobs require at least 40 GB `MemAvailable` by default, and the gateway rejects work above configured pressure thresholds.
-
-Avoid starting every model profile together. The optional voice, legacy media, ComfyUI, and video services are intentionally separate. See [docs/troubleshooting.md](docs/troubleshooting.md#shared-memory-pressure).
-
-## Configuration
-
-All runtime configuration comes from `.env`. Important settings include:
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `BIND_ADDRESS` | `127.0.0.1` | Host interface for public UI/API ports |
-| `MODELS_DIR` | `/srv/ai/models` | Shared persistent weights |
-| `HF_CACHE_DIR` | `/srv/ai/cache/hf` | Shared Hugging Face cache |
-| `OUTPUTS_DIR` | `/srv/ai/outputs` | Generated media and history database |
-| `MEMORY_HARD_LIMIT` | `80` | Reject non-light jobs above this UMA percentage |
-| `MEM_RESERVE_HEAVY_GB` | `40` | Free-memory floor for Wan/ComfyUI jobs |
-| `MEM_RESERVE_MEDIUM_GB` | `10` | Free-memory floor for TTS/legacy media jobs |
-
-See [.env.example](.env.example) for the complete documented configuration.
-
-## API
-
-All browser workflows route through the gateway. Common endpoints:
+## Important API endpoints
 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/readyz` | Gateway and Redis readiness |
-| `GET` | `/memory` | UMA capacity and admission thresholds |
-| `GET` | `/services/status` | Normalized model/service state |
+| `GET` | `/memory` | Current UMA and workload launch minimums |
+| `GET` | `/services/status` | Normalized creator-facing service state |
+| `GET` | `/workloads/status` | Claims, managed services, events, and lifecycle metrics |
 | `POST` | `/api/v1/voiceover/jobs` | Long-form voiceover |
-| `POST` | `/api/v1/lipsync/sync` | Lip-sync job (only when backend is ready) |
-| `POST` | `/api/v1/wan21/generate` | On-demand video job |
-| `POST` | `/api/v1/comfyui/jobs` | Managed Character workflow |
+| `POST` | `/api/v1/lipsync/sync` | On-demand LatentSync job |
+| `POST` | `/api/v1/comfyui/jobs` | Managed Video Generation or Character job |
 
 ## Development
 
-Python dependency management is locked with `uv`:
+Python package management is uv-only:
 
 ```bash
+uv lock --check
 uv sync --locked --dev
 uv run pytest
 ```
 
-Frontend dependencies are locked separately:
+Frontend:
 
 ```bash
 cd frontend
 npm ci --ignore-scripts
+npm run lint
 npm run build
 ```
 
-CI runs CPU-safe backend tests and a production frontend build. GPU inference remains a DGX acceptance step. See [ACCEPTANCE_TESTS.md](ACCEPTANCE_TESTS.md).
-
 ## Documentation
 
-- [Installation](docs/installation.md)
-- [Models and licenses](docs/models.md)
-- [Architecture](ARCHITECTURE.md)
 - [Current audited state](CURRENT_STATE.md)
-- [Voiceover Studio](VOICEOVER_STUDIO.md)
+- [Models, research, and licenses](docs/models.md)
+- [Installation](docs/installation.md)
+- [Architecture](ARCHITECTURE.md)
 - [Troubleshooting](docs/troubleshooting.md)
-- [Compatibility notes](COMPATIBILITY_NOTES.md)
+- [Voiceover Studio](VOICEOVER_STUDIO.md)
 - [Changelog](CHANGELOG.md)
 
-## License and Status
+## License boundary
 
-No NeonForge source license has been granted in this repository; absent a license, redistribution rights are not implied. Third-party code and model weights retain their own licenses and restrictions. In particular, NeonForge’s repository status does not override non-commercial model terms. Review [docs/models.md](docs/models.md) before deployment or commercial use.
-
-Recommended initial release version: **0.1.0-alpha**. Voiceover is the reference-quality workflow; non-voice media remains intentionally experimental until real generation tests pass on DGX Spark.
+No NeonForge source license has been granted in this repository; absent a license, redistribution rights are not implied. Third-party code, checkpoints, voices, reference media, and outputs retain their own terms. Review [docs/models.md](docs/models.md) before commercial use.

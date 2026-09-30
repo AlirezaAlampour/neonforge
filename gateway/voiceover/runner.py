@@ -45,6 +45,20 @@ VOX_SILENCE_THRESHOLD_RATIO = 0.008
 log = logging.getLogger("voiceover.runner")
 
 
+async def _prepare_workload(model_id: str, job_id: str) -> dict[str, Any]:
+    """Delegate lifecycle preparation without coupling unit tests to gateway startup."""
+    import app as gateway_app
+
+    return await gateway_app.prepare_workload(model_id, job_id=job_id)
+
+
+async def _release_workload(model_id: str, claim_id: str) -> None:
+    """Release a lifecycle claim after synthesis completes or fails."""
+    import app as gateway_app
+
+    await gateway_app.release_workload(model_id, claim_id)
+
+
 def _container_output_dir(job_id: str) -> Path:
     return CONTAINER_OUTPUTS_ROOT / VOICEOVER_RELATIVE_DIR / job_id
 
@@ -601,6 +615,7 @@ async def run_voiceover_job(
 ) -> None:
     job_key = f"voiceover:{job_id}"
     completed_chunks = 0
+    workload_claim_id: str | None = None
 
     try:
         profile = get_profile(profile_id) if profile_id else None
@@ -612,6 +627,21 @@ async def run_voiceover_job(
         if model is None:
             await _update_job(redis_client, job_key, status="failed", error="Requested model was not found")
             return
+
+        await _update_job(
+            redis_client,
+            job_key,
+            status="preparing",
+            message="Preparing GPU memory…",
+        )
+        prepared = await _prepare_workload(model_id, str(job_id))
+        workload_claim_id = prepared["claim_id"]
+        await _update_job(
+            redis_client,
+            job_key,
+            status="loading",
+            message=f"Loading {model.display_name}…",
+        )
 
         effective_vox_mode = (vox_mode or VOX_MODE_CLONE).strip().lower() or VOX_MODE_CLONE
         if model_id != VOX_MODEL_ID:
@@ -643,6 +673,7 @@ async def run_voiceover_job(
             redis_client,
             job_key,
             status="processing",
+            message="Generating…",
             total_chunks=total_chunks,
             completed_chunks=0,
             error="",
@@ -800,3 +831,6 @@ async def run_voiceover_job(
         merged_path.unlink(missing_ok=True)
     except Exception as exc:
         await _update_job(redis_client, job_key, status="failed", error=str(exc), completed_chunks=completed_chunks)
+    finally:
+        if workload_claim_id:
+            await _release_workload(model_id, workload_claim_id)

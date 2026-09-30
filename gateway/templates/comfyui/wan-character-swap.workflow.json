@@ -261,7 +261,7 @@
         "151",
         0
       ],
-      "frame_load_cap": 0,
+      "frame_load_cap": 17,
       "skip_first_frames": 0,
       "select_every_nth": 1,
       "format": "AnimateDiff"

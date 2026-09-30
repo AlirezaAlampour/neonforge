@@ -14,6 +14,18 @@ interface JobTrackerProps {
 }
 
 const statusConfig = {
+  preparing: {
+    icon: Loader2,
+    label: 'Preparing memory',
+    badge: 'warning' as const,
+    animate: true,
+  },
+  loading: {
+    icon: Loader2,
+    label: 'Loading model',
+    badge: 'default' as const,
+    animate: true,
+  },
   queued: {
     icon: Clock,
     label: 'Queued',
@@ -60,7 +72,7 @@ export function JobTracker({ jobs, onDismiss }: JobTrackerProps) {
             key={job.job_id}
             className={cn(
               'rounded-lg border border-border/50 bg-card/50 p-4 transition-all duration-300',
-              job.status === 'running' && 'ring-1 ring-primary/30',
+              ['preparing', 'loading', 'running'].includes(job.status) && 'ring-1 ring-primary/30',
             )}
           >
             <div className="flex items-center justify-between gap-3">
@@ -70,7 +82,7 @@ export function JobTracker({ jobs, onDismiss }: JobTrackerProps) {
                     'h-5 w-5 shrink-0',
                     job.status === 'completed' && 'text-emerald-400',
                     job.status === 'failed' && 'text-red-400',
-                    job.status === 'running' && 'text-primary animate-spin',
+                    ['preparing', 'loading', 'running'].includes(job.status) && 'text-primary animate-spin',
                     job.status === 'queued' && 'text-amber-400',
                   )}
                 />
@@ -93,7 +105,7 @@ export function JobTracker({ jobs, onDismiss }: JobTrackerProps) {
               </div>
             </div>
 
-            {job.status === 'running' && (
+            {['preparing', 'loading', 'running'].includes(job.status) && (
               <div className="mt-3">
                 <Progress indeterminate />
               </div>

@@ -25,7 +25,7 @@
       "id": "driving_video",
       "label": "Driving Video",
       "kind": "video",
-      "description": "Source or driving video used to animate the swap.",
+      "description": "Source or driving video used to animate the swap. The validated Spark preview path uses the first 17 frames.",
       "accepted_extensions": [
         ".mp4",
         ".mov",

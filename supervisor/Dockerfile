@@ -3,6 +3,7 @@
 # The public gateway calls this service over the internal ai-net network
 # to start/stop lazy-start containers.
 FROM python:3.11-slim-bookworm AS base
+COPY --from=ghcr.io/astral-sh/uv:0.8.22 /uv /uvx /bin/
 
 LABEL maintainer="ai-infra"
 LABEL component="supervisor"
@@ -23,10 +24,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY pyproject.toml uv.lock ./
+ENV UV_PROJECT_ENVIRONMENT=/usr/local
+RUN uv sync --frozen --no-dev --no-install-project
 
-COPY app.py .
+COPY supervisor/app.py supervisor/resource_manager.py ./
 
 EXPOSE 8000
 

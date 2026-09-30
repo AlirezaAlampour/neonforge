@@ -184,6 +184,19 @@ def test_run_voiceover_job_writes_metadata_and_script_slug_filename(monkeypatch,
     fake_redis = _FakeRedis()
     monkeypatch.setattr(runner.ModelRegistry, "get_model", lambda model_id: _FakeVoxModel())
 
+    async def fake_prepare_workload(model_id: str, job_id: str) -> dict[str, str]:
+        assert model_id == runner.VOX_MODEL_ID
+        assert job_id == "job-1"
+        return {"claim_id": "claim-1"}
+
+    released: list[tuple[str, str]] = []
+
+    async def fake_release_workload(model_id: str, claim_id: str) -> None:
+        released.append((model_id, claim_id))
+
+    monkeypatch.setattr(runner, "_prepare_workload", fake_prepare_workload)
+    monkeypatch.setattr(runner, "_release_workload", fake_release_workload)
+
     script = "AI training, four versions for launch review with a much longer trailing clause."
 
     asyncio.run(
@@ -221,6 +234,7 @@ def test_run_voiceover_job_writes_metadata_and_script_slug_filename(monkeypatch,
     assert metadata["generation_params"] == {"format": "wav", "speed": 1.15}
     assert metadata["chunk_count"] == 1
     assert metadata["duration_seconds"] is not None
+    assert released == [(runner.VOX_MODEL_ID, "claim-1")]
 
 
 def test_vox_clone_mode_sends_reference_audio_without_prompt_text(monkeypatch, tmp_path: Path):

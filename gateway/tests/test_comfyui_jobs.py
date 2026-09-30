@@ -51,6 +51,10 @@ async def _async_noop(*args, **kwargs):
     return None
 
 
+async def _fake_prepare(*args, **kwargs):
+    return {"claim_id": "claim-test-1", "state": "ready"}
+
+
 def _insert_asset(
     session_factory,
     uploads_root: Path,
@@ -134,7 +138,8 @@ def test_create_comfyui_job_with_valid_asset_ids(tmp_path, monkeypatch):
     monkeypatch.setattr(gateway_app, "_template_manifest_cache", None)
     monkeypatch.setattr(gateway_app, "_template_manifest_cache_key", None)
     monkeypatch.setattr(gateway_app, "validate_template_models", lambda manifest: _build_validation_payload())
-    monkeypatch.setattr(gateway_app, "memory_allows_job", lambda tier: (True, {"used_pct": 12.5}, "ok"))
+    monkeypatch.setattr(gateway_app, "prepare_workload", _fake_prepare)
+    monkeypatch.setattr(gateway_app, "release_workload", _async_noop)
     monkeypatch.setattr(gateway_app, "ensure_comfyui_reachable", _async_noop)
     monkeypatch.setattr(gateway_app, "record_service_activity", _async_noop)
     monkeypatch.setattr(gateway_app, "sync_comfyui_job_to_store", _async_noop)

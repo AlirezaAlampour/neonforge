@@ -346,7 +346,7 @@ class _FakeProviderModel(_FakeModel):
         return self._available
 
 
-def test_list_voiceover_providers_returns_rich_misotts_metadata_even_when_unavailable(monkeypatch):
+def test_list_voiceover_providers_marks_stopped_misotts_as_on_demand(monkeypatch):
     miso_model = _FakeProviderModel("misotts", display_name="MisoTTS 8B", available=False)
     monkeypatch.setattr(routes.ModelRegistry, "all_models", lambda: [miso_model])
     monkeypatch.setattr(
@@ -382,10 +382,10 @@ def test_list_voiceover_providers_returns_rich_misotts_metadata_even_when_unavai
             "capability_label": "Text / Prompt",
             "modes": ["plain", "prompted"],
             "license_note": None,
-            "status": "unavailable",
-            "status_badge": "Service offline",
-            "status_detail": "The dedicated MisoTTS service is not reachable.",
-            "available": False,
+            "status": "on_demand",
+            "status_badge": "On demand",
+            "status_detail": "MisoTTS 8B starts automatically when a job is submitted.",
+            "available": True,
             "gpu_device_name": "NVIDIA GB10",
             "gpu_total_vram_gb": 121.69,
             "gpu_free_vram_gb": 1.3,
@@ -395,7 +395,7 @@ def test_list_voiceover_providers_returns_rich_misotts_metadata_even_when_unavai
     ]
 
 
-def test_list_voiceover_models_preserves_unavailable_misotts_for_legacy_clients(monkeypatch):
+def test_list_voiceover_models_preserves_on_demand_misotts_for_legacy_clients(monkeypatch):
     miso_model = _FakeProviderModel("misotts", display_name="MisoTTS 8B", available=False)
     monkeypatch.setattr(routes.ModelRegistry, "all_models", lambda: [miso_model])
     client = _build_client()
@@ -408,10 +408,10 @@ def test_list_voiceover_models_preserves_unavailable_misotts_for_legacy_clients(
             "model_id": "misotts",
             "display_name": "MisoTTS 8B",
             "supports_reference_audio": True,
-            "available": False,
-            "status": "unavailable",
-            "status_badge": "Service offline",
-            "status_detail": "The dedicated MisoTTS service is not reachable.",
+            "available": True,
+            "status": "on_demand",
+            "status_badge": "On demand",
+            "status_detail": "MisoTTS 8B starts automatically when a job is submitted.",
             "capability_label": "Text / Prompt",
             "modes": ["plain", "prompted"],
         }

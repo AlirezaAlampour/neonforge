@@ -14,11 +14,11 @@ const serviceLabels: Record<string, { label: string; tier: string; icon: typeof 
   f5tts: { label: 'F5-TTS', tier: 'Warm', icon: Zap },
   liveportrait: { label: 'LivePortrait', tier: 'Warm', icon: Server },
   lipsync: { label: 'Lip Sync', tier: 'Warm', icon: Server },
-  wan21: { label: 'Wan 2.1', tier: 'Lazy-Start', icon: HardDrive },
+  wan21: { label: 'Legacy Wan 2.1', tier: 'Legacy lazy-start', icon: HardDrive },
 }
 
 export default function StatusPage() {
-  const { services, loading, error, refresh } = useSystemStatus()
+  const { services, workloads, loading, error, refresh } = useSystemStatus()
 
   return (
     <div className="space-y-8">
@@ -158,6 +158,39 @@ export default function StatusPage() {
           )}
         </div>
       </div>
+
+      {workloads && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Zap className="h-4 w-4 text-primary" /> Automatic model lifecycle
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {Object.entries(workloads.managed_services).map(([name, policy]) => (
+                <div key={name} className="rounded-lg border border-border/50 bg-background/40 p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-sm font-medium">{name}</p>
+                    <Badge variant={policy.claimed ? 'warning' : policy.running ? 'success' : 'secondary'}>
+                      {policy.claimed ? 'In use' : policy.running ? 'Idle / ready' : 'Stopped'}
+                    </Badge>
+                  </div>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    {policy.workload_class} · {policy.min_available_gb} GB launch minimum · idle unload {Math.round(policy.idle_timeout_sec / 60)}m
+                  </p>
+                </div>
+              ))}
+            </div>
+            <details className="text-xs text-muted-foreground">
+              <summary className="cursor-pointer font-medium">Lifecycle diagnostics</summary>
+              <p className="mt-2">Protected: {workloads.protected_services.join(', ')}</p>
+              <p className="mt-1">Active claims: {workloads.claims.length}</p>
+              <p className="mt-1 font-mono">{JSON.stringify(workloads.metrics)}</p>
+            </details>
+          </CardContent>
+        </Card>
+      )}
     </div>
   )
 }

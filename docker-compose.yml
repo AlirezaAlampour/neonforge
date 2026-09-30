@@ -69,8 +69,8 @@ services:
   # NOT exposed to external network. Only gateway calls it internally.
   supervisor:
     build:
-      context: ./supervisor
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: supervisor/Dockerfile
     container_name: ai-supervisor
     restart: unless-stopped
     environment:
@@ -81,6 +81,23 @@ services:
       LIVEPORTRAIT_URL: http://liveportrait:8000
       LIPSYNC_URL: http://lipsync:8000
       WHISPER_URL: http://whisper:8000
+      FISH_SPEECH_URL: http://fish_speech:8000
+      VOXCPM2_URL: http://voxcpm2:8000
+      MISOTTS_URL: http://misotts:8000
+      BREEZE_TTS_URL: http://breeze_tts:8000
+      COMFYUI_URL: http://comfyui:8188
+      IDLE_SCAN_INTERVAL: ${IDLE_SCAN_INTERVAL:-15}
+      MEMORY_RECLAIM_TIMEOUT: ${MEMORY_RECLAIM_TIMEOUT:-90}
+      F5TTS_IDLE_TIMEOUT: ${F5TTS_IDLE_TIMEOUT:-900}
+      FISH_SPEECH_IDLE_TIMEOUT: ${FISH_SPEECH_IDLE_TIMEOUT:-900}
+      VOXCPM2_IDLE_TIMEOUT: ${VOXCPM2_IDLE_TIMEOUT:-900}
+      MISOTTS_IDLE_TIMEOUT: ${MISOTTS_IDLE_TIMEOUT:-900}
+      BREEZE_TTS_IDLE_TIMEOUT: ${BREEZE_TTS_IDLE_TIMEOUT:-900}
+      COMFYUI_IDLE_TIMEOUT: ${COMFYUI_IDLE_TIMEOUT:-300}
+      LIVEPORTRAIT_IDLE_TIMEOUT: ${LIVEPORTRAIT_IDLE_TIMEOUT:-300}
+      LIPSYNC_IDLE_TIMEOUT: ${LIPSYNC_IDLE_TIMEOUT:-300}
+      WAN21_IDLE_TIMEOUT: ${WAN21_IDLE_TIMEOUT:-300}
+      WAN_UI_IDLE_TIMEOUT: ${WAN_UI_IDLE_TIMEOUT:-300}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - .:/project:ro
@@ -93,8 +110,8 @@ services:
 
   gateway:
     build:
-      context: ./gateway
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: gateway/Dockerfile
     container_name: ai-gateway
     restart: unless-stopped
     ports:
@@ -310,12 +327,21 @@ services:
       context: .
       dockerfile: comfyUI/Dockerfile
     container_name: ai-comfyui
-    restart: unless-stopped
+    # The supervisor owns recovery. A model-process OOM must remain visible to
+    # the active job instead of silently restarting with a lost prompt.
+    restart: "no"
     <<: *common-gpu
     environment:
       <<: *common-env
       COMFYUI_PORT: ${COMFYUI_PORT:-8188}
-    volumes: *common-volumes 
+      AUX_ANNOTATOR_CKPTS_PATH: /opt/ComfyUI/custom_nodes/comfyui_controlnet_aux/ckpts
+    volumes:
+      - ${MODELS_DIR:-/srv/ai/models}:/models:rw
+      - ${HF_CACHE_DIR:-/srv/ai/cache/hf}:/cache/hf:rw
+      - ${OUTPUTS_DIR:-/srv/ai/outputs}:/outputs:rw
+      - ${ASSETS_DIR:-/srv/ai/assets}:/app/data/assets:rw
+      - ${LOGS_DIR:-/srv/ai/logs}:/logs:rw
+      - ${MODELS_DIR:-/srv/ai/models}/comfyui/controlnet_aux:/opt/ComfyUI/custom_nodes/comfyui_controlnet_aux/ckpts:rw
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${COMFYUI_PORT:-8188}:8188"
     command: >
@@ -384,17 +410,17 @@ services:
       context: ./services/lipsync
       dockerfile: Dockerfile
     container_name: ai-lipsync
-    restart: unless-stopped
+    restart: "no"
     <<: *common-gpu
     environment:
       <<: *common-env
-      LIPSYNC_IDLE_TIMEOUT: ${LIPSYNC_IDLE_TIMEOUT:-1800}
-      LIPSYNC_BACKEND: ${LIPSYNC_BACKEND:-video-retalking}
-      VIDEO_RETALKING_DIR: ${VIDEO_RETALKING_DIR:-/opt/video-retalking}
-      SADTALKER_DIR: ${SADTALKER_DIR:-/opt/SadTalker}
+      LATENTSYNC_SOURCE_DIR: /opt/LatentSync
+      LATENTSYNC_CHECKPOINT_DIR: /models/latentsync/checkpoints
+      LATENTSYNC_TIMEOUT_SEC: ${LATENTSYNC_TIMEOUT_SEC:-1800}
     volumes: *common-volumes
     profiles:
-      - legacy
+      - lipsync
+      - full
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
       <<: *healthcheck-defaults

@@ -32,31 +32,33 @@ def _load_module(name: str, relative_path: str):
 
 def test_lipsync_preflight_rejects_health_only_install(monkeypatch, tmp_path: Path):
     service = _load_module("neonforge_lipsync_readiness", "services/lipsync/app.py")
-    monkeypatch.setattr(service, "VIDEO_RETALKING_DIR", tmp_path / "runtime")
-    monkeypatch.setattr(service, "MODEL_DIR", tmp_path / "models")
+    monkeypatch.setattr(service, "SOURCE_DIR", tmp_path / "runtime")
+    monkeypatch.setattr(service, "CHECKPOINT_DIR", tmp_path / "checkpoints")
 
-    result = service.backend_preflight()
+    available, missing = service._preflight()
 
-    assert result["available"] is False
-    assert result["status"] == "runtime_error"
-    assert len(result["missing"]) == 2
+    assert available is False
+    assert len(missing) == 4
 
 
 def test_lipsync_preflight_accepts_runtime_and_checkpoint(monkeypatch, tmp_path: Path):
     service = _load_module("neonforge_lipsync_ready", "services/lipsync/app.py")
     runtime = tmp_path / "runtime"
-    checkpoints = tmp_path / "models" / "video-retalking" / "checkpoints"
-    runtime.mkdir()
-    checkpoints.mkdir(parents=True)
-    (runtime / "inference.py").write_text("# test fixture\n", encoding="utf-8")
-    (checkpoints / "model.pth").write_bytes(b"fixture")
-    monkeypatch.setattr(service, "VIDEO_RETALKING_DIR", runtime)
-    monkeypatch.setattr(service, "MODEL_DIR", tmp_path / "models")
+    checkpoints = tmp_path / "checkpoints"
+    (runtime / "scripts").mkdir(parents=True)
+    (runtime / "configs" / "unet").mkdir(parents=True)
+    (checkpoints / "whisper").mkdir(parents=True)
+    (runtime / "scripts" / "inference.py").write_text("# test fixture\n", encoding="utf-8")
+    (runtime / "configs" / "unet" / "stage2_512.yaml").write_text("# fixture\n", encoding="utf-8")
+    (checkpoints / "latentsync_unet.pt").write_bytes(b"fixture")
+    (checkpoints / "whisper" / "tiny.pt").write_bytes(b"fixture")
+    monkeypatch.setattr(service, "SOURCE_DIR", runtime)
+    monkeypatch.setattr(service, "CHECKPOINT_DIR", checkpoints)
 
-    result = service.backend_preflight()
+    available, missing = service._preflight()
 
-    assert result["available"] is True
-    assert result["status"] == "idle"
+    assert available is True
+    assert missing == []
 
 
 def test_liveportrait_preflight_reports_missing_adapter_and_weights(monkeypatch, tmp_path: Path):

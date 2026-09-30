@@ -11,8 +11,8 @@ const SIDEBAR_COLLAPSED_KEY = 'neonforge-sidebar-collapsed-v1'
 
 const navItems = [
   { href: '/voiceover', label: 'Voiceover', icon: Mic },
-  { href: '/broll', label: 'Video Generation', icon: Video },
-  { href: '/studio', label: 'Character', icon: Boxes },
+  { href: '/video', label: 'Video Generation', icon: Video },
+  { href: '/character', label: 'Character', icon: Boxes },
   { href: '/avatar', label: 'Avatar', icon: UserRound },
   { href: '/lipsync', label: 'Lip Sync', icon: Clapperboard },
   { href: '/status', label: 'Utilities & Status', icon: Activity },

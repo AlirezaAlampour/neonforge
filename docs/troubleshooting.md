@@ -1,85 +1,83 @@
 # Troubleshooting
 
-## Shared-memory pressure
+## A job says Preparing GPU memory
 
-DGX Spark uses unified memory: CPU processes, containers, filesystem cache, and CUDA allocations draw from the same pool. `nvidia-smi` framebuffer-memory fields are not a reliable admission signal here.
+This is normal. NeonForge is inspecting `/proc/meminfo`, stopping only idle allowlisted model services, waiting for UMA to return, and starting the requested backend. Do not manually stop containers unless the resulting error says automatic reclamation exhausted its allowed candidates.
 
-```bash
-mem_kb="$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)"
-awk -v kb="$mem_kb" 'BEGIN {printf "MemAvailable: %.1f GB\n", kb/1024/1024}'
-docker stats --no-stream
-```
-
-- Do not start a heavy model below 40 GB `MemAvailable`.
-- Stop an optional model through its normal Compose profile before loading another one.
-- Do not use `docker compose --profile full up`; it can keep several large runtimes resident together.
-- Swap use is evidence of recent pressure even if a process has already stopped.
-- The idle-manager unit is optional. Confirm the per-user template is installed before relying on it: `systemctl status "ai-idle-manager@$(id -un).timer"`.
-
-## A service says Ready but generation fails
-
-Use `/services/status`, not container health alone. Liveness means the FastAPI process responds; readiness means the runtime and required files passed preflight.
+Inspect the technical state:
 
 ```bash
-curl -s http://127.0.0.1:8080/services/status | python -m json.tool
+curl -s http://127.0.0.1:8080/workloads/status | jq
+awk '/MemTotal|MemAvailable/ {print}' /proc/meminfo
 ```
 
-Creator-facing states are Ready, Loading, Disabled, Missing model, and Runtime error. Open diagnostics in the UI for exact paths only when needed.
+The supervisor may stop F5-TTS, Fish Speech, VoxCPM2, MisoTTS, Breeze TTS, ComfyUI, LatentSync, LivePortrait, legacy Wan 2.1, or the experimental Wan UI. It never stops frontend, gateway, Redis, supervisor, Whisper, unrelated containers, or arbitrary host processes.
+
+## Automatic reclamation cannot reach the launch minimum
+
+The error reports required and current `MemAvailable`, services already unloaded, and active claims. Check Utilities & Status for the remaining model services. External workloads are intentionally not killed; stop an unrelated experiment yourself only if it belongs to you.
+
+Swap use can remain high after pressure. Use `MemAvailable` as the admission signal on DGX Spark; discrete-VRAM fields from `nvidia-smi` are not authoritative for UMA.
+
+## Character fails or ComfyUI disappears
+
+Character's longer 85-frame acceptance attempt reached the host OOM killer after preprocessing/model load. The validated preview path therefore uses the first 17 driving frames, requires 48 GiB before a cold start, and runs ComfyUI with `restart: "no"` so OOM remains visible.
+
+Confirm both pose preprocessors:
+
+```bash
+test -f /srv/ai/models/comfyui/controlnet_aux/hr16/yolox-onnx/yolox_l.torchscript.pt
+test -f /srv/ai/models/comfyui/controlnet_aux/hr16/DWPose-TorchScript-BatchSize5/dw-ll_ucoco_384_bs5.torchscript.pt
+```
+
+The gateway detects a stopped ComfyUI backend promptly and allows a 60-second history-publication grace when a completed prompt leaves the queue.
 
 ## Lip Sync is unavailable
 
-The current fallback is legacy video-retalking. The audited container had neither `/opt/video-retalking/inference.py` nor `/models/lipsync/video-retalking/checkpoints`, so NeonForge now reports Runtime error rather than a false Ready state.
+LatentSync expects:
 
-LatentSync 1.6 has not been integrated. Its official environment pins CUDA 12.1-era dependencies, `decord`, MediaPipe, InsightFace, and `onnxruntime-gpu`; these still require an actual ARM64/GB10 build and end-to-end render before the backend can be enabled.
-
-## LivePortrait is unavailable
-
-The current service checkout exists, but its adapter imports `liveportrait.api`, which the checked-out upstream source does not provide, and `/srv/ai/models/liveportrait` is absent. The workflow remains Legacy until both the adapter and weights are repaired and a real render passes.
-
-## Character reports missing models
-
-Open Character and refresh model validation. The audited workflow was missing:
-
-- `yolox_l.torchscript.pt`
-- `dw-ll_ucoco_384_bs5.torchscript.pt`
-
-The gateway scans shared model roots read-only; it does not download or move files. Also confirm that the Compose-managed `ai-comfyui` container is running. A separate container listening on another port does not satisfy the managed workflow URL or supervisor scan target.
-
-## ARM64 wheel or native-extension failures
-
-- Keep the NVIDIA NGC PyTorch base; do not replace it with a generic CPU or CUDA wheel.
-- Resolve pure-Python dependencies with the service's `uv.lock` where present.
-- Packages such as InsightFace, MediaPipe, `decord`, FlashAttention, and ONNX Runtime GPU need explicit ARM64/GB10 validation.
-- Do not fix a missing import by installing packages interactively into a running container. Update the locked service environment and rebuild instead.
-
-## NVIDIA PyTorch/CUDA mismatch
-
-Check the versions already present in the NGC image before changing dependencies. Generic upstream wheels may not contain GB10/sm_121 kernels. A working vendor stack takes precedence over satisfying an upstream requirements file verbatim.
-
-## Hugging Face model is missing
-
-Confirm the expected path in [models.md](models.md), available disk space, access-token requirements, and license acceptance. Downloads should target `/srv/ai/models` or the shared `/srv/ai/cache/hf`, never the Git checkout.
-
-## First load takes a long time
-
-First use may download weights, populate kernels, or move a model into unified memory. Watch the workflow state and `MemAvailable`. A health response does not mean first-load work is complete.
-
-## Port conflicts or remote access
-
-Change `FRONTEND_PORT`, `GATEWAY_PORT`, or `COMFYUI_PORT` in `.env`. Set `BIND_ADDRESS` to one trusted host address. The default is loopback for safety.
-
-```bash
-ss -ltn | rg ':(3000|6379|8080|8188)\b'
-docker compose ps
+```text
+/srv/ai/models/latentsync/checkpoints/latentsync_unet.pt
+/srv/ai/models/latentsync/checkpoints/whisper/tiny.pt
 ```
 
-## Container logs
+Check readiness and bounded logs:
+
+```bash
+docker compose --profile lipsync ps -a lipsync
+docker logs --tail 100 ai-lipsync
+```
+
+The stopped container is still creator-ready: the supervisor starts it after a request. `Missing model` is different and identifies absent files.
+
+## Video Generation reports setup required
+
+Open `/api/v1/comfyui/templates/hunyuan-video-15-t2v` and inspect `validation.missing`. The expected Hunyuan diffusion, Qwen, ByT5, and VAE filenames are listed in [models.md](models.md). The gateway scan is read-only.
+
+## Avatar is disabled
+
+This is intentional. EchoMimicV3-Flash is selected, but its official dependency file does not resolve on Linux ARM64 because TensorFlow 2.15 and `decord` do not provide the required combination of Python/platform wheels. No backend is exposed until a locked patched image and real image+audio output pass.
+
+## ARM64 dependency errors
+
+- use uv only;
+- keep the service's NGC PyTorch/CUDA base;
+- exclude or patch unused x86-only dependencies only with an inference-path audit;
+- regenerate and commit the service lock;
+- rebuild the image; do not mutate a running container.
+
+## Service state versus health
+
+Container health only proves that the wrapper process responds. `/services/status` distinguishes Ready, Loading, Disabled, Missing model, Runtime error, and In use. `/workloads/status` shows whether an on-demand backend is stopped, claimed, or inside its warm-idle window.
+
+## Logs
 
 Always bound log reads:
 
 ```bash
 docker logs --tail 100 ai-gateway
-docker logs --tail 100 ai-frontend
+docker logs --tail 100 ai-supervisor
+docker logs --tail 100 ai-comfyui
 ```
 
-For temporary startup monitoring, use `docker logs --tail 50 -f CONTAINER` and stop following as soon as success or failure is clear.
+For brief live monitoring use `docker logs --tail 50 -f CONTAINER`, then stop following as soon as the relevant event is visible.

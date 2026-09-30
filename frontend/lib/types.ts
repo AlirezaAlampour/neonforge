@@ -14,6 +14,7 @@ export interface MemoryStatus {
     reserve_medium_gb: number
     reserve_light_gb: number
   }
+  workload_minimums_gb?: Record<string, number>
 }
 
 export interface ServiceStatus {
@@ -31,7 +32,25 @@ export interface ServiceStatus {
 
 export type ServicesStatus = Record<string, ServiceStatus>
 
-export type JobState = 'queued' | 'running' | 'completed' | 'failed'
+export interface WorkloadLifecycleStatus {
+  memory: MemoryStatus
+  protected_services: string[]
+  managed_services: Record<string, {
+    service: string
+    workload_class: string
+    min_available_gb: number
+    idle_timeout_sec: number
+    running: boolean
+    claimed: boolean
+    memory_gb?: number | null
+    idle_for_sec?: number | null
+  }>
+  claims: Array<{ claim_id: string; service: string; job_id?: string | null; model_label: string }>
+  metrics: Record<string, number>
+  events: Array<{ at: number; event: string; service: string; reason?: string }>
+}
+
+export type JobState = 'preparing' | 'loading' | 'queued' | 'running' | 'completed' | 'failed'
 
 export interface ComfyUIDebugArtifact {
   id: string

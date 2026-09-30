@@ -14,6 +14,7 @@ import type {
   PresetProfile,
   ReactorResult,
   ServicesStatus,
+  WorkloadLifecycleStatus,
   StudioTool,
 } from './types'
 
@@ -39,6 +40,10 @@ export async function fetchMemory(): Promise<MemoryStatus> {
 
 export async function fetchServices(): Promise<ServicesStatus> {
   return request('/services/status')
+}
+
+export async function fetchWorkloads(): Promise<WorkloadLifecycleStatus> {
+  return request('/workloads/status')
 }
 
 export async function fetchJob(jobId: string): Promise<JobRecord> {

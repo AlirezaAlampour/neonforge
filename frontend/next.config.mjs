@@ -7,6 +7,7 @@ const nextConfig = {
       { source: '/api/v1/:path*', destination: `${gateway}/api/v1/:path*` },
       { source: '/jobs/:path*', destination: `${gateway}/jobs/:path*` },
       { source: '/memory', destination: `${gateway}/memory` },
+      { source: '/workloads/status', destination: `${gateway}/workloads/status` },
       { source: '/services/:path*', destination: `${gateway}/services/:path*` },
       { source: '/healthz', destination: `${gateway}/healthz` },
     ]

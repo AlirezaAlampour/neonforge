@@ -553,6 +553,18 @@ def _provider_status_summary(model: Any) -> dict[str, Any]:
     }
 
 
+def _provider_configured_for_on_demand(model_id: str) -> bool:
+    if model_id in {"f5tts", MISO_MODEL_ID}:
+        return True
+    if model_id == "fish_speech":
+        return os.getenv("FISH_SPEECH_ENABLED", "false").lower() == "true"
+    if model_id == VOX_MODEL_ID:
+        return os.getenv("VOXCPM2_ENABLED", "false").lower() == "true"
+    if model_id == BREEZE_MODEL_ID:
+        return os.getenv("BREEZE_TTS_ENABLED", "false").lower() == "true"
+    return False
+
+
 def _serialize_provider(model: Any) -> dict[str, Any]:
     payload = {
         "id": model.model_id,
@@ -571,7 +583,20 @@ def _serialize_provider(model: Any) -> dict[str, Any]:
             else None
         ),
     }
-    payload.update(_provider_status_summary(model))
+    status = _provider_status_summary(model)
+    if (
+        not status.get("available")
+        and _provider_configured_for_on_demand(model.model_id)
+        and status.get("status_badge") == "Service offline"
+    ):
+        status = {
+            **status,
+            "status": "on_demand",
+            "status_badge": "On demand",
+            "status_detail": f"{_provider_name(model)} starts automatically when a job is submitted.",
+            "available": True,
+        }
+    payload.update(status)
     return payload
 
 
@@ -1001,7 +1026,7 @@ async def create_voiceover_job(request: CreateVoiceoverJobRequest, background_ta
     model = ModelRegistry.get_model(request.model_id)
     if model is None:
         raise HTTPException(422, "Selected TTS model does not exist")
-    if not model.is_available():
+    if not model.is_available() and not _provider_configured_for_on_demand(request.model_id):
         raise HTTPException(422, model.availability_error())
 
     is_vox_model = request.model_id == VOX_MODEL_ID

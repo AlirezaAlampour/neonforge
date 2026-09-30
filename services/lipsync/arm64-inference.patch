@@ -1,0 +1,36 @@
+diff --git a/latentsync/utils/face_detector.py b/latentsync/utils/face_detector.py
+index faa55c9..813ca0c 100644
+--- a/latentsync/utils/face_detector.py
++++ b/latentsync/utils/face_detector.py
+@@ -13 +13 @@ class FaceDetector:
+-            providers=["CUDAExecutionProvider"],
++            providers=["CPUExecutionProvider"],
+@@ -15 +15 @@ class FaceDetector:
+-        self.app.prepare(ctx_id=cuda_to_int(device), det_size=(INSIGHTFACE_DETECT_SIZE, INSIGHTFACE_DETECT_SIZE))
++        self.app.prepare(ctx_id=-1, det_size=(INSIGHTFACE_DETECT_SIZE, INSIGHTFACE_DETECT_SIZE))
+diff --git a/latentsync/utils/util.py b/latentsync/utils/util.py
+index 6aa9ab3..042aea9 100644
+--- a/latentsync/utils/util.py
++++ b/latentsync/utils/util.py
+@@ -31 +31,2 @@ import cv2
+-from decord import AudioReader, VideoReader
++import librosa
++import soundfile as sf
+@@ -67,4 +68 @@ def read_video_decord(video_path: str):
+-    vr = VideoReader(video_path)
+-    video_frames = vr[:].asnumpy()
+-    vr.seek(0)
+-    return video_frames
++    raise RuntimeError("decord is unavailable on ARM64; call read_video(..., use_decord=False)")
+@@ -106,5 +104,6 @@ def read_audio(audio_path: str, audio_sample_rate: int = 16000):
+-    ar = AudioReader(audio_path, sample_rate=audio_sample_rate, mono=True)
+-
+-    # To access the audio samples
+-    audio_samples = torch.from_numpy(ar[:].asnumpy())
+-    audio_samples = audio_samples.squeeze(0)
++    audio_samples, sample_rate = sf.read(audio_path, always_2d=False)
++    if audio_samples.ndim > 1:
++        audio_samples = np.mean(audio_samples, axis=1)
++    if sample_rate != audio_sample_rate:
++        audio_samples = librosa.resample(audio_samples, orig_sr=sample_rate, target_sr=audio_sample_rate)
++    audio_samples = torch.from_numpy(np.asarray(audio_samples, dtype=np.float32))

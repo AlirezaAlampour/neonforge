@@ -1,0 +1,104 @@
+{
+  "11": {
+    "inputs": {
+      "clip_name1": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+      "clip_name2": "byt5_small_glyphxl_fp16.safetensors",
+      "type": "hunyuan_video_15",
+      "device": "default"
+    },
+    "class_type": "DualCLIPLoader",
+    "_meta": {"title": "DualCLIPLoader"}
+  },
+  "10": {
+    "inputs": {"vae_name": "hunyuanvideo15_vae_fp16.safetensors"},
+    "class_type": "VAELoader",
+    "_meta": {"title": "Load VAE"}
+  },
+  "8": {
+    "inputs": {"samples": ["127", 0], "vae": ["10", 0]},
+    "class_type": "VAEDecode",
+    "_meta": {"title": "VAE Decode"}
+  },
+  "44": {
+    "inputs": {
+      "text": "A cinematic landscape with natural motion and detailed lighting.",
+      "clip": ["11", 0]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {"title": "Positive Prompt"}
+  },
+  "12": {
+    "inputs": {
+      "unet_name": "hunyuanvideo1.5_480p_t2v_cfg_distilled_fp8_scaled.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {"title": "HunyuanVideo 1.5 480p"}
+  },
+  "93": {
+    "inputs": {"text": "", "clip": ["11", 0]},
+    "class_type": "CLIPTextEncode",
+    "_meta": {"title": "Negative Prompt"}
+  },
+  "128": {
+    "inputs": {"scheduler": "simple", "steps": 20, "denoise": 1, "model": ["12", 0]},
+    "class_type": "BasicScheduler",
+    "_meta": {"title": "Scheduler"}
+  },
+  "129": {
+    "inputs": {"noise_seed": 42},
+    "class_type": "RandomNoise",
+    "_meta": {"title": "Seed"}
+  },
+  "130": {
+    "inputs": {"sampler_name": "euler"},
+    "class_type": "KSamplerSelect",
+    "_meta": {"title": "Sampler"}
+  },
+  "131": {
+    "inputs": {
+      "cfg": 1,
+      "model": ["132", 0],
+      "positive": ["44", 0],
+      "negative": ["93", 0]
+    },
+    "class_type": "CFGGuider",
+    "_meta": {"title": "Guidance"}
+  },
+  "132": {
+    "inputs": {"shift": 5, "model": ["12", 0]},
+    "class_type": "ModelSamplingSD3",
+    "_meta": {"title": "Flow Shift"}
+  },
+  "127": {
+    "inputs": {
+      "noise": ["129", 0],
+      "guider": ["131", 0],
+      "sampler": ["130", 0],
+      "sigmas": ["128", 0],
+      "latent_image": ["124", 0]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {"title": "Sample"}
+  },
+  "102": {
+    "inputs": {
+      "filename_prefix": "video/hunyuan_video_1.5",
+      "format": "auto",
+      "codec": "h264",
+      "video": ["101", 0]
+    },
+    "class_type": "SaveVideo",
+    "_meta": {"title": "Save Video"}
+  },
+  "101": {
+    "inputs": {"fps": 24, "images": ["8", 0]},
+    "class_type": "CreateVideo",
+    "_meta": {"title": "Create Video"}
+  },
+  "124": {
+    "inputs": {"width": 832, "height": 480, "length": 49, "batch_size": 1},
+    "class_type": "EmptyHunyuanVideo15Latent",
+    "_meta": {"title": "Video Dimensions"}
+  }
+}

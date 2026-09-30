@@ -1,0 +1,36 @@
+{
+  "id": "hunyuan-video-15-t2v",
+  "name": "HunyuanVideo 1.5",
+  "description": "Quality-first local text-to-video workflow using the official ComfyUI graph and the 480p CFG-distilled FP8 checkpoint.",
+  "category": "video",
+  "workflow_file": "hunyuan-video-15-t2v.workflow.json",
+  "workflow_format": "api",
+  "gpu_tier": "heavy",
+  "required_inputs": [],
+  "optional_params": [
+    {"id": "prompt", "label": "Prompt", "type": "string", "default": ""},
+    {"id": "negative_prompt", "label": "Avoid", "type": "string", "default": ""},
+    {"id": "width", "label": "Width", "type": "integer", "default": 832, "min": 256, "max": 832, "step": 32},
+    {"id": "height", "label": "Height", "type": "integer", "default": 480, "min": 256, "max": 832, "step": 32},
+    {"id": "frames", "label": "Frames", "type": "integer", "default": 49, "min": 17, "max": 121, "step": 4},
+    {"id": "fps", "label": "Frame Rate", "type": "integer", "default": 24, "min": 1, "max": 60, "step": 1},
+    {"id": "steps", "label": "Steps", "type": "integer", "default": 20, "min": 1, "max": 50, "step": 1},
+    {"id": "seed", "label": "Seed", "type": "integer", "default": 42, "step": 1},
+    {"id": "cfg", "label": "CFG", "type": "number", "default": 1, "min": 0, "max": 10, "step": 0.1},
+    {"id": "shift", "label": "Flow Shift", "type": "number", "default": 5, "min": 0, "max": 20, "step": 0.1}
+  ],
+  "runtime_mappings": [
+    {"input_id": "prompt", "node_id": "44", "input_name": "text", "value_source": "param"},
+    {"input_id": "negative_prompt", "node_id": "93", "input_name": "text", "value_source": "param"},
+    {"input_id": "width", "node_id": "124", "input_name": "width", "value_source": "param"},
+    {"input_id": "height", "node_id": "124", "input_name": "height", "value_source": "param"},
+    {"input_id": "frames", "node_id": "124", "input_name": "length", "value_source": "param"},
+    {"input_id": "fps", "node_id": "101", "input_name": "fps", "value_source": "param"},
+    {"input_id": "steps", "node_id": "128", "input_name": "steps", "value_source": "param"},
+    {"input_id": "seed", "node_id": "129", "input_name": "noise_seed", "value_source": "param"},
+    {"input_id": "cfg", "node_id": "131", "input_name": "cfg", "value_source": "param"},
+    {"input_id": "shift", "node_id": "132", "input_name": "shift", "value_source": "param"}
+  ],
+  "output_type": "video",
+  "output": {"node_id": "102", "node_type": "SaveVideo", "media_keys": ["images", "videos", "files"]}
+}

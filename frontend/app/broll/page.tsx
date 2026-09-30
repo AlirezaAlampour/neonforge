@@ -27,11 +27,11 @@ export default function VideoGenerationPage() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const { jobs, trackJob, dismissJob } = useJobPoller()
-  const { memory, services } = useSystemStatus(10000)
+  const { services } = useSystemStatus(10000)
   const wanStatus = services?.wan21
   const wanStateLabel = wanStatus?.state_label || (wanStatus ? (wanStatus.ready ? 'Ready' : 'Disabled') : 'Checking')
-  const hasMemory = Boolean(memory && memory.available_gb >= memory.thresholds.reserve_heavy_gb)
-  const canGenerate = Boolean(wanStatus?.ready && hasMemory)
+  const lifecycleUnavailable = wanStatus?.state === 'missing_model' || wanStatus?.state === 'runtime_error'
+  const canGenerate = Boolean(wanStatus && !lifecycleUnavailable)
 
   const handleSubmit = async () => {
     if (!prompt.trim() || !canGenerate) return
@@ -88,9 +88,7 @@ export default function VideoGenerationPage() {
                   </Badge>
                 </div>
                 <p className="mt-1 text-sm text-muted-foreground">
-                  {!hasMemory && memory
-                    ? `${memory.available_gb.toFixed(1)} GB available; heavy jobs require ${memory.thresholds.reserve_heavy_gb.toFixed(0)} GB free.`
-                    : wanStatus?.detail || 'Checking the on-demand video runtime.'}
+                  {wanStatus?.detail || 'Checking the on-demand video runtime.'}
                 </p>
               </div>
             </CardContent>
@@ -229,7 +227,7 @@ export default function VideoGenerationPage() {
           </div>
 
           <p className="text-xs text-muted-foreground/60">
-            The configured Wan runtime starts on demand. Its first generation may include model download and load time.
+            GPU memory is reclaimed automatically. A cold start includes model loading before generation begins.
           </p>
         </div>
 

@@ -25,13 +25,13 @@ export default function AvatarPage() {
             Backend not validated on this host
           </CardTitle>
           <CardDescription>
-            LongCat-Video-Avatar 1.5 was evaluated for this workflow, but NeonForge does not expose generation until
-            the ARM64 runtime and a real image-plus-audio render pass on the DGX Spark memory gate.
+            EchoMimicV3-Flash is the selected deployment target, but NeonForge does not expose generation until its
+            ARM64 runtime and a real image-plus-audio render pass on the DGX Spark memory gate.
           </CardDescription>
         </CardHeader>
         <CardContent className="text-sm text-muted-foreground">
-          The existing LivePortrait code remains available under Character&apos;s legacy tools for compatibility, but it
-          is not presented as the Avatar backend and currently requires its missing adapter and model files.
+          EchoMimicV3-Flash offered the best quality-to-infrastructure balance in the evaluated open avatar benchmark.
+          The existing LivePortrait code remains a hidden legacy dependency and is not presented as this workflow.
         </CardContent>
       </Card>
 

@@ -1,30 +1,38 @@
 # Changelog
 
-All notable NeonForge changes are recorded here. The project has not published a tagged release yet.
+All notable NeonForge changes are recorded here. The project has not published a tagged release.
 
-## Unreleased — recommended `0.1.0-alpha`
+## Unreleased
 
-### Changed
+### Product
 
-- Made Voiceover the default landing workflow and simplified navigation around creator goals.
-- Renamed B-Roll to Video Generation and Creative Studio to Character.
-- Moved LivePortrait, the older F5 surface, and ReActor behind Legacy/experimental disclosure.
-- Added normalized Ready, Loading, Disabled, Missing model, Runtime error, and In use service states.
-- Added strict readiness preflight for the legacy Lip Sync and LivePortrait adapters.
-- Profile-gated optional voice, legacy-media, ComfyUI, Wan, and cloud-experimental services.
-- Defaulted public bindings to loopback and retained shared model/cache/output mounts.
+- Reduced primary navigation to Voiceover, Video Generation, Character, Avatar, Lip Sync, and Utilities & Status.
+- Preserved the Voiceover Studio UX and hid duplicated legacy creator routes from navigation.
+- Rebuilt Video Generation around HunyuanVideo 1.5 and Character around the managed Wan2.2 Replace graph.
+- Kept Character Animate and Avatar disabled until their distinct runtimes pass real generation.
+- Replaced the legacy lip-sync adapter with LatentSync 1.6.
 
-### Documentation
+### Resource lifecycle
 
-- Rebuilt the README around real supported workflows, deployment, safety, and licensing.
-- Added installation, model/runtime, and troubleshooting guides.
-- Recorded the LatentSync 1.6 and LongCat-Video-Avatar 1.5 evaluation without claiming unsupported integrations.
-- Added real application screenshots and a concise Mermaid architecture diagram.
+- Added an allowlist-only, claim-based supervisor resource manager using `/proc/meminfo`.
+- Added automatic idle/conflict reclamation, targeted Compose start/stop, readiness checks, failure cleanup, and configurable warm windows.
+- Added workflow-specific cold-start minimums, runtime duration/UMA metrics, and lifecycle visibility in Utilities & Status.
+- Protected frontend, gateway, Redis, supervisor, Whisper, unrelated containers, and arbitrary host processes from reclamation.
+- Disabled automatic ComfyUI restart so OOM and lost prompts remain visible.
+
+### Models and validation
+
+- Installed and validated the two missing DWPose preprocessors for Character.
+- Completed real DGX renders with Wan2.2 Character Replace, LatentSync 1.6, and HunyuanVideo 1.5.
+- Added an ARM64 inference patch and uv-locked service environment for LatentSync while preserving NGC PyTorch.
+- Selected EchoMimicV3-Flash for Avatar, but did not integrate it because the official TensorFlow/decord dependency set is not reproducible on Linux ARM64.
+- Documented current Hunyuan, Wan, LTX, MiniMax, LatentSync, MuseTalk, EchoMimic, LiveAvatar, LongCat, SoulX, and AptAvatar research and license boundaries.
 
 ### Engineering
 
-- Added a root `uv.lock`, deterministic frontend lockfile, and lightweight CI.
-- Switched the frontend image to `npm ci`.
-- Updated Next.js to the supported 16.3.6 line after the 14.x dependency audit still reported critical advisories.
-- Added CPU-safe tests for workflow navigation and media readiness behavior.
-- Removed verified root-level scratch artifacts and obsolete scripts that overwrote Dockerfiles or installed crash-derived dependencies at runtime; expanded generated/model exclusions.
+- Added focused tests for candidate reclamation, protected services, admission retry, failure cleanup, workflow state, workflow-specific minima, and navigation deduplication.
+- Converted the supervisor, gateway, and LatentSync package installation paths to uv-only locked builds.
+- Added a bounded ComfyUI queue-to-history grace to prevent successful renders being marked failed.
+- Verified the preserved Voiceover path with a real MisoTTS render through the new supervisor claim lifecycle.
+- Fixed the frontend workload-status proxy so Lip Sync on-demand readiness and lifecycle diagnostics render correctly.
+- Updated deployment, architecture, model, current-state, troubleshooting, and acceptance documentation.
