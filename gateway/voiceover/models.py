@@ -599,30 +599,6 @@ class BreezeTTSModel(VoiceoverModel):
         return response.content
 
 
-class PremiumCloneModel(VoiceoverModel):
-    @property
-    def model_id(self) -> str:
-        return "premium_clone"
-
-    @property
-    def display_name(self) -> str:
-        return "Premium Clone (Scaffold)"
-
-    @property
-    def supports_reference_audio(self) -> bool:
-        return True
-
-    def is_available(self) -> bool:
-        return False
-
-    def availability_error(self) -> str:
-        return "Premium Clone is not yet implemented"
-
-    def synthesize(self, text: str, reference_audio_path: str | None, options: dict[str, Any]) -> bytes:
-        # TODO: wire to actual model when runtime is confirmed
-        raise ModelUnavailableError("Not yet implemented")
-
-
 class ModelRegistry:
     @staticmethod
     def all_models() -> list[VoiceoverModel]:
@@ -632,7 +608,6 @@ class ModelRegistry:
             VoxCPM2Model(),
             MisoTTSModel(),
             BreezeTTSModel(),
-            PremiumCloneModel(),
         ]
 
     @classmethod

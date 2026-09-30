@@ -5,8 +5,7 @@
 # Usage:
 #   cp .env.example .env   # edit values
 #   docker compose up -d redis supervisor gateway whisper frontend  # always-on tier
-#   docker compose up -d f5tts liveportrait lipsync                 # warm tier
-#   # wan21 is started on-demand by the supervisor sidecar
+#   # Model containers start on demand through the supervisor.
 # =============================================================================
 
 name: dgx-ai-stack
@@ -76,9 +75,7 @@ services:
     environment:
       <<: *common-env
       COMPOSE_DIR: /project
-      WAN21_URL: http://wan21:8000
       F5TTS_URL: http://f5tts:8000
-      LIVEPORTRAIT_URL: http://liveportrait:8000
       LIPSYNC_URL: http://lipsync:8000
       WHISPER_URL: http://whisper:8000
       FISH_SPEECH_URL: http://fish_speech:8000
@@ -94,10 +91,7 @@ services:
       MISOTTS_IDLE_TIMEOUT: ${MISOTTS_IDLE_TIMEOUT:-900}
       BREEZE_TTS_IDLE_TIMEOUT: ${BREEZE_TTS_IDLE_TIMEOUT:-900}
       COMFYUI_IDLE_TIMEOUT: ${COMFYUI_IDLE_TIMEOUT:-300}
-      LIVEPORTRAIT_IDLE_TIMEOUT: ${LIVEPORTRAIT_IDLE_TIMEOUT:-300}
       LIPSYNC_IDLE_TIMEOUT: ${LIPSYNC_IDLE_TIMEOUT:-300}
-      WAN21_IDLE_TIMEOUT: ${WAN21_IDLE_TIMEOUT:-300}
-      WAN_UI_IDLE_TIMEOUT: ${WAN_UI_IDLE_TIMEOUT:-300}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - .:/project:ro
@@ -124,7 +118,6 @@ services:
       F5TTS_URL: http://f5tts:8000
       FISH_SPEECH_ENABLED: ${FISH_SPEECH_ENABLED:-false}
       FISH_SPEECH_INTERNAL_URL: ${FISH_SPEECH_INTERNAL_URL:-http://fish_speech:8000}
-      LIVEPORTRAIT_URL: http://liveportrait:8000
       LIPSYNC_URL: http://lipsync:8000
       MISOTTS_BASE_URL: ${MISOTTS_BASE_URL:-http://misotts:8000}
       MISOTTS_INTERNAL_URL: ${MISOTTS_INTERNAL_URL:-http://misotts:8000}
@@ -132,7 +125,6 @@ services:
       BREEZE_TTS_INTERNAL_URL: ${BREEZE_TTS_INTERNAL_URL:-http://breeze_tts:8000}
       VOXCPM2_ENABLED: ${VOXCPM2_ENABLED:-false}
       VOXCPM2_INTERNAL_URL: ${VOXCPM2_INTERNAL_URL:-http://voxcpm2:8000}
-      WAN21_URL: http://wan21:8000
       COMFYUI_URL: http://comfyui:8188
       COMFYUI_MODEL_ROOTS: ${COMFYUI_MODEL_ROOTS:-/models/comfyui,/opt/ComfyUI/custom_nodes/comfyui_controlnet_aux/ckpts}
       MEMORY_WARN_THRESHOLD: ${MEMORY_WARN_THRESHOLD:-70}
@@ -200,7 +192,7 @@ services:
       - ai-net
 
   # ===========================================================================
-  # WARM TIER — containers run, models load on first request, destroyed on idle
+  # OPTIONAL MODEL SERVICES — supervisor owns start, readiness and idle unload
   # ===========================================================================
 
   f5tts:
@@ -215,6 +207,8 @@ services:
       F5TTS_IDLE_TIMEOUT: ${F5TTS_IDLE_TIMEOUT:-1800}
       F5TTS_SAMPLE_RATE: ${F5TTS_SAMPLE_RATE:-24000}
     volumes: *common-volumes
+    profiles:
+      - voice
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
       <<: *healthcheck-defaults
@@ -231,7 +225,7 @@ services:
       <<: *common-env
     volumes: *common-volumes
     profiles:
-      - voice-extras
+      - voice
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/v1/health')"]
       <<: *healthcheck-defaults
@@ -251,7 +245,7 @@ services:
       VOXCPM2_MODEL_PATH: ${VOXCPM2_MODEL_PATH:-/models/voxcpm2/openbmb/VoxCPM2}
     volumes: *common-volumes
     profiles:
-      - voice-extras
+      - voice
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/v1/health')"]
       interval: 30s
@@ -283,7 +277,7 @@ services:
       MISOTTS_MIN_CUDA_FREE_GB: ${MISOTTS_MIN_CUDA_FREE_GB:-12}
     volumes: *common-volumes
     profiles:
-      - voice-extras
+      - voice
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
       <<: *healthcheck-defaults
@@ -311,8 +305,7 @@ services:
       BREEZE_TTS_SOURCE_DIR: /opt/breeze-tts-src
     volumes: *common-volumes
     profiles:
-      - breeze
-      - full
+      - voice
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
       interval: 30s
@@ -353,55 +346,12 @@ services:
       --user-directory /outputs/comfyui/user
       --enable-manager
     profiles:
-      - comfyui
-      - full
+      - video
+      - character
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8188/')"]
       <<: *healthcheck-defaults
       start_period: 120s
-    networks:
-      - ai-net
-
-  liveportrait:
-    build:
-      context: ./services/liveportrait
-      dockerfile: Dockerfile
-    container_name: ai-liveportrait
-    restart: unless-stopped
-    <<: *common-gpu
-    environment:
-      <<: *common-env
-      LIVEPORTRAIT_IDLE_TIMEOUT: ${LIVEPORTRAIT_IDLE_TIMEOUT:-1800}
-      LIVEPORTRAIT_SOURCE_DIR: ${LIVEPORTRAIT_SOURCE_DIR:-/opt/LivePortrait}
-    volumes: *common-volumes
-    profiles:
-      - legacy
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
-      <<: *healthcheck-defaults
-      start_period: 120s
-    networks:
-      - ai-net
-
-  wan-ui:
-    build:
-      context: ./Wan2.2-Animate
-      dockerfile: Dockerfile
-      additional_contexts:
-        comfyui_resolver: ./comfyUI
-    container_name: ai-wan-ui
-    restart: unless-stopped
-    <<: *common-gpu
-    volumes:
-      - /srv/ai/models/comfyui:/models/comfyui:ro
-      - ${HF_CACHE_DIR:-/srv/ai/cache/hf}:/cache/hf:rw
-    environment:
-      HF_HOME: /cache/hf
-      GRADIO_SERVER_NAME: "0.0.0.0"
-    ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:7860:7860"
-    profiles:
-      - cloud-experimental
     networks:
       - ai-net
 
@@ -419,42 +369,11 @@ services:
       LATENTSYNC_TIMEOUT_SEC: ${LATENTSYNC_TIMEOUT_SEC:-1800}
     volumes: *common-volumes
     profiles:
-      - lipsync
-      - full
+      - lip-sync
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
       <<: *healthcheck-defaults
       start_period: 120s
-    networks:
-      - ai-net
-
-  # ===========================================================================
-  # LAZY-START TIER — started on demand by supervisor, stopped after idle
-  # ===========================================================================
-
-  wan21:
-    build:
-      context: ./services/wan21
-      dockerfile: Dockerfile
-    container_name: ai-wan21
-    # No restart — managed by supervisor + idle_manager
-    restart: "no"
-    <<: *common-gpu
-    environment:
-      <<: *common-env
-      WAN21_MODEL_VARIANT: ${WAN21_MODEL_VARIANT:-1.3B}
-      WAN21_MAX_CONCURRENT: ${WAN21_MAX_CONCURRENT:-1}
-      WAN21_IDLE_TIMEOUT: ${WAN21_IDLE_TIMEOUT:-300}
-      WAN21_MAX_VIDEO_LENGTH: ${WAN21_MAX_VIDEO_LENGTH:-10}
-      WAN21_MAX_RESOLUTION: ${WAN21_MAX_RESOLUTION:-512}
-    volumes: *common-volumes
-    profiles:
-      - wan21
-      - full
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
-      <<: *healthcheck-defaults
-      start_period: 180s
     networks:
       - ai-net
 

@@ -20,7 +20,7 @@ export interface MemoryStatus {
 export interface ServiceStatus {
   alive: boolean
   ready: boolean
-  state?: 'ready' | 'loading' | 'disabled' | 'missing_model' | 'runtime_error' | 'in_use'
+  state?: 'ready' | 'stopped' | 'loading' | 'disabled' | 'missing_model' | 'runtime_error' | 'in_use'
   state_label?: string
   detail?: string
   backend?: string | null
@@ -47,10 +47,10 @@ export interface WorkloadLifecycleStatus {
   }>
   claims: Array<{ claim_id: string; service: string; job_id?: string | null; model_label: string }>
   metrics: Record<string, number>
-  events: Array<{ at: number; event: string; service: string; reason?: string }>
+  events: Array<{ at: number; event: string; service: string; reason?: string; recovered_gb?: number; min_available_gb?: number }>
 }
 
-export type JobState = 'preparing' | 'loading' | 'queued' | 'running' | 'completed' | 'failed'
+export type JobState = 'preparing' | 'loading' | 'queued' | 'running' | 'finalizing' | 'completed' | 'failed'
 
 export interface ComfyUIDebugArtifact {
   id: string
@@ -82,15 +82,6 @@ export interface TTSResult {
   sample_rate: number
   duration: number
   processing_time: number
-  job_id: string
-}
-
-export interface Wan21Result {
-  output_path: string
-  processing_time: number
-  num_frames: number
-  resolution: string
-  uma_used_gb: number
   job_id: string
 }
 
@@ -280,25 +271,4 @@ export interface ComfyUIJobDetail {
   inputs: Record<string, string>
   params: Record<string, unknown>
   validation: ComfyUIModelValidation
-}
-
-export type StudioTool = 'f5tts' | 'liveportrait' | 'reactor' | 'character-swap'
-
-export interface PresetProfile {
-  id: string
-  name: string
-  tool: StudioTool
-  state: Record<string, unknown>
-  created_at: string
-  updated_at: string
-}
-
-export interface PresetListResponse {
-  items: PresetProfile[]
-}
-
-export interface ReactorResult {
-  job_id: string
-  output_path?: string | null
-  queue_response: unknown
 }

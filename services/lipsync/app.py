@@ -8,6 +8,7 @@ warm-idle policy are owned by the NeonForge supervisor.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import shutil
@@ -48,6 +49,39 @@ def _preflight() -> tuple[bool, list[str]]:
     ]
     missing = [str(path) for path in required if not path.is_file()]
     return not missing, missing
+
+
+def _validate_media_probe(probe: dict, *, video: bool) -> None:
+    try:
+        duration = float(probe["format"]["duration"])
+        if not 0 < duration <= 10:
+            raise ValueError("Use a clip and audio between 0 and 10 seconds for the supported local preview.")
+        if video:
+            stream = next(item for item in probe["streams"] if item.get("codec_type") == "video")
+            width, height = int(stream["width"]), int(stream["height"])
+            numerator, denominator = map(float, stream["r_frame_rate"].split("/"))
+            if not (0 < width <= 1920 and 0 < height <= 1920 and width * height <= 1920 * 1080 and 0 < numerator / denominator <= 30):
+                raise ValueError("Use a source video up to 1080p landscape or portrait, at 30 fps or less.")
+    except (KeyError, TypeError, StopIteration, ZeroDivisionError) as exc:
+        raise HTTPException(422, "Unable to read this media. Export a valid MP4 video or WAV audio file and try again.") from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+async def _probe_media(path: Path, *, video: bool) -> None:
+    process = await asyncio.create_subprocess_exec(
+        "ffprobe", "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=30)
+    except asyncio.TimeoutError as exc:
+        process.kill()
+        await process.communicate()
+        raise HTTPException(422, "Media validation timed out. Try a shorter clip.") from exc
+    if process.returncode:
+        raise HTTPException(422, "This media could not be decoded. Try an MP4 video or WAV audio file.")
+    _validate_media_probe(json.loads(stdout), video=video)
 
 
 @app.on_event("startup")
@@ -104,6 +138,8 @@ async def sync(
     try:
         video_path.write_bytes(await video.read())
         audio_path.write_bytes(await audio.read())
+        await _probe_media(video_path, video=True)
+        await _probe_media(audio_path, video=False)
         command = [
             "python",
             "-m",

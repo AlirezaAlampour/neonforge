@@ -10,10 +10,10 @@ interface MainShellProps {
 
 export function MainShell({ children }: MainShellProps) {
   const pathname = usePathname()
-  const isWideWorkspace = pathname === '/voiceover' || pathname === '/character'
+  const isWideWorkspace = ['/voiceover', '/video', '/character', '/avatar', '/lipsync'].includes(pathname)
 
   return (
-    <main className="flex-1 overflow-y-auto">
+    <main className="min-w-0 flex-1 overflow-y-auto">
       <div
         className={cn(
           'mx-auto px-6 py-8 lg:px-8',

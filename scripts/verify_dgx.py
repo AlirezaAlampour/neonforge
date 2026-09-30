@@ -38,9 +38,7 @@ SERVICES = [
     {"name": "gateway", "url": GATEWAY_URL, "tier": "always-on"},
     {"name": "whisper", "url": None, "tier": "always-on"},
     {"name": "f5tts", "url": None, "tier": "warm"},
-    {"name": "liveportrait", "url": None, "tier": "warm"},
     {"name": "lipsync", "url": None, "tier": "warm"},
-    {"name": "wan21", "url": None, "tier": "lazy-start"},
 ]
 
 COLORS = {
@@ -292,7 +290,7 @@ def main():
                     age = f"  (active {ago/3600:.1f}h ago)"
             print(f"  {sym_a}  {sym_r}  {name}{tier_info}{age}")
             results[name] = {"alive": alive, "ready": ready}
-            if not alive and name not in ("wan21",):  # wan21 is lazy
+            if not alive and name in ("gateway", "whisper"):
                 all_passed = False
     else:
         print(c("red", "  Failed to fetch service status"))

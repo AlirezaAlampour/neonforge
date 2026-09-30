@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.2 — 2026-09-30
+
+- Focused six-destination creative studio; preserved Voiceover and System Info.
+- Rebuilt Video, Character and Lip Sync workspaces; shared results, reusable takes and reloadable job tracking.
+- Removed duplicate studios, obsolete model services/endpoints, unused presets and host idle manager.
+- Added bounded media admission, warm-runtime checks and active heavy-claim exclusion.
+- Kept Hunyuan as the proven Video fallback while H3 rights/proof remain unresolved; Avatar and Character Animate stay unavailable.
+- Added real-generation measurement and deployed screenshot tools. See the v0.2 acceptance report for outcomes, not a blanket Stable claim.
+
 All notable NeonForge changes are recorded here. The project has not published a tagged release.
 
 ## Unreleased

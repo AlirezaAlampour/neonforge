@@ -61,16 +61,16 @@ def test_lipsync_preflight_accepts_runtime_and_checkpoint(monkeypatch, tmp_path:
     assert missing == []
 
 
-def test_liveportrait_preflight_reports_missing_adapter_and_weights(monkeypatch, tmp_path: Path):
-    service = _load_module("neonforge_liveportrait_readiness", "services/liveportrait/app.py")
-    source = tmp_path / "LivePortrait"
-    source.mkdir()
-    monkeypatch.setattr(service, "SOURCE_DIR", source)
-    monkeypatch.setattr(service, "MODEL_DIR", tmp_path / "models")
-    monkeypatch.setattr(service.importlib.util, "find_spec", lambda _name: None)
-
-    result = service.runtime_preflight()
-
-    assert result["available"] is False
-    assert result["status"] == "missing_model"
-    assert "python module liveportrait.api" in result["missing"]
+def test_lipsync_rejects_unbounded_media_before_inference():
+    import pytest
+    from fastapi import HTTPException
+    service = _load_module("neonforge_lipsync_bounds", "services/lipsync/app.py")
+    probe = {"format": {"duration": "2.08"}, "streams": [{"codec_type": "video", "width": 1080, "height": 1920, "r_frame_rate": "25/1"}]}
+    service._validate_media_probe(probe, video=True)
+    probe["format"]["duration"] = "600"
+    with pytest.raises(HTTPException, match="10 seconds"):
+        service._validate_media_probe(probe, video=True)
+    probe["format"]["duration"] = "2"
+    probe["streams"][0]["width"] = 7680
+    with pytest.raises(HTTPException, match="1080p"):
+        service._validate_media_probe(probe, video=True)

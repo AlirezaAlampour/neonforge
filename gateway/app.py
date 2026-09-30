@@ -9,7 +9,7 @@ Design:
   - Per-tier memory reservations prevent overcommit.
   - Orchestration (start/stop lazy containers) is delegated to
     the supervisor sidecar — this gateway has NO Docker socket access.
-  - Persistent generation history + preset profiles are stored in SQLite.
+  - Persistent generation history are stored in SQLite.
 """
 
 import asyncio
@@ -17,6 +17,7 @@ import difflib
 import hashlib
 import json
 import logging
+import math
 import mimetypes
 import os
 import re
@@ -36,7 +37,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import DateTime, String, Text, UniqueConstraint, create_engine, desc, select
+from sqlalchemy import DateTime, String, Text, create_engine, desc, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from voiceover.routes import router as voiceover_router
 
@@ -69,8 +70,6 @@ OUTPUTS_ROOT = Path(os.getenv("OUTPUTS_ROOT", "/outputs"))
 HISTORY_DB_PATH = Path(os.getenv("HISTORY_DB_PATH", str(OUTPUTS_ROOT / "neonforge_history.sqlite3")))
 ASSETS_ROOT = Path(os.getenv("ASSETS_ROOT", "/app/data/assets"))
 GATEWAY_ROOT = Path(__file__).resolve().parent
-VOICE_ASSETS_DIR = Path(os.getenv("VOICE_ASSETS_DIR", str(ASSETS_ROOT / "voices")))
-LORA_ASSETS_DIR = Path(os.getenv("LORA_ASSETS_DIR", str(ASSETS_ROOT / "loras")))
 COMFYUI_TEMPLATE_DIR = Path(
     os.getenv("COMFYUI_TEMPLATE_DIR", str(GATEWAY_ROOT / "templates" / "comfyui"))
 )
@@ -107,18 +106,13 @@ MEM_RESERVE_LIGHT_GB = float(os.getenv("MEM_RESERVE_LIGHT_GB", "2"))
 SERVICE_URLS = {
     "whisper": os.getenv("WHISPER_URL", "http://whisper:8000"),
     "f5tts": os.getenv("F5TTS_URL", "http://f5tts:8000"),
-    "liveportrait": os.getenv("LIVEPORTRAIT_URL", "http://liveportrait:8000"),
     "lipsync": os.getenv("LIPSYNC_URL", "http://lipsync:8000"),
-    "wan21": os.getenv("WAN21_URL", "http://wan21:8000"),
 }
 
 MODEL_NAME_BY_SERVICE = {
     "whisper": "Faster-Whisper",
     "f5tts": "F5-TTS",
-    "liveportrait": "LivePortrait",
     "lipsync": os.getenv("LIPSYNC_BACKEND", "LatentSync 1.6"),
-    "wan21": f"Wan 2.1 {os.getenv('WAN21_MODEL_VARIANT', '1.3B')}",
-    "reactor": "ComfyUI/ReActor",
     "comfyui": "ComfyUI Template Workflow",
 }
 
@@ -131,30 +125,13 @@ WORKLOAD_MODEL_LABELS = {
     "misotts": "MisoTTS 8B",
     "breeze_tts": "Breeze TTS 2",
     "comfyui": "Wan 2.2 Animate / Replace",
-    "liveportrait": "LivePortrait",
     "lipsync": os.getenv("LIPSYNC_BACKEND", "LatentSync 1.6"),
-    "wan21": f"Wan 2.1 {os.getenv('WAN21_MODEL_VARIANT', '1.3B')}",
 }
 
-GPU_HEAVY_SERVICES = {"wan21"}
-GPU_MEDIUM_SERVICES = {"liveportrait", "lipsync", "f5tts", "reactor"}
+GPU_HEAVY_SERVICES = {"comfyui"}
+GPU_MEDIUM_SERVICES = {"lipsync", "f5tts"}
 GPU_LIGHT_SERVICES = {"whisper"}
 
-VOICE_EXTENSIONS = {
-    ".wav",
-    ".mp3",
-    ".flac",
-    ".ogg",
-    ".m4a",
-    ".webm",
-}
-LORA_EXTENSIONS = {
-    ".safetensors",
-    ".ckpt",
-    ".pt",
-    ".pth",
-    ".bin",
-}
 COMFYUI_IMAGE_EXTENSIONS = {
     ".png",
     ".jpg",
@@ -204,20 +181,6 @@ class GenerationHistory(Base):
     parameters_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     output_path: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
-
-
-class PresetProfile(Base):
-    __tablename__ = "preset_profiles"
-    __table_args__ = (
-        UniqueConstraint("name", "tool", name="uq_preset_name_tool"),
-    )
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    name: Mapped[str] = mapped_column(String(160), index=True)
-    tool: Mapped[str] = mapped_column(String(64), index=True)
-    state_json: Mapped[str] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class ComfyUIAssetRecord(Base):
@@ -624,11 +587,11 @@ def _serialize_comfyui_debug_dump_path(job_id: str, params: dict[str, Any]) -> O
 def _extract_prompt(service: str, payload: dict[str, Any]) -> Optional[str]:
     if service in {"f5tts"}:
         return payload.get("text")
-    if service in {"wan21", "reactor"}:
+    if service == "comfyui":
         return payload.get("prompt")
     if service in {"comfyui"}:
         return payload.get("template_name") or payload.get("template_id")
-    if service in {"liveportrait", "lipsync"}:
+    if service == "lipsync":
         return payload.get("prompt") or payload.get("description")
     return payload.get("prompt")
 
@@ -686,41 +649,6 @@ def serialize_generation(record: GenerationHistory) -> dict[str, Any]:
     }
 
 
-def serialize_preset(record: PresetProfile) -> dict[str, Any]:
-    return {
-        "id": record.id,
-        "name": record.name,
-        "tool": record.tool,
-        "state": _safe_json_loads(record.state_json, {}),
-        "created_at": record.created_at.isoformat(),
-        "updated_at": record.updated_at.isoformat(),
-    }
-
-
-def list_asset_files(asset_dir: Path, extensions: set[str]) -> list[dict[str, Any]]:
-    if not asset_dir.exists():
-        return []
-
-    items: list[dict[str, Any]] = []
-    for path in sorted(asset_dir.rglob("*")):
-        if not path.is_file():
-            continue
-        if extensions and path.suffix.lower() not in extensions:
-            continue
-        resolved = _ensure_within_root(path, asset_dir)
-        stat = resolved.stat()
-        items.append(
-            {
-                "name": resolved.name,
-                "path": str(resolved),
-                "relative_path": str(resolved.relative_to(asset_dir.resolve())),
-                "size_bytes": stat.st_size,
-                "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
-            }
-        )
-    return items
-
-
 # ---------------------------------------------------------------------------
 # Job Queue
 # ---------------------------------------------------------------------------
@@ -730,6 +658,7 @@ class JobStatus(str, Enum):
     LOADING = "loading"
     QUEUED = "queued"
     RUNNING = "running"
+    FINALIZING = "finalizing"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -746,21 +675,6 @@ class JobRecord(BaseModel):
     debug_artifacts: list[dict[str, Any]] = Field(default_factory=list)
     message: Optional[str] = None
     error: Optional[str] = None
-
-
-class PresetUpsertRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=160)
-    tool: str = Field(min_length=1, max_length=64)
-    state: dict[str, Any] = Field(default_factory=dict)
-
-
-class ReactorGenerateRequest(BaseModel):
-    prompt: str
-    negative_prompt: str = ""
-    lora_path: str | None = None
-    lora_strength: float = 0.75
-    workflow: dict[str, Any] | None = None
-    parameters: dict[str, Any] = Field(default_factory=dict)
 
 
 class ComfyUITemplateInputSpec(BaseModel):
@@ -1550,8 +1464,26 @@ def validate_managed_template_params(
     manifest: ComfyUITemplateManifest,
     params: dict[str, Any],
 ):
+    # Validate before reserving memory or starting a container, including direct API calls.
+    for spec in manifest.optional_params:
+        if spec.id in params:
+            try:
+                value = _coerce_param_value(params[spec.id], spec)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise HTTPException(422, f"Invalid {spec.id} value.") from exc
+            if spec.type in {"integer", "number"} and value is not None:
+                if not math.isfinite(value) or (spec.min is not None and value < spec.min) or (spec.max is not None and value > spec.max):
+                    raise HTTPException(422, f"{spec.label} exceeds the supported range ({spec.min}–{spec.max}).")
+            params[spec.id] = value
+    if manifest.id == "hunyuan-video-15-t2v":
+        width, height, frames = (int(params.get(key, default)) for key, default in
+                                 (("width", 832), ("height", 480), ("frames", 49)))
+        if width * height > 640 * 640 or width % 32 or height % 32 or frames % 4 != 1:
+            raise HTTPException(422, "Video exceeds the safe local envelope. Use 832×480, 480×832 or 640×640, up to 121 frames.")
     if manifest.id != "wan-character-swap":
         return
+    if params.get("max_frames", 17) not in {9, 17}:
+        raise HTTPException(422, "Character is limited to 9 or 17 frames. Longer renders exceeded the safe local memory envelope.")
     positive_points = params.get(WAN_CHARACTER_SWAP_POSITIVE_POINTS_PARAM)
     negative_points = params.get(WAN_CHARACTER_SWAP_NEGATIVE_POINTS_PARAM)
     if WAN_CHARACTER_SWAP_POSITIVE_POINTS_PARAM in params and positive_points is not None and positive_points != "":
@@ -2018,6 +1950,8 @@ async def run_comfyui_job(job_id: str):
     async def _execute():
         nonlocal workload_claim_id
         current_job = job_row
+        params = _safe_json_loads(current_job.params_json, {})
+        validate_managed_template_params(manifest, params)
         validation = validate_template_models(manifest)
         if validation["missing"]:
             missing_names = ", ".join(sorted({item["filename"] for item in validation["missing"]}))
@@ -2042,6 +1976,9 @@ async def run_comfyui_job(job_id: str):
             job_id=job_id,
             workload_id=manifest.id,
             model_label=manifest.name,
+            frames=params.get("max_frames", 17) if manifest.id == "wan-character-swap" else params.get("frames", 49),
+            width=1280 if manifest.id == "wan-character-swap" else params.get("width", 832),
+            height=720 if manifest.id == "wan-character-swap" else params.get("height", 480),
         )
         workload_claim_id = prepared["claim_id"]
         await update_comfyui_job(
@@ -2052,7 +1989,6 @@ async def run_comfyui_job(job_id: str):
         await ensure_comfyui_reachable()
 
         input_asset_ids = _safe_json_loads(current_job.inputs_json, {})
-        params = _safe_json_loads(current_job.params_json, {})
         public_params = _public_comfyui_params(params)
         prepared_inputs: dict[str, Any] = {}
         resolved_assets = resolve_comfyui_input_assets(manifest, input_asset_ids)
@@ -2139,6 +2075,7 @@ async def run_comfyui_job(job_id: str):
             if history_entry:
                 output = extract_output_from_history(patched_prompt, history_entry, manifest)
                 if output:
+                    await update_comfyui_job(job_id, status=JobStatus.FINALIZING.value, status_message="Saving result…")
                     debug_artifacts = extract_debug_artifacts_from_history(history_entry, manifest)
                     history_payload = {
                         "template_id": manifest.id,
@@ -2257,6 +2194,7 @@ async def resume_incomplete_comfyui_jobs():
                     JobStatus.LOADING.value,
                     JobStatus.QUEUED.value,
                     JobStatus.RUNNING.value,
+                    JobStatus.FINALIZING.value,
                 ])
             )
         ).scalars().all()
@@ -2279,6 +2217,9 @@ async def prepare_workload(
     claim_id: str | None = None,
     workload_id: str | None = None,
     model_label: str | None = None,
+    frames: int | None = None,
+    width: int | None = None,
+    height: int | None = None,
 ) -> dict[str, Any]:
     """Claim a managed runtime after safe, allowlist-only UMA reclamation."""
     try:
@@ -2289,6 +2230,9 @@ async def prepare_workload(
                 "claim_id": claim_id,
                 "model_label": model_label or WORKLOAD_MODEL_LABELS.get(service, service),
                 "workload_id": workload_id,
+                "frames": frames,
+                "width": width,
+                "height": height,
             },
             timeout=httpx.Timeout(480.0, connect=10.0),
         )
@@ -2407,10 +2351,10 @@ async def memory():
         "voice": 12,
         "fish_speech": 24,
         "voxcpm2": 16,
-        "misotts": 24,
+        "misotts": 40,
         "breeze_tts": 24,
-        "character_wan22": 48,
-        "video_hunyuan15": 40,
+        "character_wan22": 64,
+        "video_hunyuan15": 60,
         "lip_sync": 32,
         "video": 40,
     }
@@ -2431,6 +2375,7 @@ async def workload_lifecycle_status():
 
 
 SERVICE_STATE_LABELS = {
+    "stopped": "Available on demand",
     "ready": "Ready",
     "loading": "Loading",
     "disabled": "Disabled",
@@ -2471,9 +2416,12 @@ async def inspect_service_status(name: str, url: str) -> dict[str, Any]:
             health_error = str(exc)
 
     raw_state = str(ready_payload.get("status", "")).strip().lower()
-    if name in {"wan21", "lipsync"} and not alive:
-        state = "ready"
-        detail = "Stopped between jobs; the supervisor starts it on demand after the model-aware UMA memory gate passes."
+    if name == "lipsync" and not alive:
+        checkpoints = Path(os.getenv("LATENTSYNC_CHECKPOINT_DIR", "/models/latentsync/checkpoints"))
+        missing = [str(path) for path in (checkpoints / "latentsync_unet.pt", checkpoints / "whisper" / "tiny.pt") if not path.is_file()]
+        ready_payload["missing"] = missing
+        state = "missing_model" if missing else "stopped"
+        detail = "Required Lip Sync checkpoints are missing." if missing else "Stopped between jobs. Runtime readiness is checked after automatic startup; this is not a loaded-model health claim."
     elif not alive:
         state = "disabled"
         detail = "Service is stopped."
@@ -2510,7 +2458,7 @@ async def inspect_service_status(name: str, url: str) -> dict[str, Any]:
         state = "runtime_error"
         detail = str(ready_payload.get("detail") or f"Unrecognized readiness state: {raw_state or '<empty>'}.")
 
-    # Wan is intentionally stopped between jobs and started by the supervisor.
+    # Eligibility to submit is distinct from a running, ready model.
     can_accept_jobs = state not in BLOCKING_SERVICE_STATES
 
     last_activity = None
@@ -2562,10 +2510,11 @@ async def proxy_to_service(
     json_body: dict[str, Any] | None = None,
     is_gpu_heavy: bool = False,
     is_gpu_medium: bool = False,
+    existing_job: JobRecord | None = None,
 ):
-    job_id = str(uuid.uuid4())
+    job_id = existing_job.job_id if existing_job else str(uuid.uuid4())
     now = _now_utc().isoformat()
-    job = JobRecord(job_id=job_id, service=service, status=JobStatus.QUEUED, created_at=now)
+    job = existing_job or JobRecord(job_id=job_id, service=service, status=JobStatus.QUEUED, created_at=now)
     await store_job(job)
 
     tier = "heavy" if is_gpu_heavy else "medium" if is_gpu_medium else "light"
@@ -2628,7 +2577,9 @@ async def proxy_to_service(
 
             resp.raise_for_status()
             result = resp.json()
-
+            job.status = JobStatus.FINALIZING
+            job.message = "Saving result…"
+            await store_job(job)
             job.status = JobStatus.COMPLETED
             job.completed_at = _now_utc().isoformat()
             job.result_path = result.get("output_path")
@@ -2682,74 +2633,6 @@ async def whisper_transcribe(request: Request, audio: UploadFile = File(...)):
     return await proxy_to_service("whisper", "/transcribe", request, files=files)
 
 
-@app.post("/api/v1/tts/synthesize")
-async def tts_synthesize(request: Request):
-    return await proxy_to_service("f5tts", "/synthesize", request, is_gpu_medium=True)
-
-
-@app.post("/api/v1/tts/synthesize-with-audio")
-async def tts_synthesize_with_audio(
-    request: Request,
-    text: str = Form(...),
-    ref_audio: UploadFile = File(None),
-    saved_voice_path: str = Form(""),
-    ref_text: str = Form(""),
-    speed: float = Form(1.0),
-):
-    """Send reference audio as raw bytes so the backend avoids path-based loading."""
-    files = {}
-    data = {"text": text, "speed": speed, "ref_text": ref_text}
-
-    if ref_audio and ref_audio.filename and saved_voice_path:
-        raise HTTPException(400, "Choose either uploaded ref_audio or saved_voice_path, not both")
-
-    # CASE 1: Uploaded file - Read bytes directly
-    if ref_audio and ref_audio.filename:
-        content = await ref_audio.read()
-        files["ref_audio"] = (ref_audio.filename, content, ref_audio.content_type)
-
-    # CASE 2: Saved asset - Read from local assets and send as bytes
-    elif saved_voice_path:
-        asset_full_path = resolve_asset_path(saved_voice_path, VOICE_ASSETS_DIR)
-        with open(asset_full_path, "rb") as f:
-            guessed_type = mimetypes.guess_type(asset_full_path.name)[0] or "application/octet-stream"
-            files["ref_audio"] = (asset_full_path.name, f.read(), guessed_type)
-
-    return await proxy_to_service(
-        "f5tts",
-        "/synthesize",
-        request,
-        files=files if files else None,
-        data=data,
-        is_gpu_medium=True,
-    )
-
-@app.post("/api/v1/liveportrait/animate")
-async def liveportrait_animate(
-    request: Request,
-    source_image: UploadFile = File(...),
-    driving_video: UploadFile = File(...),
-):
-    availability = await inspect_service_status("liveportrait", SERVICE_URLS["liveportrait"])
-    if not availability["ready"]:
-        raise HTTPException(
-            503,
-            detail={
-                "error": availability["detail"],
-                "service": "liveportrait",
-                "state": availability["state"],
-                "missing": availability["missing"],
-            },
-        )
-    src_data = await source_image.read()
-    drv_data = await driving_video.read()
-    files = {
-        "source_image": (source_image.filename, src_data, source_image.content_type),
-        "driving_video": (driving_video.filename, drv_data, driving_video.content_type),
-    }
-    return await proxy_to_service("liveportrait", "/animate", request, files=files, is_gpu_medium=True)
-
-
 @app.post("/api/v1/lipsync/sync")
 async def lipsync_sync(request: Request, video: UploadFile = File(...), audio: UploadFile = File(...)):
     availability = await inspect_service_status("lipsync", SERVICE_URLS["lipsync"])
@@ -2763,121 +2646,24 @@ async def lipsync_sync(request: Request, video: UploadFile = File(...), audio: U
                 "missing": availability["missing"],
             },
         )
-    vid_data = await video.read()
-    aud_data = await audio.read()
+    vid_data = await video.read(500 * 1024 * 1024 + 1)
+    aud_data = await audio.read(50 * 1024 * 1024 + 1)
+    if len(vid_data) > 500 * 1024 * 1024 or len(aud_data) > 50 * 1024 * 1024:
+        raise HTTPException(413, "Video must be under 500 MB and audio under 50 MB.")
     files = {
         "video": (video.filename, vid_data, video.content_type),
         "audio": (audio.filename, aud_data, audio.content_type),
     }
-    return await proxy_to_service("lipsync", "/sync", request, files=files, is_gpu_medium=True)
-
-
-@app.post("/api/v1/wan21/generate")
-async def wan21_generate(request: Request):
-    return await proxy_to_service("wan21", "/generate", request, is_gpu_heavy=True)
-
-
-@app.post("/api/v1/reactor/generate")
-async def reactor_generate(req: ReactorGenerateRequest):
-    """
-    Boilerplate ReActor endpoint for ComfyUI integration.
-
-    This queues a prompt to ComfyUI's `/prompt` API while carrying the selected
-    LoRA path in payload metadata so custom workflow nodes can consume it.
-    """
-    if not req.prompt.strip():
-        raise HTTPException(400, "prompt is required")
-
-    lora_path = None
-    if req.lora_path:
-        lora_path = str(resolve_asset_path(req.lora_path, LORA_ASSETS_DIR))
-
-    payload_snapshot = {
-        "prompt": req.prompt,
-        "negative_prompt": req.negative_prompt,
-        "lora_path": lora_path,
-        "lora_strength": req.lora_strength,
-        **req.parameters,
-    }
-
-    comfy_payload = {
-        "client_id": str(uuid.uuid4()),
-        "extra_data": {
-            "neonforge": payload_snapshot,
-        },
-        "prompt": req.workflow
-        or {
-            "neonforge_reactor": {
-                "class_type": "NeonForgeReActorInput",
-                "inputs": payload_snapshot,
-            }
-        },
-    }
-
-    job_id = str(uuid.uuid4())
-    job = JobRecord(
-        job_id=job_id,
-        service="reactor",
-        status=JobStatus.QUEUED,
-        created_at=_now_utc().isoformat(),
-    )
+    job = JobRecord(job_id=str(uuid.uuid4()), service="lipsync", status=JobStatus.QUEUED, created_at=_now_utc().isoformat())
     await store_job(job)
-
-    allowed, mem, reason = memory_allows_job("medium")
-    if not allowed:
-        job.status = JobStatus.FAILED
-        job.error = reason
-        await store_job(job)
-        raise HTTPException(503, detail={"error": reason, "memory": mem, "job_id": job_id})
-
-    async with gpu_medium_sem:
-        job.status = JobStatus.RUNNING
-        job.started_at = _now_utc().isoformat()
-        await store_job(job)
-        await record_service_activity("reactor")
-
+    async def generate():
         try:
-            resp = await http_client.post(
-                f"{COMFYUI_URL.rstrip('/')}/prompt",
-                json=comfy_payload,
-                timeout=httpx.Timeout(120.0, connect=10.0),
-            )
-            resp.raise_for_status()
-            data = resp.json()
-
-            output_path = data.get("output_path") if isinstance(data, dict) else None
-            job.status = JobStatus.COMPLETED
-            job.completed_at = _now_utc().isoformat()
-            job.result_path = output_path
-            await store_job(job)
-
-            if output_path:
-                try:
-                    persist_generation_record(
-                        job_id=job_id,
-                        service="reactor",
-                        payload=payload_snapshot,
-                        output_path=output_path,
-                        model_used=MODEL_NAME_BY_SERVICE["reactor"],
-                    )
-                except Exception as hist_error:
-                    log.warning("History persistence failed for reactor job %s: %s", job_id, hist_error)
-
-            return {
-                "job_id": job_id,
-                "output_path": output_path,
-                "queue_response": data,
-            }
-        except httpx.HTTPStatusError as e:
-            job.status = JobStatus.FAILED
-            job.error = str(e)
-            await store_job(job)
-            raise HTTPException(e.response.status_code, str(e))
-        except Exception as e:
-            job.status = JobStatus.FAILED
-            job.error = str(e)
-            await store_job(job)
-            raise HTTPException(502, f"ComfyUI proxy error: {e}")
+            await proxy_to_service("lipsync", "/sync", request, files=files, is_gpu_medium=True, existing_job=job)
+        except Exception:
+            log.exception("Lip Sync job %s failed", job.job_id)
+    task = asyncio.create_task(generate())
+    _register_comfyui_task(job.job_id, task)
+    return {"job_id": job.job_id, "status": job.status}
 
 
 @app.get("/api/v1/comfyui/templates")
@@ -3113,92 +2899,3 @@ async def delete_history_item(history_id: str):
 # ---------------------------------------------------------------------------
 # Asset APIs
 # ---------------------------------------------------------------------------
-
-@app.get("/api/v1/assets/voices")
-async def list_voice_assets():
-    return {
-        "root": str(VOICE_ASSETS_DIR),
-        "items": list_asset_files(VOICE_ASSETS_DIR, VOICE_EXTENSIONS),
-    }
-
-
-@app.get("/api/v1/assets/loras")
-async def list_lora_assets():
-    return {
-        "root": str(LORA_ASSETS_DIR),
-        "items": list_asset_files(LORA_ASSETS_DIR, LORA_EXTENSIONS),
-    }
-
-
-# ---------------------------------------------------------------------------
-# Preset APIs
-# ---------------------------------------------------------------------------
-
-@app.get("/api/v1/presets")
-async def list_presets(tool: Optional[str] = None, limit: int = 200):
-    clamped_limit = max(1, min(limit, 1000))
-
-    with SessionLocal() as db:
-        stmt = select(PresetProfile)
-        if tool:
-            stmt = stmt.where(PresetProfile.tool == tool)
-        stmt = stmt.order_by(desc(PresetProfile.updated_at)).limit(clamped_limit)
-        rows = db.execute(stmt).scalars().all()
-
-    return {"items": [serialize_preset(row) for row in rows]}
-
-
-@app.get("/api/v1/presets/{preset_id}")
-async def get_preset(preset_id: str):
-    with SessionLocal() as db:
-        row = db.get(PresetProfile, preset_id)
-
-    if not row:
-        raise HTTPException(404, "Preset not found")
-
-    return serialize_preset(row)
-
-
-@app.post("/api/v1/presets")
-async def upsert_preset(payload: PresetUpsertRequest):
-    now = _now_utc()
-
-    with SessionLocal() as db:
-        stmt = select(PresetProfile).where(
-            PresetProfile.name == payload.name,
-            PresetProfile.tool == payload.tool,
-        )
-        existing = db.execute(stmt).scalar_one_or_none()
-
-        if existing:
-            existing.state_json = json.dumps(payload.state, ensure_ascii=False)
-            existing.updated_at = now
-            db.commit()
-            db.refresh(existing)
-            return serialize_preset(existing)
-
-        record = PresetProfile(
-            id=str(uuid.uuid4()),
-            name=payload.name,
-            tool=payload.tool,
-            state_json=json.dumps(payload.state, ensure_ascii=False),
-            created_at=now,
-            updated_at=now,
-        )
-        db.add(record)
-        db.commit()
-        db.refresh(record)
-        return serialize_preset(record)
-
-
-@app.delete("/api/v1/presets/{preset_id}")
-async def delete_preset(preset_id: str):
-    with SessionLocal() as db:
-        row = db.get(PresetProfile, preset_id)
-        if not row:
-            raise HTTPException(404, "Preset not found")
-
-        db.delete(row)
-        db.commit()
-
-    return {"deleted": True}

@@ -12,9 +12,7 @@ import { MemoryGauge } from '@/components/memory-gauge'
 const serviceLabels: Record<string, { label: string; tier: string; icon: typeof Cpu }> = {
   whisper: { label: 'Whisper STT', tier: 'Always-On', icon: Cpu },
   f5tts: { label: 'F5-TTS', tier: 'Warm', icon: Zap },
-  liveportrait: { label: 'LivePortrait', tier: 'Warm', icon: Server },
   lipsync: { label: 'Lip Sync', tier: 'Warm', icon: Server },
-  wan21: { label: 'Legacy Wan 2.1', tier: 'Legacy lazy-start', icon: HardDrive },
 }
 
 export default function StatusPage() {
@@ -25,7 +23,7 @@ export default function StatusPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Utilities &amp; Status</h1>
+          <h1 className="text-2xl font-bold tracking-tight">System Info</h1>
           <p className="text-sm text-muted-foreground mt-1">Shared memory and workflow readiness</p>
         </div>
         <Button variant="outline" size="sm" onClick={refresh} className="gap-2">
@@ -177,10 +175,19 @@ export default function StatusPage() {
                     </Badge>
                   </div>
                   <p className="mt-2 text-xs text-muted-foreground">
-                    {policy.workload_class} · {policy.min_available_gb} GB launch minimum · idle unload {Math.round(policy.idle_timeout_sec / 60)}m
+                    {policy.workload_class} · {policy.min_available_gb} GiB base minimum · idle unload {Math.round(policy.idle_timeout_sec / 60)}m
                   </p>
                 </div>
               ))}
+            </div>
+            <div className="space-y-2 text-sm">
+              <h3 className="font-medium">Current workload claims</h3>
+              {!workloads.claims.length && <p className="text-muted-foreground">No active generation claims.</p>}
+              {workloads.claims.map((claim) => <p key={claim.claim_id}>{claim.model_label} <span className="text-xs text-muted-foreground">{claim.job_id || claim.claim_id}</span></p>)}
+            </div>
+            <div className="space-y-2 text-xs text-muted-foreground">
+              <h3 className="text-sm font-medium text-foreground">Recent lifecycle activity</h3>
+              {workloads.events.slice(-12).reverse().map((event, index) => <div key={`${event.at}-${index}`} className="flex flex-wrap gap-x-3 gap-y-1 border-b border-border/30 py-2"><time>{new Date(event.at * 1000).toLocaleTimeString()}</time><span>{event.service}</span><span>{event.event.replaceAll('_', ' ')}</span>{event.reason && <span>{event.reason}</span>}{event.recovered_gb !== undefined && <span>Reclaimed {event.recovered_gb} GiB</span>}{event.min_available_gb !== undefined && <span>Lowest available {event.min_available_gb} GiB</span>}</div>)}
             </div>
             <details className="text-xs text-muted-foreground">
               <summary className="cursor-pointer font-medium">Lifecycle diagnostics</summary>

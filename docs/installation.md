@@ -5,7 +5,7 @@ NeonForge targets NVIDIA DGX Spark/GB10 on Linux ARM64. Docker Engine, Compose v
 ## Base stack
 
 ```bash
-git clone https://github.com/AlirezaAlampour/neonforge.git
+git clone --branch neonforge-v0.2 https://github.com/AlirezaAlampour/neonforge.git
 cd neonforge
 cp .env.example .env
 
@@ -30,18 +30,18 @@ Profiles describe installable services, but normal creator jobs should let the s
 
 ```bash
 # Optional voice engines
-docker compose --profile voice-extras build fish_speech misotts voxcpm2
-docker compose --profile breeze build breeze_tts
+docker compose --profile voice build f5tts misotts voxcpm2 breeze_tts
+# Fish uses a prebuilt local image; verify that image before enabling it.
 
 # Managed HunyuanVideo and Wan Character runtime
-docker compose --profile comfyui build comfyui
+docker compose --profile video build comfyui
 
 # LatentSync 1.6
 uv lock --check --project services/lipsync
-docker compose --profile lipsync build lipsync
+docker compose --profile lip-sync build lipsync
 ```
 
-Do not start `--profile full` as routine operation. The supervisor prepares memory and starts `comfyui` or `lipsync` when a gateway job claims it.
+Optional profiles are `voice`, `video`, `character` and `lip-sync`. The supervisor prepares memory and starts `comfyui` or `lipsync` when a gateway job claims it.
 
 ## Automatic memory settings
 
@@ -59,9 +59,9 @@ The supervisor uses `/proc/meminfo`, not `nvidia-smi`, for shared UMA. Relevant 
 | `BREEZE_TTS_IDLE_TIMEOUT` | 900 s | Breeze warm window |
 | `VOXCPM2_IDLE_TIMEOUT` | 900 s | Vox warm window |
 
-Launch minimums are supervisor-owned policy, including 48 GiB for Wan Character, 40 GiB for HunyuanVideo, and 32 GiB for LatentSync. The gateway cannot name arbitrary containers.
+Launch minimums are supervisor-owned policy, including 64 GiB for 17-frame Wan Character, 40–60 GiB for HunyuanVideo by resolution/frame count, and 32 GiB for LatentSync. The gateway cannot name arbitrary containers.
 
-Inspect decisions at `/workloads/status` or Utilities & Status:
+Inspect decisions at `/workloads/status` or System Info:
 
 ```bash
 curl --fail http://127.0.0.1:8080/workloads/status | jq
@@ -72,10 +72,9 @@ curl --fail http://127.0.0.1:8080/workloads/status | jq
 ```bash
 uv lock --check
 uv sync --locked --dev
-uv run pytest
+uv run --locked pytest
 
 cd frontend
-npm ci --ignore-scripts
 npm run lint
 npm run build
 ```

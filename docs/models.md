@@ -1,29 +1,33 @@
-# Models, Selection Research, and Runtime Compatibility
+# Model matrix
 
-Research date: 2026-09-29. NeonForge keeps weights under `/srv/ai/models` or `/srv/ai/cache/hf`; model binaries are never committed.
+Research/selection date: 2026-09-30. Weights stay outside Git. Availability, passing tests and successful real generation are distinct states.
 
-## Selection record
+| Workflow | Backend | Version | Status | Why selected | DGX tested | Typical UMA / admission | License |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Voiceover | Breeze TTS | 2 | Active | Design, clone and direction in the preserved studio | Real voice render | Warm model; 24 GiB admission | [Research/noncommercial weights](https://huggingface.co/BreezeBlue/Breeze-TTS-2) |
+| Voiceover | F5-TTS | Installed checkpoint | Retained | Reliability/reference-clone fallback pending comparison | Baseline workflow | 12 GiB admission; measure per checkpoint | [MIT code; checkpoint terms include CC-BY-NC](https://github.com/SWivid/F5-TTS) |
+| Voiceover | Fish Speech | Adapter identifies 1.5 | Retained | Compare existing working clone path before removal | Prior installation; no fresh comparison | 24 GiB admission | [Checkpoint-specific research terms](https://huggingface.co/fishaudio/fish-speech-1.5) |
+| Voiceover | VoxCPM | 2 | Retained | Design/clone/continuation | Prior installation; no fresh comparison | 16 GiB admission | [Apache-2.0 model card](https://huggingface.co/openbmb/VoxCPM2) |
+| Voiceover | MisoTTS | 8B | Retained | Distinct baseline implementation; compare before removal | Real baseline audio | ~31 GiB observed change; 40 GiB admission | [Custom model terms](https://huggingface.co/MisoLabs/MisoTTS) |
+| Video | HunyuanVideo | 1.5, 480p CFG-distilled FP8 | Active fallback | Proven local path while successor licensing/proof is unresolved | Real 5-second 832×480 clip | ~35 GiB observed change; 40–60 GiB admission by size | [Tencent Hunyuan community terms](https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5) |
+| Character Replace | Wan Animate | 2.2, 14B FP8 | Preview | Specialized motion-preserving replacement | Real 17-frame 1280×720 output | ~54 GiB observed change; 64 GiB admission for 17 frames | [Apache-2.0 upstream](https://huggingface.co/Wan-AI/Wan2.2-Animate-14B); node/LoRA terms also apply |
+| Character Animate | — | — | Unavailable | Requires a distinct validated graph | No | — | — |
+| Avatar | EchoMimicV3-Flash | Flash | Proof candidate; unavailable | Quality/deployment balance | No real host render yet | Independent deployment benchmark ~33.7 GiB; unmeasured here | [Apache-2.0 code](https://github.com/antgroup/echomimic_v3); base checkpoints have separate terms |
+| Lip Sync | LatentSync | 1.6 | Active | Proven synchronization path | Real H.264/AAC output | ~20 GiB observed change; 32 GiB admission | [Apache-2.0](https://github.com/bytedance/LatentSync) |
+| Transcription | Faster-Whisper | Configured medium | Protected utility | Voice reference transcription | Existing Voiceover workflow | Shared resident footprint | [MIT implementation](https://github.com/SYSTRAN/faster-whisper) |
 
-Selections use official repositories/model cards plus open or independent comparisons. Vendor claims are not the sole basis for a choice.
+UMA values are host MemAvailable deltas, not isolated allocations. They vary with warm caches and other processes. See [real measurements](acceptance-v0.2.md). Existing voice choices remain until meaningful comparisons establish redundancy; they are not five equally recommended defaults.
 
-| Workflow | Candidate | License | Expected deployment size/memory | Decision |
-| --- | --- | --- | --- | --- |
-| General Video | [HunyuanVideo 1.5](https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5) | Tencent Hunyuan Community License | 8.3B; official 14 GB offload claim; NeonForge model files total ~20.7 GB | **Selected.** Higher open-Arena score than Wan2.2 and LTX-2 at audit; official ComfyUI workflow; real DGX render passed |
-| General Video | [Wan2.2](https://github.com/Wan-Video/Wan2.2) | Apache-2.0 code/model terms as published | A14B is substantially heavier | Retained for specialized Character work; not duplicated as the general engine |
-| General Video | [LTX-2.3](https://huggingface.co/Lightricks/LTX-2.3) | LTX community license | 22B; native synchronized audio/video | Future fast/native-audio candidate; not a second equivalent engine in this pass |
-| General Video | [MiniMax H3](https://github.com/MiniMax-AI/MiniMax-H3) | MiniMax community/open-weight terms | Repository variants total roughly 498 GB; official example uses four GPUs | Rejected for local default despite leading open-Arena quality: impractical Spark footprint and geographic/license restrictions |
-| Character | [Wan2.2 Animate 14B](https://huggingface.co/Wan-AI/Wan2.2-Animate-14B) | Apache-2.0 upstream | ~77 GB shared Comfy model tree; observed very high peak UMA | **Selected.** Purpose-built Animate/Replace backend; real Replace render passed |
-| Lip Sync | [LatentSync 1.6](https://huggingface.co/ByteDance/LatentSync-1.6) | Apache-2.0 repository; component/model terms apply | Official 18 GB inference minimum; 5.07 GB UNet plus Whisper | **Selected.** Quality-first diffusion lip sync; patched ARM64 real render passed |
-| Lip Sync | [MuseTalk 1.5](https://github.com/TMElyralab/MuseTalk) | MIT code; model/component terms apply | Lower-cost alternative | Rejected as default because LatentSync passed and remains the quality-first choice |
-| Avatar | [EchoMimicV3-Flash](https://github.com/antgroup/echomimic_v3) | Apache-2.0 | Official 12 GB VRAM claim; 1.3B, 8 steps, up to 768×768 | **Selected, not integrated.** Best quality/infrastructure balance in the independent deployment benchmark |
-| Avatar | [LiveAvatar](https://github.com/Alibaba-Quark/LiveAvatar) | Upstream terms | Independent benchmark: roughly 61 GB deployment | Rejected for this pass: sharp identity but much heavier |
-| Avatar | [LongCat-Video-Avatar 1.5](https://github.com/meituan-longcat/LongCat-Video) | MIT | Independent benchmark: roughly 46 GB deployment | Rejected for this pass: expressive motion, but heavier than EchoMimic |
-| Avatar | [SoulX-FlashHead](https://github.com/Soul-AILab/SoulX-FlashHead) | Apache-2.0 | 1.3B; official Lite path targets a single RTX 4090 | Not selected because the quality target favors EchoMimic's stronger independent deployment balance |
-| Avatar | [AptAvatar](https://github.com/TaoLiveAIGC/AptAvatar) | Apache-2.0 repository | Published weights were still marked TODO | Rejected: announcement/inference code is not a runnable checkpoint release |
+## Current selection evidence
 
-Quality context: the [open Text-to-Video Arena](https://arena.ai/leaderboard/text-to-video?license=open-source&rankBy=labs) placed MiniMax H3 highest among inspected open-weight entries, then HunyuanVideo 1.5 above LTX-2 and Wan2.2 at audit time. The independent [open-source talking-avatar deployment benchmark](https://github.com/tight-studio/open-source-talking-avatar-benchmark) identified LiveAvatar for sharp identity, LongCat for expressiveness, and EchoMimicV3-Flash for deployment balance.
+- [MiniMax H3 official weights](https://huggingface.co/MiniMaxAI/MiniMax-H3) exist and support native audio. The [community license](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE) excludes the US, EU, UK and Korea; location or separate rights must be confirmed before proof here. Download size for all repository variants is not the footprint of one inference setup. Existing ~48 GiB isolated quantized files do not establish runtime memory or reproducibility.
+- [Official H3 inference paths](https://github.com/MiniMax-AI/MiniMax-H3) include ComfyUI and other runtimes. ComfyUI fits NeonForge's managed generation infrastructure. No H3 integration or new real-render claim is made.
+- [LTX-2.5](https://huggingface.co/Lightricks/LTX-2.5) has Blackwell-oriented quantization, but its [community license](https://github.com/Lightricks/LTX-2/blob/main/LICENSE-2_x) includes product/revenue conditions requiring review. It is not silently substituted.
+- [Independent talking-avatar comparison](https://github.com/tight-studio/open-source-talking-avatar-benchmark) gives LiveAvatar a detail advantage at higher memory cost and EchoMimicV3-Flash a practical deployment balance. Official unmodified EchoMimic requirements still include TensorFlow 2.15 and decord, which block the current Python/ARM64 wheel combination; unused imports may be patchable, but patchability is not a successful render.
+- [Wan Animate-2](https://huggingface.co/Wan-AI/Wan2.2-Animate-2-14B) is newer. It has not passed this machine's memory/render acceptance, so the validated specialized Wan2.2 graph remains.
+- [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) and [CosyVoice](https://github.com/FunAudioLLM/CosyVoice) deserve capability comparison. Cached local weights alone are not a working tracked service.
 
-## Installed and validated media models
+## Installed media files
 
 ### HunyuanVideo 1.5
 
@@ -36,7 +40,7 @@ Installed under `/srv/ai/models/comfyui`:
 - `text_encoders/byt5_small_glyphxl_fp16.safetensors` — 438,643,184 bytes
 - `vae/hunyuanvideo15_vae_fp16.safetensors` — 2,521,292,758 bytes
 
-The UI offers 832×480 landscape, 480×832 portrait, and 640×640 square framing; 2/3/5 seconds; 20-step Preview or upstream-recommended 50-step Quality. A small 20-step DGX acceptance render passed. Model details stay secondary to the task-oriented UI.
+The UI offers 832×480 landscape, 480×832 portrait, and 640×640 square framing; 2/3/5 seconds; 20-step Draft or upstream-recommended 50-step Studio quality. A 20-step, five-second DGX acceptance render passed. Model details stay secondary to the task-oriented UI.
 
 ### Wan2.2 Character
 
@@ -58,32 +62,15 @@ Runtime source is pinned to commit `a229c3948406bc2cf6eaf4873e662e70c6a04746` in
 
 The official dependency list cannot resolve unmodified on Linux ARM64 because MediaPipe, `onnxruntime-gpu`, and `decord` lack the required wheels. NeonForge's checked-in inference-only patch removes unused MediaPipe/decord paths, uses OpenCV/audio fallbacks, and uses CPU ONNX Runtime for face detection while diffusion remains CUDA-backed. The vendor NGC PyTorch stack is preserved.
 
-## Avatar blocker
+The adapter bounds local previews to 10 seconds, 1080p-equivalent source pixels and 30 fps before starting inference. This ceiling is a conservative guardrail; the real acceptance evidence currently covers a shorter clip.
 
-EchoMimicV3-Flash remains the selected backend, but it is not integrated. The official requirements fail reproducible resolution:
 
-- TensorFlow 2.15 has no CPython 3.12 wheel matching the service base;
-- `decord` has no Linux ARM64 wheel for the supported versions;
-- `infer_flash.py` also imports `pyloudnorm`, which is absent from upstream `requirements.txt`;
-- the complete runtime requires the ~19.8 GB Wan2.1-Fun base, 3.73 GB Flash transformer, and a separately hosted Chinese wav2vec model.
+## Legacy and storage
 
-Some of these imports appear patchable or unused, but NeonForge does not expose Avatar generation until a locked ARM64 image and real image+audio result pass. This is intentionally a disabled surface, not a health-only integration.
+Removed product runtimes: LivePortrait, Wan2.1, ReActor placeholder and cloud Wan UI. Their old outputs, containers and weights are preserved for owner review; none is listed as supported. The disabled Premium Clone scaffold is removed from selection.
 
-## Voice and utility models
+See [storage audit](pivot-audit.md#storage-audit-initial-snapshot) for measured directory sizes and orphan candidates. Shared HF/ComfyUI files may serve other applications; no large model weights are deleted automatically.
 
-| Model | Role | Current state | License note |
-| --- | --- | --- | --- |
-| [F5-TTS](https://github.com/SWivid/F5-TTS) | Default voice synthesis | Preserved | Code MIT; official base checkpoints commonly CC-BY-NC-4.0 |
-| [Fish Speech s2-pro](https://huggingface.co/fishaudio/s2-pro) | Optional voice | Managed on demand | Fish Audio Research License |
-| [MisoTTS](https://huggingface.co/MisoLabs/MisoTTS) | Optional voice | Managed on demand | Model declares `other`; review terms |
-| [Breeze TTS 2](https://huggingface.co/BreezeBlue/Breeze-TTS-2) | Optional voice | Managed on demand | Research/non-commercial weights |
-| [VoxCPM2](https://huggingface.co/openbmb/VoxCPM2) | Optional voice | Managed on demand | Apache-2.0 model card |
-| [Faster-Whisper](https://github.com/SYSTRAN/faster-whisper) | Transcription | Protected/resident | MIT code; selected checkpoint terms apply |
+## DGX rules
 
-## DGX Spark rules
-
-- Use `/proc/meminfo` and `MemAvailable`; GPU and CPU share UMA.
-- Preserve NGC's ARM64 PyTorch/CUDA stack. Never replace it with a generic wheel to satisfy upstream pins.
-- Use uv and checked-in locks for package management.
-- Provision model files in shared host storage, never in Git or an image layer.
-- Let the supervisor reclaim allowlisted conflicts and start heavy services. Do not launch the `full` profile as a normal workflow.
+Use host MemAvailable, bounded frame/resolution rules, allowlisted reclamation and real readiness. Preserve NVIDIA's tuned ARM64 PyTorch/CUDA stack. Use uv and verify locks. Do not provision checkpoints into Git or Docker image layers. Keep advanced model details in System Info.

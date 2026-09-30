@@ -1,189 +1,47 @@
 'use client'
 
-import { CheckCircle2, XCircle, Loader2, Clock, X, Download, Play } from 'lucide-react'
+import { CheckCircle2, XCircle, Loader2, X, Download, RotateCcw, Copy } from 'lucide-react'
 import type { JobRecord } from '@/lib/types'
-import { cn } from '@/lib/utils'
 import { outputUrl } from '@/lib/api'
-import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { Progress } from './ui/progress'
 
 interface JobTrackerProps {
   jobs: JobRecord[]
   onDismiss: (jobId: string) => void
+  onReuse?: (jobId: string) => void
+  onRegenerate?: (jobId: string) => void
+  actionsDisabled?: boolean
+  canReuse?: (jobId: string) => boolean
 }
+const labels = { queued: 'Preparing', preparing: 'Preparing', loading: 'Loading', running: 'Generating', finalizing: 'Finalizing', completed: 'Complete', failed: 'Could not finish' }
 
-const statusConfig = {
-  preparing: {
-    icon: Loader2,
-    label: 'Preparing memory',
-    badge: 'warning' as const,
-    animate: true,
-  },
-  loading: {
-    icon: Loader2,
-    label: 'Loading model',
-    badge: 'default' as const,
-    animate: true,
-  },
-  queued: {
-    icon: Clock,
-    label: 'Queued',
-    badge: 'warning' as const,
-    animate: false,
-  },
-  running: {
-    icon: Loader2,
-    label: 'Processing',
-    badge: 'default' as const,
-    animate: true,
-  },
-  completed: {
-    icon: CheckCircle2,
-    label: 'Completed',
-    badge: 'success' as const,
-    animate: false,
-  },
-  failed: {
-    icon: XCircle,
-    label: 'Failed',
-    badge: 'danger' as const,
-    animate: false,
-  },
-}
-
-export function JobTracker({ jobs, onDismiss }: JobTrackerProps) {
-  if (jobs.length === 0) return null
-
-  return (
-    <div className="space-y-3">
-      <h3 className="text-sm font-medium text-muted-foreground">Active Jobs</h3>
-      {jobs.map((job) => {
-        const config = statusConfig[job.status]
-        const Icon = config.icon
-        const isMedia = job.result_path?.match(/\.(mp4|wav|webm|mp3)$/)
-        const isAudio = job.result_path?.match(/\.(wav|mp3|webm)$/)
-        const resultUrl = job.result_path
-          ? outputUrl(job.result_path, job.completed_at ?? job.started_at ?? job.job_id)
-          : null
-
-        return (
-          <div
-            key={job.job_id}
-            className={cn(
-              'rounded-lg border border-border/50 bg-card/50 p-4 transition-all duration-300',
-              ['preparing', 'loading', 'running'].includes(job.status) && 'ring-1 ring-primary/30',
-            )}
-          >
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-3 min-w-0">
-                <Icon
-                  className={cn(
-                    'h-5 w-5 shrink-0',
-                    job.status === 'completed' && 'text-emerald-400',
-                    job.status === 'failed' && 'text-red-400',
-                    ['preparing', 'loading', 'running'].includes(job.status) && 'text-primary animate-spin',
-                    job.status === 'queued' && 'text-amber-400',
-                  )}
-                />
-                <div className="min-w-0">
-                  <p className="text-sm font-medium truncate">
-                    {job.service} &middot;{' '}
-                    <span className="font-mono text-xs text-muted-foreground">
-                      {job.job_id.slice(0, 8)}
-                    </span>
-                  </p>
-                </div>
-              </div>
-              <div className="flex items-center gap-2 shrink-0">
-                <Badge variant={config.badge}>{config.label}</Badge>
-                {(job.status === 'completed' || job.status === 'failed') && (
-                  <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => onDismiss(job.job_id)}>
-                    <X className="h-3.5 w-3.5" />
-                  </Button>
-                )}
-              </div>
-            </div>
-
-            {['preparing', 'loading', 'running'].includes(job.status) && (
-              <div className="mt-3">
-                <Progress indeterminate />
-              </div>
-            )}
-
-            {job.message && job.status !== 'failed' && (
-              <p className="mt-2 text-xs text-muted-foreground">{job.message}</p>
-            )}
-
-            {job.debug_dump_path && (
-              <p className="mt-2 break-all font-mono text-[11px] text-muted-foreground">
-                Debug payload: {job.debug_dump_path}
-              </p>
-            )}
-
-            {job.debug_artifacts && job.debug_artifacts.length > 0 && (
-              <div className="mt-2 space-y-1">
-                <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Debug Artifacts</p>
-                <div className="flex flex-wrap gap-2">
-                  {job.debug_artifacts.map((artifact) => (
-                    <a
-                      key={`${job.job_id}-${artifact.id}-${artifact.relative_path}`}
-                      href={outputUrl(
-                        artifact.relative_path,
-                        `${job.job_id}-${artifact.id}-${artifact.filename}`,
-                      )}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1.5 text-xs text-primary hover:text-primary/80 transition-colors"
-                    >
-                      <Play className="h-3 w-3" />
-                      {artifact.label}
-                    </a>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {job.status === 'failed' && job.error && (
-              <p className="mt-2 text-xs text-red-400/80 truncate">{job.error}</p>
-            )}
-
-            {job.status === 'completed' && job.result_path && (
-              <div className="mt-3 space-y-2">
-                {isAudio && (
-                  <audio controls className="w-full h-8 [&::-webkit-media-controls-panel]:bg-secondary rounded">
-                    <source src={resultUrl ?? undefined} />
-                  </audio>
-                )}
-                {isMedia && !isAudio && (
-                  <video
-                    controls
-                    className="w-full rounded-lg border border-border/30 max-h-48 bg-black"
-                    src={resultUrl ?? undefined}
-                  />
-                )}
-                <div className="flex gap-2">
-                  <a
-                    href={resultUrl ?? undefined}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1.5 text-xs text-primary hover:text-primary/80 transition-colors"
-                  >
-                    <Play className="h-3 w-3" /> Open
-                  </a>
-                  <a
-                    href={resultUrl ?? undefined}
-                    download
-                    className="inline-flex items-center gap-1.5 text-xs text-primary hover:text-primary/80 transition-colors"
-                  >
-                    <Download className="h-3 w-3" /> Download
-                  </a>
-                </div>
-              </div>
-            )}
-          </div>
-        )
-      })}
-    </div>
-  )
+export function JobTracker({ jobs, onDismiss, onReuse, onRegenerate, actionsDisabled, canReuse }: JobTrackerProps) {
+  if (!jobs.length) return null
+  return <section className="space-y-8" aria-label="Results" aria-live="polite">
+    {jobs.map((job) => {
+      const done = job.status === 'completed'
+      const failed = job.status === 'failed'
+      const active = !done && !failed
+      const isAudio = /\.(wav|mp3|flac|ogg)$/i.test(job.result_path || '')
+      const url = job.result_path ? outputUrl(job.result_path, job.completed_at ?? job.job_id) : undefined
+      const elapsed = job.started_at && job.completed_at ? Math.round((Date.parse(job.completed_at) - Date.parse(job.started_at)) / 1000) : null
+      return <article key={job.job_id} className="space-y-4 rounded-2xl bg-card/40 p-5">
+        <div className="flex items-center gap-3">
+          {active ? <Loader2 className="h-4 w-4 animate-spin text-primary" /> : failed ? <XCircle className="h-4 w-4 text-red-400" /> : <CheckCircle2 className="h-4 w-4 text-emerald-400" />}
+          <h2 className="text-sm font-medium">{labels[job.status]}</h2>
+          {elapsed !== null && <span className="text-xs text-muted-foreground">{elapsed}s</span>}
+          {!active && <Button variant="ghost" size="icon" className="ml-auto h-7 w-7" aria-label="Dismiss result" onClick={() => onDismiss(job.job_id)}><X className="h-4 w-4" /></Button>}
+        </div>
+        {active && <><Progress indeterminate /><p className="text-sm text-muted-foreground">{job.status === 'running' ? 'Creating your result. You can leave this page open while it renders.' : 'Getting everything ready. The first generation can take a little longer.'}</p></>}
+        {failed && <p role="alert" className="whitespace-pre-wrap break-words text-sm text-red-300">{job.error || 'Generation stopped before producing a result. Try again or check System Info.'}</p>}
+        {done && url && <>{isAudio ? <audio controls className="w-full" src={url} /> : <video controls playsInline className="max-h-[70vh] w-full rounded-xl bg-black" src={url} />}
+          <div className="flex flex-wrap items-center gap-3"><a href={url} download className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm text-primary-foreground"><Download className="h-4 w-4" />Download</a>
+            {onReuse && (!canReuse || canReuse(job.job_id)) && <Button variant="ghost" onClick={() => onReuse(job.job_id)}><Copy className="mr-2 h-4 w-4" />Reuse settings</Button>}
+            {onRegenerate && (!canReuse || canReuse(job.job_id)) && <Button variant="ghost" disabled={actionsDisabled} onClick={() => onRegenerate(job.job_id)}><RotateCcw className="mr-2 h-4 w-4" />Regenerate</Button>}
+          </div></>}
+        <details className="text-xs text-muted-foreground"><summary className="cursor-pointer">Generation details</summary><div className="mt-3 space-y-2 break-words"><p>Job: {job.job_id}</p><p>Service: {job.service}</p>{job.message && <p>{job.message}</p>}{job.debug_dump_path && <p>{job.debug_dump_path}</p>}{job.debug_artifacts?.map((artifact) => <a className="mr-3 inline-block text-primary" key={artifact.id} href={outputUrl(artifact.relative_path)} target="_blank" rel="noreferrer">{artifact.label}</a>)}</div></details>
+      </article>
+    })}
+  </section>
 }

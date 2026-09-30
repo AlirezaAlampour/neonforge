@@ -11,17 +11,17 @@ curl -s http://127.0.0.1:8080/workloads/status | jq
 awk '/MemTotal|MemAvailable/ {print}' /proc/meminfo
 ```
 
-The supervisor may stop F5-TTS, Fish Speech, VoxCPM2, MisoTTS, Breeze TTS, ComfyUI, LatentSync, LivePortrait, legacy Wan 2.1, or the experimental Wan UI. It never stops frontend, gateway, Redis, supervisor, Whisper, unrelated containers, or arbitrary host processes.
+The supervisor may stop F5-TTS, Fish Speech, VoxCPM2, MisoTTS, Breeze TTS, ComfyUI, LatentSync. It never stops frontend, gateway, Redis, supervisor, Whisper, unrelated containers, or arbitrary host processes.
 
 ## Automatic reclamation cannot reach the launch minimum
 
-The error reports required and current `MemAvailable`, services already unloaded, and active claims. Check Utilities & Status for the remaining model services. External workloads are intentionally not killed; stop an unrelated experiment yourself only if it belongs to you.
+The error reports required and current `MemAvailable`, services already unloaded, and active claims. Check System Info for the remaining model services. External workloads are intentionally not killed; stop an unrelated experiment yourself only if it belongs to you.
 
 Swap use can remain high after pressure. Use `MemAvailable` as the admission signal on DGX Spark; discrete-VRAM fields from `nvidia-smi` are not authoritative for UMA.
 
 ## Character fails or ComfyUI disappears
 
-Character's longer 85-frame acceptance attempt reached the host OOM killer after preprocessing/model load. The validated preview path therefore uses the first 17 driving frames, requires 48 GiB before a cold start, and runs ComfyUI with `restart: "no"` so OOM remains visible.
+Character's longer 85-frame acceptance attempt reached the host OOM killer after preprocessing/model load. The validated preview path therefore uses the first 17 driving frames, requires 64 GiB before admission, and runs ComfyUI with `restart: "no"` so OOM remains visible.
 
 Confirm both pose preprocessors:
 
@@ -34,6 +34,8 @@ The gateway detects a stopped ComfyUI backend promptly and allows a 60-second hi
 
 ## Lip Sync is unavailable
 
+The local preview accepts up to 10 seconds of source video and audio, with source video up to 1080p landscape/portrait at 30 fps. Files are probed before inference; oversized or undecodable media fails with an actionable error.
+
 LatentSync expects:
 
 ```text
@@ -44,11 +46,11 @@ LatentSync expects:
 Check readiness and bounded logs:
 
 ```bash
-docker compose --profile lipsync ps -a lipsync
+docker compose --profile lip-sync ps -a lipsync
 docker logs --tail 100 ai-lipsync
 ```
 
-The stopped container is still creator-ready: the supervisor starts it after a request. `Missing model` is different and identifies absent files.
+A stopped container with checkpoints is available on demand; the supervisor verifies its runtime readiness after startup. `Missing model` is different and identifies absent files.
 
 ## Video Generation reports setup required
 

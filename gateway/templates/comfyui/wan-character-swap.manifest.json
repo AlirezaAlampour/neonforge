@@ -38,6 +38,10 @@
   ],
   "optional_params": [
     {
+      "id": "max_frames", "label": "Preview frames", "type": "integer",
+      "default": 17, "min": 9, "max": 17, "step": 8
+    },
+    {
       "id": "seed",
       "label": "Seed",
       "type": "integer",
@@ -111,6 +115,9 @@
     }
   ],
   "runtime_mappings": [
+    {
+      "input_id": "max_frames", "node_id": "63", "input_name": "frame_load_cap", "value_source": "param"
+    },
     {
       "input_id": "reference_image",
       "node_id": "57",

@@ -6,7 +6,49 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from supervisor.resource_manager import ResourceManager, ServicePolicy, select_reclamation_candidates
+from supervisor.resource_manager import ResourceManager, ServicePolicy, select_reclamation_candidates, workload_minimum_gb
+
+
+def test_workload_limits_scale_and_reject_known_oom_configuration():
+    import pytest
+    assert workload_minimum_gb("comfyui", "wan-character-swap", frames=17) == 64
+    assert workload_minimum_gb("comfyui", "wan-character-swap", frames=9) == 56
+    with pytest.raises(ValueError, match="safe memory envelope"):
+        workload_minimum_gb("comfyui", "wan-character-swap", frames=85)
+    assert workload_minimum_gb("comfyui", "hunyuan-video-15-t2v", frames=17, width=512, height=288) == 40
+    assert workload_minimum_gb("comfyui", "hunyuan-video-15-t2v", frames=121) == 60
+    with pytest.raises(ValueError):
+        workload_minimum_gb("comfyui", "hunyuan-video-15-t2v", frames=121, width=832, height=832)
+
+
+def test_warm_container_does_not_bypass_admission():
+    memory = _MemoryReader(10)
+    manager = _FakeResourceManager(compose_dir="/tmp", policies={"comfyui": _policy("comfyui", 48)},
+                                   protected_services={"gateway"}, memory_reader=memory,
+                                   memory_wait_sec=0, running={"comfyui"})
+    async def scenario():
+        result = await manager.prepare("comfyui")
+        assert manager.stopped == [("comfyui", "prepare:comfyui")]
+        assert manager.started == ["comfyui"]
+        assert result["memory_after"]["available_gb"] >= 48
+        await manager.release("comfyui", result["claim_id"])
+        await manager.close()
+    asyncio.run(scenario())
+
+
+def test_competing_claim_cannot_stop_active_runtime():
+    import pytest
+    manager = _FakeResourceManager(compose_dir="/tmp", policies={"comfyui": _policy("comfyui", 48), "lipsync": _policy("lipsync", 32)},
+                                   protected_services={"gateway"}, memory_reader=_MemoryReader(90), memory_wait_sec=0)
+    async def scenario():
+        first = await manager.prepare("comfyui")
+        with pytest.raises(RuntimeError, match="Another generation"):
+            await manager.prepare("lipsync")
+        assert len(manager.claims) == 1
+        assert manager.stopped == []
+        await manager.release("comfyui", first["claim_id"])
+        await manager.close()
+    asyncio.run(scenario())
 
 
 def _policy(name: str, minimum: float) -> ServicePolicy:
@@ -71,6 +113,20 @@ def test_protected_service_cannot_be_managed():
         assert "Protected services cannot be managed" in str(exc)
     else:
         raise AssertionError("ResourceManager accepted a protected service policy")
+
+
+def test_http_200_with_missing_model_is_not_readiness():
+    import httpx
+    import pytest
+    policy = ServicePolicy("lipsync", "ai-lipsync", "lip-sync", "http://lipsync", "/readyz", "lip-sync", 32, 300)
+    manager = ResourceManager(compose_dir="/tmp", policies={"lipsync": policy}, protected_services={"gateway"})
+    async def scenario():
+        await manager._http.aclose()
+        manager._http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"status": "missing_model", "available": False})))
+        with pytest.raises(RuntimeError, match="readiness failed"):
+            await manager._wait_ready(policy)
+        await manager.close()
+    asyncio.run(scenario())
 
 
 class _FakeResourceManager(ResourceManager):
@@ -231,11 +287,11 @@ def test_primary_navigation_contains_only_creator_goals():
     sidebar = (ROOT / "frontend" / "components" / "sidebar.tsx").read_text(encoding="utf-8")
     expected = [
         ("/voiceover", "Voiceover"),
-        ("/video", "Video Generation"),
+        ("/video", "Video"),
         ("/character", "Character"),
         ("/avatar", "Avatar"),
         ("/lipsync", "Lip Sync"),
-        ("/status", "Utilities & Status"),
+        ("/status", "System Info"),
     ]
     assert [(href, label) for href, label in expected if f"href: '{href}', label: '{label}'" in sidebar] == expected
     for hidden_route in ("/studio", "/broll", "/voice"):

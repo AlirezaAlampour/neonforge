@@ -24,7 +24,7 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from resource_manager import ResourceManager, ServicePolicy
+from resource_manager import ResourceManager, ServicePolicy, workload_minimum_gb
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 COMPOSE_DIR = os.getenv("COMPOSE_DIR", "/project")
@@ -34,23 +34,16 @@ COMFYUI_CONTAINER_NAME = os.getenv("COMFYUI_CONTAINER_NAME", "ai-comfyui")
 # Explicit policies are the lifecycle security boundary. No caller-supplied
 # container name is ever passed through to Docker.
 POLICIES = {
-    "f5tts": ServicePolicy("f5tts", "ai-f5tts", None, os.getenv("F5TTS_URL", "http://f5tts:8000"), "/healthz", "voice", 12, int(os.getenv("F5TTS_IDLE_TIMEOUT", "900"))),
-    "fish_speech": ServicePolicy("fish_speech", "ai-fish-speech", "voice-extras", os.getenv("FISH_SPEECH_URL", "http://fish_speech:8000"), "/v1/health", "voice", 24, int(os.getenv("FISH_SPEECH_IDLE_TIMEOUT", "900"))),
-    "voxcpm2": ServicePolicy("voxcpm2", "ai-voxcpm2", "voice-extras", os.getenv("VOXCPM2_URL", "http://voxcpm2:8000"), "/v1/health", "voice", 16, int(os.getenv("VOXCPM2_IDLE_TIMEOUT", "900"))),
-    "misotts": ServicePolicy("misotts", "ai-misotts", "voice-extras", os.getenv("MISOTTS_URL", "http://misotts:8000"), "/healthz", "voice", 24, int(os.getenv("MISOTTS_IDLE_TIMEOUT", "900"))),
-    "breeze_tts": ServicePolicy("breeze_tts", "ai-breeze-tts", "breeze", os.getenv("BREEZE_TTS_URL", "http://breeze_tts:8000"), "/healthz", "voice", 24, int(os.getenv("BREEZE_TTS_IDLE_TIMEOUT", "900"))),
-    "comfyui": ServicePolicy("comfyui", COMFYUI_CONTAINER_NAME, "comfyui", os.getenv("COMFYUI_URL", "http://comfyui:8188"), "/", "video / character", 48, int(os.getenv("COMFYUI_IDLE_TIMEOUT", "300"))),
-    "liveportrait": ServicePolicy("liveportrait", "ai-liveportrait", "legacy", os.getenv("LIVEPORTRAIT_URL", "http://liveportrait:8000"), "/healthz", "legacy", 12, int(os.getenv("LIVEPORTRAIT_IDLE_TIMEOUT", "300"))),
-    "lipsync": ServicePolicy("lipsync", "ai-lipsync", "lipsync", os.getenv("LIPSYNC_URL", "http://lipsync:8000"), "/healthz", "lip-sync", 32, int(os.getenv("LIPSYNC_IDLE_TIMEOUT", "300"))),
-    "wan21": ServicePolicy("wan21", "ai-wan21", "wan21", os.getenv("WAN21_URL", "http://wan21:8000"), "/healthz", "video", 40, int(os.getenv("WAN21_IDLE_TIMEOUT", "300"))),
-    "wan-ui": ServicePolicy("wan-ui", "ai-wan-ui", "cloud-experimental", os.getenv("WAN_UI_URL", "http://wan-ui:7860"), "/", "character-experimental", 40, int(os.getenv("WAN_UI_IDLE_TIMEOUT", "300"))),
+    "f5tts": ServicePolicy("f5tts", "ai-f5tts", "voice", os.getenv("F5TTS_URL", "http://f5tts:8000"), "/healthz", "voice", 12, int(os.getenv("F5TTS_IDLE_TIMEOUT", "900"))),
+    "fish_speech": ServicePolicy("fish_speech", "ai-fish-speech", "voice", os.getenv("FISH_SPEECH_URL", "http://fish_speech:8000"), "/v1/health", "voice", 24, int(os.getenv("FISH_SPEECH_IDLE_TIMEOUT", "900"))),
+    "voxcpm2": ServicePolicy("voxcpm2", "ai-voxcpm2", "voice", os.getenv("VOXCPM2_URL", "http://voxcpm2:8000"), "/v1/health", "voice", 16, int(os.getenv("VOXCPM2_IDLE_TIMEOUT", "900"))),
+    "misotts": ServicePolicy("misotts", "ai-misotts", "voice", os.getenv("MISOTTS_URL", "http://misotts:8000"), "/healthz", "voice", 40, int(os.getenv("MISOTTS_IDLE_TIMEOUT", "900"))),
+    "breeze_tts": ServicePolicy("breeze_tts", "ai-breeze-tts", "voice", os.getenv("BREEZE_TTS_URL", "http://breeze_tts:8000"), "/healthz", "voice", 24, int(os.getenv("BREEZE_TTS_IDLE_TIMEOUT", "900"))),
+    "comfyui": ServicePolicy("comfyui", COMFYUI_CONTAINER_NAME, "video", os.getenv("COMFYUI_URL", "http://comfyui:8188"), "/", "video / character", 48, int(os.getenv("COMFYUI_IDLE_TIMEOUT", "300"))),
+    "lipsync": ServicePolicy("lipsync", "ai-lipsync", "lip-sync", os.getenv("LIPSYNC_URL", "http://lipsync:8000"), "/readyz", "lip-sync", 32, int(os.getenv("LIPSYNC_IDLE_TIMEOUT", "300"))),
 }
 PROTECTED_SERVICES = {"gateway", "frontend", "redis", "supervisor", "whisper"}
 MANAGED_SERVICES = set(POLICIES)
-WORKLOAD_MINIMUMS = {
-    ("comfyui", "wan-character-swap"): 48.0,
-    ("comfyui", "hunyuan-video-15-t2v"): 40.0,
-}
 SCAN_TARGETS = {
     "comfyui": COMFYUI_CONTAINER_NAME,
     COMFYUI_CONTAINER_NAME: COMFYUI_CONTAINER_NAME,
@@ -76,6 +69,9 @@ class PrepareRequest(BaseModel):
     claim_id: str | None = None
     model_label: str | None = None
     workload_id: str | None = None
+    frames: int | None = None
+    width: int | None = None
+    height: int | None = None
 
 
 class ReleaseRequest(BaseModel):
@@ -307,8 +303,13 @@ async def prepare(service: str, request: PrepareRequest):
             job_id=request.job_id,
             claim_id=request.claim_id,
             model_label=request.model_label,
-            minimum_available_gb=WORKLOAD_MINIMUMS.get((service, request.workload_id)),
+            minimum_available_gb=workload_minimum_gb(
+                service, request.workload_id, frames=request.frames,
+                width=request.width, height=request.height,
+            ),
         )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     except TimeoutError as exc:
         raise HTTPException(504, str(exc)) from exc
     except RuntimeError as exc:

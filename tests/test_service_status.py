@@ -62,14 +62,27 @@ def test_status_blocks_alive_service_with_runtime_error(monkeypatch):
     assert status["missing"] == ["/opt/video-retalking/inference.py"]
 
 
-def test_stopped_wan_is_ready_for_supervisor_start(monkeypatch):
+def test_stopped_lipsync_is_available_for_supervisor_start(monkeypatch, tmp_path):
+    (tmp_path / "whisper").mkdir()
+    (tmp_path / "latentsync_unet.pt").touch()
+    (tmp_path / "whisper" / "tiny.pt").touch()
+    monkeypatch.setenv("LATENTSYNC_CHECKPOINT_DIR", str(tmp_path))
     monkeypatch.setattr(gateway_app, "http_client", _Client({}))
     monkeypatch.setattr(gateway_app, "rdb", None)
 
-    status = asyncio.run(gateway_app.inspect_service_status("wan21", "http://wan21"))
+    status = asyncio.run(gateway_app.inspect_service_status("lipsync", "http://lipsync"))
 
     assert status["alive"] is False
     assert status["ready"] is True
-    assert status["state"] == "ready"
-    assert status["state_label"] == "Ready"
-    assert "starts it on demand" in status["detail"]
+    assert status["state"] == "stopped"
+    assert status["state_label"] == "Available on demand"
+    assert "readiness is checked" in status["detail"]
+
+
+def test_stopped_lipsync_without_weights_is_not_ready(monkeypatch, tmp_path):
+    monkeypatch.setenv("LATENTSYNC_CHECKPOINT_DIR", str(tmp_path))
+    monkeypatch.setattr(gateway_app, "http_client", _Client({}))
+    monkeypatch.setattr(gateway_app, "rdb", None)
+    status = asyncio.run(gateway_app.inspect_service_status("lipsync", "http://lipsync"))
+    assert status["ready"] is False
+    assert status["state"] == "missing_model"

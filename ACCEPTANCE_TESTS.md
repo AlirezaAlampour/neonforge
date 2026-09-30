@@ -1,162 +1,63 @@
-# Acceptance Tests
+# Acceptance procedures
 
-Run these checks on the target DGX Spark after reviewing [docs/installation.md](docs/installation.md). A responsive health endpoint is necessary but is not a successful model test.
+A workflow is supported only after real generation on the target machine. Unit tests, file presence and a health response are insufficient.
 
-## 1. Preflight
+## Preflight
 
 ```bash
-cd ~/neonforge
 uv lock --check
 docker compose config --quiet
-
 awk '/^(MemTotal|MemAvailable|SwapTotal|SwapFree):/ {print}' /proc/meminfo
-docker info --format '{{json .Runtimes}}'
-docker compose ps
-```
-
-Do not start a heavyweight service when `MemAvailable` is below 40 GB. Resolve active workload pressure first; do not rely on `nvidia-smi` framebuffer figures on a unified-memory system.
-
-## 2. Automated checks
-
-```bash
-uv sync --locked --dev
-uv run pytest -p no:cacheprovider
-
+uv run --locked pytest -p no:cacheprovider
 cd frontend
-npm ci --ignore-scripts
+npm run lint
 npm run build
-cd ..
 ```
 
-Expected: all Python tests pass and Next.js completes an optimized production build.
+Confirm no active workload before rebuilding control-plane services. Never use discrete GPU memory figures to admit work on UMA. The supervisor applies bounded workflow-specific launch floors and only reclaims idle allowlisted services.
 
-## 3. Base stack
+## Real runs
+
+The small recorder samples host MemAvailable once per second, submits through the gateway, polls the real job, probes and decodes the output, and optionally waits for automatic idle unload.
 
 ```bash
-docker compose up -d
-docker compose ps
+uv lock --check
+uv run --locked python scripts/accept_creative.py voice --report /tmp/neonforge-voice.json
+uv run --locked python scripts/accept_creative.py video --wait-unload --report /tmp/neonforge-video.json
+uv run --locked python scripts/accept_creative.py character \
+  --reference-id UPLOADED_IMAGE_ID --driving-id UPLOADED_VIDEO_ID \
+  --wait-unload --report /tmp/neonforge-character.json
+uv run --locked python scripts/accept_creative.py lipsync \
+  --video /path/to/consented-demo.mp4 --audio /path/to/demo.wav \
+  --wait-unload --report /tmp/neonforge-lipsync.json
+```
 
-curl --fail http://127.0.0.1:8080/healthz
+Use `--gateway` for a configured non-loopback address. The recorder does not install models, change profiles or delete outputs. Review the generated media for quality; decode success alone does not prove lip timing or identity preservation.
+
+Required evidence: backend/version, exact input settings, resolution, frame count/duration, wall runtime, MemAvailable before/lowest/after unload. Record failures as failures. See [v0.2 evidence](docs/acceptance-v0.2.md).
+
+## Resource switching
+
+Run a completed heavy workflow followed by another. Check `/workloads/status` for claims, targeted stops, prepared state and memory recovery. Unrelated containers and protected infrastructure must remain alive. A warm backend must not bypass a larger admission floor. Conflicting active claims must fail before model startup.
+
+## Safety and readiness regressions
+
+- Reject Character above 17 frames before startup, including API requests.
+- Reject Video outside its bounded frame/resolution envelope.
+- An unavailable readiness response must fail preparation and release its claim.
+- Stopped Lip Sync with missing checkpoints must be unavailable.
+- Failed requests must show actionable errors, not endless loading.
+- Avatar and Character Animate must have no enabled Generate action until independently validated.
+- Primary navigation contains only Voiceover, Video, Character, Avatar, Lip Sync and System Info.
+- Voiceover retains profiles, editor, Breeze modes, direction, seed, CFG, Whisper transcription, output and history.
+
+## Operator checks
+
+```bash
 curl --fail http://127.0.0.1:8080/readyz
-curl --fail http://127.0.0.1:8080/memory
-curl --fail http://127.0.0.1:8080/services/status
-curl --fail http://127.0.0.1:3000/
-
-uv run scripts/verify_dgx.py --gateway-url http://127.0.0.1:8080 --json
-```
-
-The gateway should be ready with Redis. Individual services may legitimately show Disabled or Missing model when their optional profiles/assets are absent.
-
-If diagnosis is required, keep log reads bounded:
-
-```bash
+curl --fail http://127.0.0.1:8080/workloads/status
 docker logs --tail 100 ai-gateway
-docker logs --tail 100 ai-frontend
-docker logs --tail 100 ai-whisper
+docker logs --tail 100 ai-supervisor
 ```
 
-## 4. Voiceover regression
-
-Voiceover is the reference workflow and must remain usable before any media backend is accepted.
-
-1. Open `http://127.0.0.1:3000/voiceover`.
-2. Confirm the model picker loads and F5-TTS is selectable.
-3. Create or select a non-sensitive test voice profile when the backend requires one.
-4. Generate a multi-sentence script long enough to exercise chunking.
-5. Confirm progress survives one page refresh.
-6. Play and download the resulting audio, then verify the history item can be deleted.
-7. Repeat with each optional engine being claimed as available.
-
-Run the model smoke verifier only with sufficient available memory:
-
-```bash
-uv run scripts/verify_dgx.py --gateway-url http://127.0.0.1:8080 --smoke
-```
-
-The verifier refuses the smoke stage below 40 GB `MemAvailable`.
-
-## 5. Readiness failure checks
-
-### Lip Sync
-
-With an incomplete legacy install, `/services/status` must report `Runtime error` or `Missing model`, and the Lip Sync Generate button must be disabled. The gateway must reject an upload with HTTP 503 before persisting input media.
-
-When the runtime and checkpoints are deliberately installed, test with a disposable source video and speech track:
-
-```bash
-curl --fail-with-body -X POST http://127.0.0.1:8080/api/v1/lipsync/sync \
-  -F 'video=@/tmp/neonforge-test-source.mp4' \
-  -F 'audio=@/tmp/neonforge-test-speech.wav'
-```
-
-Acceptance requires a playable output whose mouth timing matches speech. `/healthz` alone does not count.
-
-### LivePortrait
-
-Until its adapter and model root are repaired, status must not report Ready. If repaired, acceptance requires a real source-image plus driving-video render, not an import check.
-
-## 6. Character
-
-Before enabling ComfyUI, confirm the model scan reports zero missing files for the managed `wan-character-swap` template and recheck the 40 GB reserve.
-
-```bash
-docker compose --profile comfyui up -d comfyui
-docker logs --tail 100 ai-comfyui
-curl --fail http://127.0.0.1:8080/api/v1/comfyui/templates
-```
-
-In the Character page:
-
-1. Upload a disposable reference image and driving video.
-2. Confirm the template validation is clean.
-3. Submit one Replace job with default settings.
-4. Confirm a tracked job, final playable video, and correct final output node.
-5. Repeat once with debug artifacts enabled; confirm the patched graph and pose/mask/face-crop previews are produced.
-6. Delete the uploaded fixtures and generated test media after review.
-
-## 7. Video Generation
-
-Only test Wan with at least 40 GB available and the intended model provisioned. The 1.3B variant is the conservative default.
-
-```bash
-docker compose --profile wan21 build wan21
-
-curl --fail-with-body -X POST http://127.0.0.1:8080/api/v1/wan21/generate \
-  -H 'Content-Type: application/json' \
-  -d '{"prompt":"a paper lantern drifting over calm water","num_frames":8,"width":256,"height":256,"num_inference_steps":10,"seed":42}'
-```
-
-Acceptance requires a valid video, job completion, no swap growth, and service teardown after the configured idle timeout.
-
-```bash
-docker logs --tail 100 ai-wan21
-awk '/^(MemAvailable|SwapFree):/ {print}' /proc/meminfo
-```
-
-## 8. Future backend gates
-
-LatentSync and LongCat Avatar remain unintegrated. Before either can be marked Experimental or Ready, record:
-
-- a successful ARM64/GB10 image build without replacing the vendor PyTorch stack;
-- an installed checkpoint and complete license review;
-- preflight/readiness evidence;
-- one real end-to-end render;
-- output review for identity, lip timing, motion, and stability;
-- a longer-than-trivial audio test;
-- measured peak `MemAvailable` and swap behavior;
-- idle unload/container-stop behavior.
-
-For LongCat, test both a human portrait and a supported stylized character. For LatentSync, test generated and uploaded audio against a real source video.
-
-## 9. Pass criteria
-
-| Area | Required result |
-| --- | --- |
-| Code | Full CPU-safe test suite and frontend build pass |
-| Compose | Configuration validates and base stack reaches gateway/UI readiness |
-| Voiceover | Multi-sentence real audio generation passes |
-| Status UX | Unavailable services fail closed with actionable state/detail |
-| Character | Blocked until all files exist; then a real replacement render passes |
-| Video | Blocked until model/memory prerequisites exist; then a real short render passes |
-| Lip Sync / Avatar | Must not be claimed available without their real generation gates |
-| Stability | No OOM kill, host freeze, or meaningful swap growth |
+Old Creative Studio, standalone F5, B-Roll, LivePortrait, ReActor and Wan2.1 API paths are intentionally removed. Stored outputs and model files are preserved.

@@ -1,10 +1,8 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { AlertTriangle, CheckCircle2, Film, Send, Sparkles } from 'lucide-react'
-import { Badge } from '@/components/ui/badge'
+import { useEffect, useState } from 'react'
+import { Film } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
@@ -13,164 +11,68 @@ import { useJobPoller } from '@/hooks/use-job-poller'
 import { fetchComfyUITemplates, submitComfyUIJob } from '@/lib/api'
 import type { ComfyUITemplate } from '@/lib/types'
 
-const RESOLUTIONS = {
-  landscape: { label: 'Landscape · 832 × 480', width: 832, height: 480 },
-  portrait: { label: 'Portrait · 480 × 832', width: 480, height: 832 },
-  square: { label: 'Square · 640 × 640', width: 640, height: 640 },
+const FRAMES = {
+  landscape: { label: 'Landscape', width: 832, height: 480 },
+  portrait: { label: 'Portrait', width: 480, height: 832 },
+  square: { label: 'Square', width: 640, height: 640 },
 } as const
+type Settings = { prompt: string; avoid: string; frame: keyof typeof FRAMES; duration: number; quality: string; seed: string }
+const initial: Settings = { prompt: '', avoid: '', frame: 'landscape', duration: 5, quality: 'preview', seed: '42' }
+const selectClass = 'h-10 rounded-lg border border-input bg-background px-3 text-sm'
 
-type ResolutionKey = keyof typeof RESOLUTIONS
-
-export default function VideoGenerationPage() {
-  const [templates, setTemplates] = useState<ComfyUITemplate[]>([])
-  const [prompt, setPrompt] = useState('')
-  const [negativePrompt, setNegativePrompt] = useState('')
-  const [resolution, setResolution] = useState<ResolutionKey>('landscape')
-  const [duration, setDuration] = useState(2)
-  const [quality, setQuality] = useState<'preview' | 'quality'>('preview')
-  const [seed, setSeed] = useState('42')
+export default function VideoPage() {
+  const [settings, setSettings] = useState(initial)
+  const [workflow, setWorkflow] = useState<ComfyUITemplate | null>(null)
+  const [checking, setChecking] = useState(true)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState<Record<string, Settings>>({})
   const { jobs, trackJob, dismissJob } = useJobPoller()
-
-  const refresh = useCallback(async () => {
-    try {
-      const result = await fetchComfyUITemplates()
-      setTemplates(result.items)
-      setError(null)
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Video backend inventory is unavailable')
-    }
-  }, [])
+  const update = (patch: Partial<Settings>) => setSettings((previous) => ({ ...previous, ...patch }))
 
   useEffect(() => {
-    void refresh()
-  }, [refresh])
+    fetchComfyUITemplates().then(({ items }) => setWorkflow(items.find((item) => item.id === 'hunyuan-video-15-t2v') ?? null))
+      .catch(() => setError('Unable to check Video availability. Refresh the page to try again.'))
+      .finally(() => setChecking(false))
+  }, [])
+  const available = Boolean(workflow && workflow.validation.missing.length === 0)
+  const busy = submitting || jobs.some((job) => !['completed', 'failed'].includes(job.status))
 
-  const workflow = useMemo(
-    () => templates.find((item) => item.id === 'hunyuan-video-15-t2v') ?? null,
-    [templates],
-  )
-  const missing = workflow?.validation.missing ?? []
-  const canSubmit = Boolean(workflow && prompt.trim() && missing.length === 0 && !submitting)
-
-  const submit = async () => {
-    if (!workflow || !canSubmit) return
+  const submit = async (values = settings) => {
+    if (!workflow || !available || busy || !values.prompt.trim()) return
     setSubmitting(true)
     setError(null)
-    const dimensions = RESOLUTIONS[resolution]
     try {
-      const result = await submitComfyUIJob({
-        template_id: workflow.id,
-        inputs: {},
-        params: {
-          prompt: prompt.trim(),
-          negative_prompt: negativePrompt.trim(),
-          width: dimensions.width,
-          height: dimensions.height,
-          frames: duration * 24 + 1,
-          fps: 24,
-          steps: quality === 'quality' ? 50 : 20,
-          seed: Number(seed || 42),
-          cfg: 1,
-          shift: 5,
-        },
-      })
-      trackJob(result.job_id, 'HunyuanVideo 1.5')
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Video generation failed')
-    } finally {
-      setSubmitting(false)
-    }
+      const result = await submitComfyUIJob({ template_id: workflow.id, inputs: {}, params: {
+        prompt: values.prompt.trim(), negative_prompt: values.avoid.trim(),
+        width: FRAMES[values.frame].width, height: FRAMES[values.frame].height,
+        frames: values.duration * 24 + 1, fps: 24, steps: values.quality === 'quality' ? 50 : 20,
+        seed: Number(values.seed || 42), cfg: 1, shift: 5,
+      } })
+      setSaved((previous) => ({ ...previous, [result.job_id]: { ...values } }))
+      trackJob(result.job_id, 'Video')
+    } catch (e) { setError(e instanceof Error ? e.message : 'Unable to start video. Please try again.') }
+    finally { setSubmitting(false) }
   }
 
-  return (
-    <div className="space-y-8">
-      <div>
-        <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight">
-          <Film className="h-6 w-6 text-primary" /> Video Generation
-        </h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Turn a written scene into a short, locally generated video.
-        </p>
+  return <div className="space-y-8">
+    <header><h1 className="text-3xl font-semibold tracking-tight">Video</h1><p className="mt-2 text-muted-foreground">Describe a scene. Bring it to life.</p></header>
+    <section className="space-y-5 rounded-2xl bg-card/50 p-5 sm:p-7" aria-label="Video workspace">
+      <Label htmlFor="video-prompt">Your scene</Label>
+      <Textarea id="video-prompt" className="min-h-52 resize-y border-0 bg-transparent text-base shadow-none focus-visible:ring-1" value={settings.prompt} onChange={(e) => update({ prompt: e.target.value })} placeholder="A red fox crosses a snowy clearing at sunrise. The camera follows slowly through soft golden light…" />
+      <div className="flex flex-wrap items-end gap-4">
+        <div className="grid gap-2"><Label htmlFor="video-frame">Aspect ratio</Label><select id="video-frame" className={selectClass} value={settings.frame} onChange={(e) => update({ frame: e.target.value as Settings['frame'] })}>{Object.entries(FRAMES).map(([key, frame]) => <option key={key} value={key}>{frame.label}</option>)}</select></div>
+        <div className="grid gap-2"><Label htmlFor="video-duration">Duration</Label><select id="video-duration" className={selectClass} value={settings.duration} onChange={(e) => update({ duration: Number(e.target.value) })}><option value={2}>2 seconds</option><option value={3}>3 seconds</option><option value={5}>5 seconds</option></select></div>
+        <div className="grid gap-2"><Label htmlFor="video-quality">Quality</Label><select id="video-quality" className={selectClass} value={settings.quality} onChange={(e) => update({ quality: e.target.value })}><option value="preview">Draft</option><option value="quality">Studio</option></select></div>
+        <Button size="lg" className="sm:ml-auto" disabled={!available || !settings.prompt.trim() || busy} onClick={() => void submit()}>{submitting ? 'Preparing…' : busy ? 'Generation in progress' : 'Generate video'}</Button>
       </div>
-
-      <div className="grid gap-6 lg:grid-cols-[1fr,380px]">
-        <div className="space-y-6">
-          <Card className={missing.length ? 'border-amber-500/30' : 'border-emerald-500/20'}>
-            <CardContent className="flex items-start gap-3 p-4">
-              {missing.length ? <AlertTriangle className="mt-0.5 h-5 w-5 text-amber-400" /> : <CheckCircle2 className="mt-0.5 h-5 w-5 text-emerald-400" />}
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <p className="text-sm font-semibold">Local video engine</p>
-                  <Badge variant={missing.length ? 'warning' : 'success'}>
-                    {!workflow ? 'Checking' : missing.length ? 'Setup required' : 'Ready on demand'}
-                  </Badge>
-                </div>
-                <p className="mt-1 text-sm text-muted-foreground">
-                  {missing.length
-                    ? `Missing setup files: ${missing.map((item) => item.filename).join(', ')}`
-                    : 'HunyuanVideo 1.5 loads only when a job starts; NeonForge prepares UMA automatically.'}
-                </p>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-base"><Sparkles className="h-4 w-4 text-primary" /> 1. Describe the video</CardTitle>
-              <CardDescription>Include the subject, action, camera movement, lighting, and visual style.</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={6} placeholder="A red fox crossing a snowy clearing at sunrise, slow tracking shot, soft golden light, realistic detail…" />
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">2. Creative settings</CardTitle>
-              <CardDescription>Choose the framing, length, and render quality.</CardDescription>
-            </CardHeader>
-            <CardContent className="grid gap-5 sm:grid-cols-3">
-              <div className="space-y-2">
-                <Label htmlFor="video-resolution">Frame</Label>
-                <select id="video-resolution" value={resolution} onChange={(event) => setResolution(event.target.value as ResolutionKey)} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm">
-                  {Object.entries(RESOLUTIONS).map(([key, value]) => <option key={key} value={key}>{value.label}</option>)}
-                </select>
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="video-duration">Duration</Label>
-                <select id="video-duration" value={duration} onChange={(event) => setDuration(Number(event.target.value))} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm">
-                  <option value={2}>2 seconds</option><option value={3}>3 seconds</option><option value={5}>5 seconds</option>
-                </select>
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="video-quality">Quality</Label>
-                <select id="video-quality" value={quality} onChange={(event) => setQuality(event.target.value as 'preview' | 'quality')} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm">
-                  <option value="preview">Preview · 20 steps</option><option value="quality">Quality · 50 steps</option>
-                </select>
-              </div>
-            </CardContent>
-          </Card>
-
-          <details className="rounded-xl border border-border/60 bg-card/50 p-5">
-            <summary className="cursor-pointer text-sm font-semibold">Advanced settings</summary>
-            <div className="mt-4 grid gap-4 sm:grid-cols-[1fr,180px]">
-              <div className="space-y-2"><Label htmlFor="video-negative">Avoid</Label><Textarea id="video-negative" value={negativePrompt} onChange={(event) => setNegativePrompt(event.target.value)} rows={2} placeholder="Artifacts, text, watermark…" /></div>
-              <div className="space-y-2"><Label htmlFor="video-seed">Seed</Label><Input id="video-seed" type="number" value={seed} onChange={(event) => setSeed(event.target.value)} /></div>
-            </div>
-          </details>
-
-          {error && <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">{error}</div>}
-          <Button size="lg" className="gap-2" disabled={!canSubmit} onClick={() => void submit()}><Send className="h-4 w-4" /> {submitting ? 'Submitting…' : 'Generate video'}</Button>
-          <p className="text-xs text-muted-foreground">A cold start includes automatic memory preparation and model loading. Progress and the finished video appear here.</p>
-        </div>
-
-        <div>
-          <JobTracker jobs={jobs} onDismiss={dismissJob} />
-          {jobs.length === 0 && <div className="rounded-lg border border-dashed border-border/50 p-8 text-center"><Film className="mx-auto mb-2 h-8 w-8 text-muted-foreground/30" /><p className="text-sm text-muted-foreground/60">Generated videos will appear here</p></div>}
-        </div>
-      </div>
-    </div>
-  )
+      <p className="text-xs text-muted-foreground">{FRAMES[settings.frame].width} × {FRAMES[settings.frame].height} · Silent video · Studio renders take longer</p>
+    </section>
+    <details className="text-sm"><summary className="cursor-pointer text-muted-foreground">Advanced settings</summary><div className="mt-4 grid gap-4 sm:grid-cols-[1fr,180px]"><div className="space-y-2"><Label htmlFor="video-avoid">Avoid</Label><Textarea id="video-avoid" value={settings.avoid} onChange={(e) => update({ avoid: e.target.value })} placeholder="Text, watermarks…" rows={2} /></div><div className="space-y-2"><Label htmlFor="video-seed">Seed</Label><Input id="video-seed" type="number" value={settings.seed} onChange={(e) => update({ seed: e.target.value })} /></div></div></details>
+    {checking && <p className="text-sm text-muted-foreground">Checking availability…</p>}
+    {!checking && !available && <p role="status" className="text-sm text-amber-300">Video needs setup. See System Info for missing files and service details.</p>}
+    {error && <p role="alert" className="text-sm text-red-300">{error}</p>}
+    <JobTracker canReuse={(id) => Boolean(saved[id])} jobs={jobs} onDismiss={dismissJob} onReuse={(id) => { if (saved[id]) setSettings(saved[id]) }} onRegenerate={(id) => { if (saved[id]) void submit(saved[id]) }} actionsDisabled={busy} />
+    {!jobs.length && <div className="py-12 text-center text-muted-foreground"><Film className="mx-auto mb-3 h-9 w-9 opacity-40" /><p>Your video will appear here.</p><p className="mt-1 text-sm">Preview, download, or refine your next take.</p></div>}
+  </div>
 }

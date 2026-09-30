@@ -63,6 +63,29 @@ def read_uma_memory(path: str = "/proc/meminfo") -> dict[str, float]:
     }
 
 
+def workload_minimum_gb(service: str, workload_id: str | None, *, frames: int | None = None,
+                        width: int | None = None, height: int | None = None) -> float | None:
+    """Bounded Spark admission rules, based on real renders; values are GiB."""
+    if service != "comfyui":
+        return None
+    if workload_id == "wan-character-swap":
+        frames, width, height = frames or 17, width or 1280, height or 720
+        if frames not in {9, 17} or (width, height) != (1280, 720):
+            raise ValueError("Character supports only 9 or 17 frames at 1280×720 on this host. Longer renders exceeded the safe memory envelope.")
+        # 17 frames consumed about 54.3 GiB; retain at least 8 GiB headroom.
+        return 64.0 if frames == 17 else 56.0
+    if workload_id == "hunyuan-video-15-t2v":
+        frames, width, height = frames or 49, width or 832, height or 480
+        if not (17 <= frames <= 121 and frames % 4 == 1 and 256 <= width <= 832
+                and 256 <= height <= 832 and width % 32 == 0 and height % 32 == 0
+                and width * height <= 640 * 640):
+            raise ValueError("Video exceeds the safe local envelope: up to 121 frames, 832×480 or 640×640.")
+        if frames <= 17 and width * height <= 512 * 288:
+            return 40.0
+        return 48.0 if frames <= 49 else 60.0
+    return None
+
+
 def select_reclamation_candidates(
     *,
     target: str,
@@ -236,8 +259,19 @@ class ResourceManager:
             try:
                 response = await self._http.get(url, timeout=8.0)
                 if response.status_code == 200:
+                    if policy.ready_path == "/readyz":
+                        payload = response.json()
+                        state = payload.get("status")
+                        if state in {"missing_model", "runtime_error", "error", "disabled"} or payload.get("available") is False:
+                            raise RuntimeError(f"{policy.service} readiness failed: {payload.get('detail') or state}")
+                        if state not in {"ready", "idle", "ok"}:
+                            last_error = str(state)
+                            await asyncio.sleep(2)
+                            continue
                     return
                 last_error = f"HTTP {response.status_code}"
+            except RuntimeError:
+                raise
             except Exception as exc:
                 last_error = str(exc)
             await asyncio.sleep(2)
@@ -257,6 +291,12 @@ class ResourceManager:
         token = claim_id or str(uuid.uuid4())
         async with self._lock:
             self.metrics["prepare_requests"] += 1
+            # A single shared UMA device cannot safely admit competing heavy jobs.
+            active = list(self.claims.values())
+            is_heavy = policy.workload_class != "voice"
+            if any(claim.service == service or is_heavy or
+                   self.policies[claim.service].workload_class != "voice" for claim in active):
+                raise RuntimeError("Another generation is using the local runtime. Wait for it to finish and try again.")
             before = self.memory_reader()
             stopped: list[str] = []
             self.claims[token] = Claim(
@@ -272,7 +312,14 @@ class ResourceManager:
             try:
                 running = await self.running_services()
                 state = await self.container_state(policy)
-                required = 0.0 if state == "running" else minimum
+                required = minimum
+                # A warm container may hold a different model. Reclaim its idle
+                # allocation before applying a cold-start floor; never bypass admission.
+                if state == "running" and before["available_gb"] < required:
+                    await self._stop(service, reason=f"prepare:{service}")
+                    stopped.append(service)
+                    state = "stopped"
+                    running.discard(service)
                 if required and before["available_gb"] < required:
                     consumers = await self.memory_consumers()
                     claimed_services = {claim.service for claim in self.claims.values()}
@@ -322,10 +369,10 @@ class ResourceManager:
                     "memory_after": after,
                     "stopped_services": stopped,
                 }
-            except Exception:
+            except Exception as exc:
                 self.metrics["prepare_failures"] += 1
                 self.claims.pop(token, None)
-                self._event("prepare_failed", service, claim_id=token)
+                self._event("prepare_failed", service, claim_id=token, reason=str(exc))
                 raise
 
     async def release(self, service: str, claim_id: str) -> dict[str, Any]:
@@ -380,6 +427,16 @@ class ResourceManager:
             return stopped
 
     async def _idle_loop(self) -> None:
+        # Adopt explicitly managed warm containers after a control-plane restart.
+        # Give them a full idle window; protected/unrelated services are excluded.
+        try:
+            running = await self.running_services()
+            async with self._lock:
+                for service in running.intersection(self.policies):
+                    self.touched.add(service)
+                    self.last_used.setdefault(service, time.time())
+        except Exception:
+            log.exception("Unable to adopt managed warm containers")
         while True:
             await asyncio.sleep(self.idle_scan_sec)
             try:

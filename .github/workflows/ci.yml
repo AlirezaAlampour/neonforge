@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, MisoTTS]
+    branches: [main, MisoTTS, neonforge-v0.2]
   pull_request:
 
 permissions:
@@ -20,7 +20,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
-      - run: uv sync --locked --dev
+      - run: uv lock --check && uv sync --locked --dev
       - name: Run CPU-safe tests
         run: >-
           uv run pytest
@@ -29,6 +29,7 @@ jobs:
           tests/test_media_frontend_source.py
           tests/test_media_readiness.py
           tests/test_service_status.py
+          tests/test_resource_manager.py
           tests/test_voiceover_isolated.py
           tests/test_voiceover_routes.py
           tests/test_breeze_tts_service.py

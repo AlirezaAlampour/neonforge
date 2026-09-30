@@ -51,13 +51,13 @@ The gateway does not have the Docker socket. The supervisor is internal-only and
 | Primary surface | Backend | Lifecycle |
 | --- | --- | --- |
 | Voiceover | F5/Fish/Miso/Breeze/VoxCPM2 | Voice policies, normally 15-minute warm window |
-| Video Generation | HunyuanVideo 1.5 managed ComfyUI template | 40 GiB cold-start floor, 5-minute warm window |
-| Character | Wan2.2 Animate managed ComfyUI template | 48 GiB cold-start floor, 5-minute warm window |
+| Video | HunyuanVideo 1.5 managed ComfyUI template | 40–60 GiB floor by frame count/resolution, 5-minute warm window |
+| Character | Wan2.2 Animate managed ComfyUI template | 64 GiB floor for 17-frame preview, 5-minute warm window |
 | Avatar | EchoMimicV3-Flash target | Disabled until ARM64 real render passes |
 | Lip Sync | LatentSync 1.6 service | 32 GiB cold-start floor, 5-minute warm window |
-| Utilities & Status | Gateway and supervisor inspection | Always-on control plane |
+| System Info | Gateway and supervisor inspection | Always-on control plane |
 
-ComfyUI is intentionally shared by the two managed graph workflows. The supervisor applies an explicit workflow-id-to-memory-minimum map, while the gateway supplies only the allowlisted workflow identity and display label.
+ComfyUI is intentionally shared by the two managed graph workflows. The gateway supplies the managed workflow identity and bounded frame/resolution inputs. The supervisor applies small measured admission rules, checks warm containers too, and rejects competing active heavy claims.
 
 ## Storage
 

@@ -16,6 +16,20 @@ if str(ROOT) not in sys.path:
 import app as gateway_app
 
 
+def test_unsafe_media_parameters_are_rejected_before_start():
+    import pytest
+    from fastapi import HTTPException
+    character = gateway_app.get_comfyui_template("wan-character-swap")
+    video = gateway_app.get_comfyui_template("hunyuan-video-15-t2v")
+    for manifest, params in ((character, {"max_frames": 85}), (video, {"frames": 1000}),
+                             (video, {"width": 832, "height": 832}), (video, {"steps": "bad"})):
+        with pytest.raises(HTTPException) as error:
+            gateway_app.validate_managed_template_params(manifest, params)
+        assert error.value.status_code == 422
+    gateway_app.validate_managed_template_params(character, {"max_frames": 17})
+    gateway_app.validate_managed_template_params(video, {"frames": 121, "width": 832, "height": 480})
+
+
 class _FakeComfyResponse:
     def __init__(self, payload: dict):
         self._payload = payload

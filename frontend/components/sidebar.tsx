@@ -5,17 +5,16 @@ import { usePathname } from 'next/navigation'
 import { Activity, Boxes, Clapperboard, Mic, UserRound, Video, ChevronLeft, ChevronRight } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { cn } from '@/lib/utils'
-import { MemoryGauge } from './memory-gauge'
 
 const SIDEBAR_COLLAPSED_KEY = 'neonforge-sidebar-collapsed-v1'
 
 const navItems = [
   { href: '/voiceover', label: 'Voiceover', icon: Mic },
-  { href: '/video', label: 'Video Generation', icon: Video },
+  { href: '/video', label: 'Video', icon: Video },
   { href: '/character', label: 'Character', icon: Boxes },
   { href: '/avatar', label: 'Avatar', icon: UserRound },
   { href: '/lipsync', label: 'Lip Sync', icon: Clapperboard },
-  { href: '/status', label: 'Utilities & Status', icon: Activity },
+  { href: '/status', label: 'System Info', icon: Activity },
 ]
 
 function NeonForgeLogo({ collapsed }: { collapsed: boolean }) {
@@ -55,7 +54,7 @@ function NeonForgeLogo({ collapsed }: { collapsed: boolean }) {
         </g>
       </svg>
       {!collapsed && (
-        <span className="truncate bg-gradient-to-r from-sky-300 via-violet-300 to-pink-400 bg-clip-text text-[17px] font-bold tracking-tight text-transparent">
+        <span className="truncate bg-gradient-to-r from-sky-300 via-violet-300 to-pink-400 bg-clip-text text-[17px] font-bold tracking-tight text-transparent max-md:hidden">
           NeonForge
         </span>
       )}
@@ -86,7 +85,7 @@ export function Sidebar() {
   return (
     <aside
       className={cn(
-        'flex flex-col border-r border-white/[0.06] bg-[#0a0c12]/95 backdrop-blur-xl transition-all duration-300',
+        'flex shrink-0 flex-col border-r border-white/[0.06] bg-[#0a0c12]/95 backdrop-blur-xl transition-all duration-300 max-md:!w-14',
         collapsed ? 'w-14' : 'w-[220px]',
       )}
     >
@@ -103,6 +102,7 @@ export function Sidebar() {
             <Link
               key={item.href}
               href={item.href}
+              aria-label={item.label}
               title={collapsed ? item.label : undefined}
               className={cn(
                 'group relative flex h-[34px] items-center gap-3 rounded-md px-3 text-[13px] font-medium transition-all duration-200',
@@ -113,18 +113,11 @@ export function Sidebar() {
               )}
             >
               <item.icon className={cn('h-[17px] w-[17px] shrink-0', isActive && 'text-primary')} />
-              {!collapsed && <span>{item.label}</span>}
+              {!collapsed && <span className="max-md:hidden">{item.label}</span>}
             </Link>
           )
         })}
       </nav>
-
-      {/* Memory gauge at bottom */}
-      {!collapsed && (
-        <div className="border-t border-white/[0.06] p-2.5">
-          <MemoryGauge compact />
-        </div>
-      )}
 
       {/* Collapse toggle */}
       <button
