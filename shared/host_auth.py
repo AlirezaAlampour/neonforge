@@ -6,8 +6,8 @@ import time
 
 
 SCOPES = {
-    "gateway": {("GET", "/resources"), ("GET", "/claude/status"), ("POST", "/claude/plan")},
-    "supervisor": {("GET", "/resources"), ("POST", "/gpu/acquire"), ("POST", "/gpu/release"), ("POST", "/h3/free-idle")},
+    "gateway": {("GET", "/resources"), ("GET", "/claude/status"), ("POST", "/claude/plan"), ("GET", "/grok/status")},
+    "supervisor": {("GET", "/resources"), ("POST", "/gpu/acquire"), ("POST", "/gpu/release"), ("POST", "/h3/free-idle"), ("POST", "/h3/reclaim")},
 }
 
 

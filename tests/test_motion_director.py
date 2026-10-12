@@ -51,7 +51,7 @@ def test_dense_strokes_keep_vectors_without_expanding_encoder_context():
 
 
 @pytest.mark.parametrize("change", [{"prompt": " "}, {"reference_ids": []}, {"reference_ids": ["r", "r"]},
-    {"reference_ids": ["../escape"]}, {"workflow": "image", "reference_ids": ["r", "r2"]}, {"duration": 10},
+    {"reference_ids": ["../escape"]}, {"workflow": "image", "reference_ids": ["r", "r2"]}, {"duration": 20},
     {"annotations": [{"id": "x", "reference_id": "other", "kind": "subject", "points": [{"x": .2, "y": .3}]}]},
     {"annotations": [{"id": "x", "reference_id": "r", "kind": "arrow", "points": [{"x": .2, "y": .3}]}]},
     {"annotations": [{"id": "x", "reference_id": "r", "kind": "path", "points": [{"x": 2, "y": .3}, {"x": .4, "y": .8}]}]},
@@ -95,7 +95,7 @@ class MockH3:
         if path == "/object_info":
             graph = json.loads(WORKFLOW_PATH.read_text())
             schemas = {node["class_type"]: {"input": {"required": {}}} for node in graph.values()}
-            schemas.update({"LoadImage": {}, "ResizeImagesByLongerEdge": {}, "MiniMaxH3ImageToVideo": {}})
+            schemas.update({"LoadImage": {}, "ResizeImagesByLongerEdge": {}, "MiniMaxH3ImageToVideo": {}, "MiniMaxH3AddGuide": {}, "LoadVideo": {}, "GetVideoComponents": {}})
             for node in graph.values():
                 field = {"UNETLoader": "unet_name", "CLIPLoader": "clip_name", "VAELoader": "vae_name", "LoraLoaderModelOnly": "lora_name"}.get(node["class_type"])
                 if field:
@@ -116,18 +116,20 @@ class MockH3:
         if path == "/release/h3":
             self.releases.append(json.loads(request.content))
             return httpx.Response(200, json={"released": True})
+        if path == "/recheck/h3":
+            return httpx.Response(200, json={"ready": True, "minimum_available_gb": 90})
         if path == "/upload/image":
-            assert PNG in request.content
+            assert request.content
             return httpx.Response(200, json={"name": "uploaded.png", "subfolder": ""})
         if path == "/prompt":
             self.submissions.append(json.loads(request.content))
             if self.ambiguous:
                 raise httpx.ReadTimeout("lost acknowledgement", request=request)
-            return httpx.Response(200, json={"prompt_id": "test-prompt", "node_errors": {}})
-        if path == "/history/test-prompt":
+            return httpx.Response(200, json={"prompt_id": "test-prompt" if len(self.submissions) == 1 else f"test-prompt-{len(self.submissions)}", "node_errors": {}})
+        if path.startswith("/history/test-prompt"):
             self.history_calls += 1
             status = {"completed": True, "status_str": "error" if self.fail_execution else "success", "messages": [["execution_error", {"exception_message": "mock failure"}]] if self.fail_execution else []}
-            return httpx.Response(200, json={"test-prompt": {"status": status, "outputs": {"92": {"images": [{"filename": self.output_path, "type": "output", "subfolder": "motion_director"}]}}}})
+            return httpx.Response(200, json={path.rsplit("/",1)[-1]: {"status": status, "outputs": {"92": {"images": [{"filename": self.output_path, "type": "output", "subfolder": "motion_director"}]}}}})
         if path == "/view":
             return httpx.Response(200, content=b"\x00\x00\x00\x18ftypmp42mock-video", headers={"Content-Type": "video/mp4"})
         raise AssertionError(f"Unexpected local mock request: {request.method} {path}")

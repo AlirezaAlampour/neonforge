@@ -7,8 +7,8 @@ export type Annotation = { id: string; reference_id: string; kind: Tool; points:
 export type ShotRequest = {
   prompt: string; reference_ids: string[]; annotations: Annotation[]
   mode: 'auto' | 'manual'; preset: 'professional' | 'intimate' | 'reveal' | 'action'
-  duration: 2 | 3 | 5; orientation: 'vertical' | 'horizontal'; workflow: 'reference' | 'image'; seed: number
-  director?: 'local' | 'opus'; plan_id?: string | null
+  duration: 2 | 3 | 5 | 10 | 15 | 30; orientation: 'vertical' | 'horizontal'; workflow: 'reference' | 'image'; seed: number
+  director?: 'local' | 'opus' | 'auto'; engine?: 'h3' | 'grok'; plan_id?: string | null
 }
 export type ShotSpec = {
   version: '0.1'; request: ShotRequest; reference_ids: string[]
@@ -19,12 +19,13 @@ export type ShotSpec = {
   renderer_prompt: string; conditioning: 'prompt-guidance'; notes: string[]
 }
 export type MotionJob = {
-  job_id: string; status: string; message: string; error?: string; created_at: string
+  job_id: string; service?: string; status: string; message: string; error?: string; created_at: string
   preview_url?: string; download_url?: string; shot: ShotSpec; prompt_id?: string
+  completed_segments?: number; total_segments?: number
 }
 export type Capabilities = {
-  h3: { available: boolean; render_ready: boolean; reason?: string; busy?: boolean; available_gb: number; minimum_gb: number; workflows?: Record<string, { available: boolean; reason?: string }> }
-  grok: { available: boolean; reason: string }
+  h3: { available: boolean; render_ready: boolean; can_recover_memory?: boolean; reason?: string; busy?: boolean; available_gb: number; minimum_gb: number; workflows?: Record<string, { available: boolean; reason?: string }> }
+  grok: { available: boolean; reason: string; authorization_url?: string | null; authorization_required?: boolean; manual_import?: boolean }
   planner: { active: string; opus_available?: boolean; subscription?: string; reason: string }
   resources?: HostResourceStatus | null
 }
@@ -38,6 +39,12 @@ export const motionApi = {
     return request<ComfyUIAsset>('/api/v1/motion-director/references', { method: 'POST', body: form })
   },
   reconcile: (jobId: string) => request<MotionJob>(`/api/v1/motion-director/jobs/${jobId}/reconcile`, { method: 'POST' }),
+  recoverMemory: () => request('/api/v1/motion-director/memory/recover', { method: 'POST' }),
+  importGrok: async (file: File, referenceJobId?: string) => {
+    const body = new FormData(); body.append('file', file)
+    if (referenceJobId) body.append('reference_job_id', referenceJobId)
+    return request<MotionJob>('/api/v1/motion-director/imports/grok', { method: 'POST', body })
+  },
 }
 
 export function annotationId(): string {

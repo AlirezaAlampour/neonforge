@@ -26,7 +26,7 @@ class Renderer(Protocol):
     async def queue(self) -> dict: ...
 
 
-def build_h3_graph(shot: ShotSpec, image_names: list[str], job_id: str) -> dict:
+def build_h3_graph(shot: ShotSpec, image_names: list[str], job_id: str, context: dict | None = None) -> dict:
     graph = json.loads(WORKFLOW_PATH.read_text())
     graph["138"]["inputs"]["value"] = shot.renderer_prompt
     graph["129"]["inputs"]["noise_seed"] = shot.request.seed
@@ -48,6 +48,16 @@ def build_h3_graph(shot: ShotSpec, image_names: list[str], job_id: str) -> dict:
         graph["136"]["inputs"] = {key: value for key, value in node.items()
                                   if key in {"clip", "vae", "prompt", "width", "height", "length"}}
         graph["136"]["inputs"]["first_frame"] = ["scale_0", 0]
+    if context:
+        if shot.request.workflow != "reference":
+            raise RuntimeError("Continuation requires the installed reference checkpoint")
+        graph["context_video"] = {"class_type": "LoadVideo", "inputs": {"file": context["video"]}}
+        graph["context_frames"] = {"class_type": "GetVideoComponents", "inputs": {"video": ["context_video", 0]}}
+        node["ref_videos.ref_video_0"] = ["context_frames", 0]
+        graph["boundary_image"] = {"class_type": "LoadImage", "inputs": {"image": context["image"]}}
+        graph["boundary_guide"] = {"class_type": "MiniMaxH3AddGuide", "inputs": {
+            "positive": ["136", 0], "latent": ["136", 1], "vae": ["119", 0], "image": ["boundary_image", 0], "frame_idx": 0}}
+        graph["126"]["inputs"]["conditioning"] = ["boundary_guide", 0]
     return graph
 
 
@@ -83,6 +93,7 @@ class H3Renderer:
                                and IMAGE_LORA in schemas["LoraLoaderModelOnly"]["input"]["required"]["lora_name"][0])
             queue = await self.queue()
             return {"available": True, "busy": bool(queue.get("queue_running") or queue.get("queue_pending")), "control_video": False,
+                    "continuation_available": all(n in schemas for n in ("MiniMaxH3AddGuide", "LoadVideo", "GetVideoComponents")),
                     "control_nodes_present": "MiniMaxH3FunControlNetApply" in schemas,
                     "workflows": {"reference": {"available": True}, "image": {"available": image_available,
                         "reason": "First-frame mode requires the installed blueprint's fl2va checkpoint and 8-step LoRA. Use reference-to-video with one image; no weights are downloaded." if not image_available else ""}}}
@@ -94,7 +105,7 @@ class H3Renderer:
         response.raise_for_status()
         return response.json()
 
-    async def submit(self, shot: ShotSpec, assets: list, job_id: str) -> str:
+    async def submit(self, shot: ShotSpec, assets: list, job_id: str, context_paths: tuple[Path, Path] | None = None) -> str:
         queue = await self.queue()
         if queue.get("queue_running") or queue.get("queue_pending"):
             raise RuntimeError("H3 already has a workload. Wait for it to finish.")
@@ -109,7 +120,17 @@ class H3Renderer:
             uploaded = response.json()
             names.append(str(Path(uploaded.get("subfolder", "")) / uploaded["name"]))
         # Only our local graph is used. No cloud nodes or caller-provided workflows.
-        graph = build_h3_graph(shot, names, job_id)
+        context = None
+        if context_paths:
+            context = {}
+            for kind, path in zip(("image", "video"), context_paths):
+                with path.open("rb") as source:
+                    response = await self.client.post(f"{self.url}/upload/image", files={"image": (path.name, source, "image/png" if kind == "image" else "video/mp4")},
+                                                      data={"type": "input", "overwrite": "false"}, timeout=60)
+                response.raise_for_status()
+                uploaded = response.json()
+                context[kind] = str(Path(uploaded.get("subfolder", "")) / uploaded["name"])
+        graph = build_h3_graph(shot, names, job_id, context)
         try:
             response = await self.client.post(f"{self.url}/prompt", json={"prompt": graph, "client_id": job_id}, timeout=120)
         except httpx.TransportError as exc:
@@ -161,7 +182,13 @@ class GrokRenderer:
         self.runtime = runtime
 
     async def available(self) -> dict:
-        return {"available": False, "reason": "Grok OAuth video access is unverified. No authentication or paid calls are performed."}
+        from .host_client import host_request
+        if self.runtime and getattr(self.runtime, "HOST_CONTROL_SOCKET", ""):
+            try:
+                return await host_request(self.runtime, "grok/status")
+            except (RuntimeError, httpx.HTTPError, OSError):
+                pass
+        return {"available": False, "manual_import": True, "reason": "Existing Hermes Grok OAuth is unavailable. Import a video made in Grok for comparison; no paid API is called."}
 
     async def submit(self, *args, **kwargs):
         raise RuntimeError("Grok video rendering is unavailable until OAuth access and a no-cost renderer are verified")

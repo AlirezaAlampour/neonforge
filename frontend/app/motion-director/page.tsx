@@ -11,8 +11,10 @@ import { motionApi, downloadMotionJSON, type Annotation, type Capabilities, type
 type Reference = { id: string; name: string }
 type Draft = Omit<ShotRequest, 'reference_ids'> & { references: Reference[] }
 const KEY = 'neonforge-motion-director-v0.1'
-const initial: Draft = { references: [], annotations: [], prompt: '', mode: 'auto', preset: 'professional', duration: 2, orientation: 'vertical', workflow: 'reference', seed: 42, director: 'local' }
+const initial: Draft = { references: [], annotations: [], prompt: '', mode: 'auto', preset: 'professional', duration: 5, orientation: 'vertical', workflow: 'reference', seed: 42, director: 'auto', engine: 'h3' }
 const tools: Tool[] = ['arrow', 'path', 'orbit', 'waypoint', 'subject', 'entry', 'exit']
+const toolNames: Record<Tool, string> = { arrow: 'Camera arrow', path: 'Camera path', orbit: 'Orbit around', waypoint: 'Camera stop', subject: 'Mark subject', entry: 'Enters here', exit: 'Exits here' }
+const toolHelp: Record<Tool, string> = { arrow: 'Drag from the camera’s starting point toward its destination.', path: 'Draw the path you want the camera to follow.', orbit: 'Drag from the subject outwards to draw an orbit.', waypoint: 'Tap each camera stop in order.', subject: 'Tap the person or object to keep in focus.', entry: 'Tap where the subject enters the scene.', exit: 'Tap where the subject leaves the scene.' }
 const selectClass = 'min-h-11 w-full rounded-md border border-white/15 bg-card px-3 text-sm'
 const terminal = (job: MotionJob) => ['completed', 'failed'].includes(job.status)
 const payload = ({ references, ...rest }: Draft): ShotRequest => ({ ...rest, reference_ids: references.map(r => r.id) })
@@ -37,7 +39,7 @@ export default function MotionDirectorPage() {
     try {
       const saved = JSON.parse(localStorage.getItem(KEY) || 'null')
       if (saved && Array.isArray(saved.references) && Array.isArray(saved.annotations)) {
-        setDraft({ ...initial, ...saved }); setSelected(saved.references[0]?.id || '')
+        setDraft({ ...initial, ...saved, duration: [5, 10, 15, 30].includes(saved.duration) ? saved.duration : 5 }); setSelected(saved.references[0]?.id || '')
       }
     } catch { /* A private browser can still create shots. */ }
     setRestored(true)
@@ -81,9 +83,8 @@ export default function MotionDirectorPage() {
     finally { setBusy('') }
   }
   const generate = async () => {
-    if (!plan) return
     setBusy('render'); setError('')
-    try { const job = await motionApi.submit(plan.request); setJobs(prev => [job, ...prev]) }
+    try { const job = await motionApi.submit(plan?.request || payload(draft)); setPlan(job.shot); setJobs(prev => [job, ...prev]) }
     catch (e) { setError(e instanceof Error ? e.message : 'Could not submit H3 shot') }
     finally { setBusy('') }
   }
@@ -97,53 +98,63 @@ export default function MotionDirectorPage() {
   const comparison = completed.filter(j => compare.includes(j.job_id))
   return <div className="space-y-6 pb-12">
     <div className="flex items-start gap-3"><Clapperboard className="mt-1 h-7 w-7 shrink-0 text-sky-300" /><div><h1 className="text-2xl font-semibold">Motion Director <span className="text-sm text-muted-foreground">v0.1</span></h1><p className="mt-1 text-sm text-muted-foreground">Reference → direction → cinematic shot. Local MiniMax H3.</p></div></div>
-    {capabilities?.resources && <div className="rounded-lg border border-white/10 p-3 text-sm"><p>GPU-exclusive execution · {capabilities.resources.memory?.available_gb} GiB available · H3 needs 90 GiB</p><p className="mt-1 text-xs text-muted-foreground">GPU {capabilities.resources.gpu.utilization_pct ?? '—'}% · {capabilities.resources.gpu.temperature_c ?? '—'}°C · {capabilities.resources.gpu.cap_active ? '2000 MHz safety cap active' : 'Safety cap unverified'}</p></div>}
+    {capabilities?.resources && <p className="text-sm text-muted-foreground">{capabilities.resources.memory?.available_gb} GiB available · safe H3 generation needs 90 GiB</p>}
     <section className="space-y-4 rounded-xl border border-white/10 bg-card/40 p-3 sm:p-5">
-      <h2 className="font-semibold">1. References & staging</h2>
+      <h2 className="font-semibold">Upload images & describe your video</h2>
       <label className="flex min-h-14 cursor-pointer items-center justify-center gap-2 rounded-lg border border-dashed border-sky-300/40 p-3 text-sm">
         <Upload className="h-5 w-5" />{busy === 'upload' ? 'Uploading references…' : 'Choose reference images'}
         <input aria-label="Upload reference images" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" multiple disabled={Boolean(busy)} className="sr-only" onChange={e => { void upload(e.target.files); e.target.value = '' }} />
       </label>
       <p className="text-xs text-muted-foreground">Up to four GPT-created images, 20 MB each. Drawings stay separate from your originals.</p>
+      <label className="grid gap-2 text-sm">Cinematic prompt<Textarea rows={4} maxLength={4000} value={draft.prompt} placeholder="Describe the scene, what happens and how you want the camera to move…" onChange={e => patch({ prompt: e.target.value })} /></label>
       {draft.references.length > 0 && <>
         <div className="flex flex-wrap gap-2">{draft.references.map((ref, i) => <Button key={ref.id} variant={selected === ref.id ? 'default' : 'outline'} className="min-h-11 max-w-full truncate" onClick={() => setSelected(ref.id)}>Picture {i + 1} · {ref.name.slice(0, 25)}</Button>)}</div>
-        <div className="flex flex-wrap gap-2" role="group" aria-label="Drawing tools">{tools.map(t => <button key={t} type="button" aria-pressed={tool === t} className={`min-h-11 rounded-md border px-3 text-sm capitalize ${tool === t ? 'border-sky-400 bg-sky-400/15 text-sky-200' : 'border-white/10'}`} onClick={() => setTool(t)}>{t}</button>)}</div>
+        <details className="space-y-3"><summary className="min-h-11 cursor-pointer py-3 font-medium">Optional drawing · camera & subjects</summary>
+        <div className="my-3 grid grid-cols-2 gap-2 sm:grid-cols-4" role="group" aria-label="Drawing tools">{tools.map(t => <button key={t} type="button" aria-pressed={tool === t} className={`min-h-12 rounded-md border px-3 text-sm ${tool === t ? 'border-sky-400 bg-sky-400/15 text-sky-200' : 'border-white/10'}`} onClick={() => setTool(t)}>{toolNames[t]}</button>)}</div>
         <label className="grid gap-1 text-sm">Marker label<Input value={label} maxLength={120} placeholder="Main subject, doorway, camera target…" className="min-h-11" onChange={e => setLabel(e.target.value)} /></label>
         {selected && <AnnotationCanvas key={selected} referenceId={selected} annotations={draft.annotations} tool={tool} label={label} onAdd={add} />}
-        <p className="text-xs text-muted-foreground">Drag an arrow/path. Drag from orbit center to its edge. Tap to place a subject, entry, exit or waypoint.</p>
+        <p className="my-3 text-sm text-sky-200" role="status">{toolHelp[tool]}</p>
         <div className="flex flex-wrap gap-2"><Button variant="outline" className="min-h-11" onClick={undo}>Undo</Button><Button variant="outline" className="min-h-11" onClick={() => patch({ annotations: draft.annotations.filter(a => a.reference_id !== selected) })}>Clear this image</Button><Button variant="ghost" className="min-h-11" onClick={() => {
           const references = draft.references.filter(r => r.id !== selected)
           patch({ references, annotations: draft.annotations.filter(a => a.reference_id !== selected) }); setSelected(references[0]?.id || '')
         }}>Remove reference</Button></div>
         <Button variant="ghost" className="min-h-11" onClick={() => downloadMotionJSON({ version: '0.1', ...payload(draft) }, 'motion-director-drawing.json')}>Download editable drawing data</Button>
+        </details>
       </>}
     </section>
     <section className="space-y-4 rounded-xl border border-white/10 bg-card/40 p-3 sm:p-5">
-      <h2 className="font-semibold">2. Direct the shot</h2>
-      <label className="grid gap-2 text-sm">Cinematic prompt<Textarea rows={4} maxLength={4000} value={draft.prompt} placeholder="A lone traveler crosses a rain-soaked neon street. Track smoothly alongside, then settle on their face…" onChange={e => patch({ prompt: e.target.value })} /></label>
+      <h2 className="font-semibold">Duration & engine</h2>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="grid gap-1 text-sm">Duration<select aria-label="Duration" className={selectClass} value={draft.duration} onChange={e => patch({ duration: Number(e.target.value) as Draft['duration'] })}>{[5, 10, 15, 30].map(n => <option key={n} value={n}>{n} seconds</option>)}</select></label>
+        <label className="grid gap-1 text-sm">Engine<select aria-label="Engine" className={selectClass} value={draft.engine === 'grok' ? 'grok' : draft.director || 'auto'} onChange={e => patch(e.target.value === 'grok' ? { engine: 'grok' } : { engine: 'h3', director: e.target.value as Draft['director'] })}><option value="auto">H3 · automatic cinematic director</option><option value="local">H3 · local cinematic director</option><option value="opus" disabled={!capabilities?.planner.opus_available}>H3 · Claude Code Opus {capabilities?.planner.opus_available ? '(Pro subscription)' : '(unavailable)'}</option><option value="grok" disabled={!capabilities?.grok.available}>Grok via Hermes · {capabilities?.grok.available ? 'OAuth' : 'manual import below'}</option></select></label>
+      </div>
+      <p className="text-xs text-muted-foreground">Professional cinematic direction is automatic. Longer videos continue the scene across clips. {capabilities?.planner.opus_available ? 'Opus uses your existing Claude subscription once per generation.' : capabilities?.planner.reason}</p>
+      <Button className="min-h-12 w-full" disabled={Boolean(busy) || !draft.prompt.trim() || !draft.references.length || (!capabilities?.h3.render_ready && !capabilities?.h3.can_recover_memory)} onClick={() => void generate()}>{busy === 'render' ? 'Directing & preparing your video…' : 'Generate video'}</Button>
+      <details className="space-y-3 text-sm"><summary className="min-h-11 cursor-pointer py-3">Advanced · settings & shot plan</summary>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <label className="grid gap-1 text-sm">Director<select aria-label="Director" className={selectClass} value={draft.mode} onChange={e => patch({ mode: e.target.value as Draft['mode'] })}><option value="auto">Auto Director</option><option value="manual">Manual Director</option></select></label>
         <label className="grid gap-1 text-sm">Cinematic preset<select aria-label="Cinematic preset" className={selectClass} value={draft.preset} onChange={e => patch({ preset: e.target.value as Draft['preset'] })}><option value="professional">Professional Cinematic Director</option><option value="intimate">Intimate portrait</option><option value="reveal">Environmental reveal</option><option value="action">Readable action</option></select></label>
-        <label className="grid gap-1 text-sm">Planning engine<select aria-label="Planning engine" className={selectClass} value={draft.director || 'local'} onChange={e => patch({ director: e.target.value as Draft['director'] })}><option value="local">Local cinematic director</option><option value="opus" disabled={!capabilities?.planner.opus_available}>Claude Code Opus · subscription {capabilities?.planner.opus_available ? '' : '(unavailable)'}</option></select></label>
-        <label className="grid gap-1 text-sm">Duration<select aria-label="Duration" className={selectClass} value={draft.duration} onChange={e => patch({ duration: Number(e.target.value) as Draft['duration'] })}><option value={2}>2 seconds · short draft</option><option value={3}>3 seconds</option><option value={5}>5 seconds</option></select></label>
         <label className="grid gap-1 text-sm">Output<select aria-label="Output" className={selectClass} value={draft.orientation} onChange={e => patch({ orientation: e.target.value as Draft['orientation'] })}><option value="vertical">Vertical · phone</option><option value="horizontal">Horizontal · landscape</option></select></label>
         <label className="grid gap-1 text-sm">Reference use<select aria-label="Reference use" className={selectClass} value={draft.workflow} onChange={e => patch({ workflow: e.target.value as Draft['workflow'] })}><option value="reference">Reference-to-video · identity & style</option><option value="image" disabled={draft.references.length !== 1 || !capabilities?.h3.workflows?.image?.available}>Image-to-video · first frame {capabilities?.h3.workflows?.image?.available ? '' : '(weights unavailable)'}</option></select></label>
-        <label className="grid gap-1 text-sm">Renderer<select aria-label="Renderer" className={selectClass} value="h3" onChange={() => {}}><option value="h3">MiniMax H3 · local</option><option value="grok" disabled>Grok · access unverified</option></select></label>
       </div>
       <p className="text-xs text-muted-foreground">{capabilities?.planner.reason || 'The local planner remains available.'} Opus plans are saved once and reused during rendering.</p>
-      <details className="text-sm"><summary className="min-h-11 cursor-pointer py-3">Advanced: reproducible seed</summary><label className="grid gap-1">Seed<Input type="number" min={0} max={9007199254740991} value={draft.seed} onChange={e => patch({ seed: Number(e.target.value) })} /></label></details>
-      <Button className="min-h-11 w-full sm:w-auto" disabled={Boolean(busy) || !draft.prompt.trim() || !draft.references.length} onClick={() => void planShot()}>{busy === 'plan' ? 'Planning…' : 'Plan shot'}</Button>
-    </section>
+      <label className="grid gap-1">Seed<Input type="number" min={0} max={9007199254740991} value={draft.seed} onChange={e => patch({ seed: Number(e.target.value) })} /></label>
+      {capabilities?.resources && <p className="text-xs text-muted-foreground">GPU {capabilities.resources.gpu.utilization_pct ?? '—'}% · {capabilities.resources.gpu.temperature_c ?? '—'}°C · {capabilities.resources.gpu.cap_active ? '2000 MHz safety cap active' : 'Safety cap unverified'}</p>}
+      <Button className="min-h-11 w-full sm:w-auto" disabled={Boolean(busy) || !draft.prompt.trim() || !draft.references.length} onClick={() => void planShot()}>{busy === 'plan' ? 'Planning…' : 'Preview shot plan'}</Button>
     {plan && <section className="space-y-3 rounded-xl border border-sky-300/20 bg-sky-300/5 p-4">
-      <h2 className="font-semibold">3. Review & generate</h2><p className="text-sm">{plan.camera.movement}</p><p className="text-xs text-muted-foreground">{plan.composition}</p>
+      <h2 className="font-semibold">Shot plan</h2><p className="text-sm">{plan.camera.movement}</p><p className="text-xs text-muted-foreground">{plan.composition}</p>
       <p className="text-xs text-sky-200">Planned by {plan.planner === 'claude-code-opus' ? 'Claude Code Opus' : 'Local Cinematic Director'}</p>
       <ol className="space-y-2 text-sm">{plan.timing.map((beat, i) => <li key={i}><span className="text-sky-300">{beat.start.toFixed(1)}–{beat.end.toFixed(1)}s</span> · {beat.action}</li>)}</ol>
       <p className="text-xs text-muted-foreground">{plan.width} × {plan.height} · {plan.frames} frames at {plan.fps} fps · {(plan.frames / plan.fps).toFixed(2)}s rendered · {plan.request.workflow === 'image' ? 8 : 4}-step H3 draft</p>
       {plan.notes.map(note => <p key={note} className="text-xs text-amber-200/80">{note}</p>)}
-      <div className="flex flex-wrap gap-2"><Button className="min-h-11" disabled={Boolean(busy) || !capabilities?.h3.render_ready || !capabilities?.h3.workflows?.[plan.request.workflow]?.available} onClick={() => void generate()}>{busy === 'render' ? 'Submitting…' : 'Generate H3 video'}</Button><Button variant="outline" className="min-h-11" onClick={() => downloadMotionJSON(plan, 'motion-director-shot.json')}>Download shot plan</Button></div>
+      <Button variant="outline" className="min-h-11" onClick={() => downloadMotionJSON(plan, 'motion-director-shot.json')}>Download shot plan</Button>
       {capabilities?.h3.workflows?.[plan.request.workflow]?.reason && <p className="text-xs text-amber-200">{capabilities.h3.workflows[plan.request.workflow].reason}</p>}
     </section>}
+      </details>
+    </section>
     {!capabilities ? <p role="status" className="text-sm text-muted-foreground">Checking local H3 availability…</p> : !capabilities.h3.render_ready && <p role="status" className="rounded-lg border border-amber-400/20 p-3 text-sm text-amber-200">{capabilities.h3.reason || 'H3 is unavailable.'} Planning and drawings remain available.</p>}
+    {capabilities?.h3.can_recover_memory && <Button variant="outline" className="min-h-11" disabled={Boolean(busy)} onClick={async () => { setBusy('memory'); try { await motionApi.recoverMemory(); setCapabilities(await motionApi.capabilities()) } catch(e) { setError(String(e)) } finally { setBusy('') } }}>Release idle H3 memory</Button>}
+    <details className="rounded-xl border border-white/10 p-3"><summary className="min-h-11 cursor-pointer py-3">Grok · import & compare</summary><p className="my-3 text-sm text-muted-foreground">{capabilities?.grok.reason} If OAuth is blocked or returns 403, create a video in Grok, download its MP4, then import it here.</p><a href="https://grok.com/imagine" target="_blank" rel="noreferrer" className="inline-flex min-h-11 items-center text-sky-300">Open Grok on your phone</a><label className="mt-3 flex min-h-12 cursor-pointer items-center justify-center rounded-lg border border-dashed p-3 text-sm">{busy === 'import' ? 'Preparing imported video…' : 'Import Grok MP4'}<input aria-label="Import Grok MP4" type="file" accept="video/mp4" className="sr-only" disabled={Boolean(busy)} onChange={async e => { const file=e.target.files?.[0]; e.target.value=''; if(!file) return; setBusy('import'); try { const reference=completed.find(j => j.service !== 'grok'); const job=await motionApi.importGrok(file,reference?.job_id); setJobs(prev=>[job,...prev]); if(reference) setCompare([reference.job_id,job.job_id]) } catch(err) { setError(String(err)) } finally { setBusy('') } }} /></label><p className="mt-2 text-xs text-muted-foreground">No API keys, usage credits or new subscriptions. Your original MP4 is preserved.</p></details>
     {error && <p role="alert" className="break-words text-sm text-red-300">{error}</p>}
     <section className="space-y-4"><h2 className="font-semibold">Your takes</h2>
       {!jobs.length && <p className="text-sm text-muted-foreground">Completed videos appear here for preview, download and comparison.</p>}
@@ -152,11 +163,12 @@ export default function MotionDirectorPage() {
         <div className="flex items-center justify-between gap-2"><span className="text-sm font-medium capitalize">{job.status}</span><span className="text-xs text-muted-foreground">{new Date(job.created_at).toLocaleString()}</span></div>
         <p className="line-clamp-2 text-sm">{job.shot.request.prompt}</p><p role="status" className="text-xs text-sky-200">{job.message}</p>
         {!terminal(job) && <div className="h-1 overflow-hidden rounded bg-white/10"><div className="h-full w-1/3 animate-pulse rounded bg-sky-400" /></div>}
+        {Boolean(job.total_segments) && <p className="text-xs text-muted-foreground">{job.completed_segments}/{job.total_segments} clips saved</p>}
         {job.error && <p className="break-words text-xs text-red-300">{job.error}</p>}
         {job.preview_url && <video className="max-h-[55vh] w-full rounded-lg bg-black" src={job.preview_url} controls playsInline preload="metadata" />}
         <div className="flex flex-wrap gap-2">{job.download_url && <a className="flex min-h-11 items-center rounded-md border border-white/15 px-3 text-sm" href={job.download_url}>Download video</a>}
           {job.status === 'completed' && <label className="flex min-h-11 cursor-pointer items-center gap-2 px-2 text-sm"><input type="checkbox" checked={compare.includes(job.job_id)} disabled={!compare.includes(job.job_id) && compare.length >= 2} onChange={e => setCompare(prev => e.target.checked ? [...prev, job.job_id] : prev.filter(id => id !== job.job_id))} />Compare take</label>}
-          <Button variant="ghost" className="min-h-11" onClick={() => { const { reference_ids, ...request } = job.shot.request; setDraft({ ...request, references: reference_ids.map((id, i) => ({ id, name: `Picture ${i + 1}` })) }); setSelected(reference_ids[0]); setPlan(job.shot) }}>Reuse shot</Button>
+          {job.shot.planner !== 'manual-import' && <Button variant="ghost" className="min-h-11" onClick={() => { const { reference_ids, ...request } = job.shot.request; setDraft({ ...initial, ...request, duration: [5,10,15,30].includes(request.duration) ? request.duration : 5, plan_id: undefined, references: reference_ids.map((id, i) => ({ id, name: `Picture ${i + 1}` })) }); setSelected(reference_ids[0]); setPlan(null) }}>Reuse shot</Button>}
           {job.status === 'failed' && job.prompt_id && <Button variant="ghost" className="min-h-11" onClick={() => void motionApi.reconcile(job.job_id).catch(e => setError(String(e)))}>Check accepted H3 shot</Button>}
         </div>
       </article>)}</div>

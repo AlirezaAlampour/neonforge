@@ -45,8 +45,19 @@ async def run_cli(args: list[str], data: bytes | None = None, timeout: float = 8
     # Never return raw stderr, account identifiers, auth output or debug logs.
     try:
         result = json.loads(stdout)
-    except ValueError as exc:
-        raise RuntimeError(f"Claude Code returned no structured result (exit {process.returncode})") from exc
+    except ValueError:
+        # This installed CLI requires stream output for image-bearing stream
+        # input. Keep only the terminal result; never expose verbose/auth events.
+        result = None
+        for line in stdout.splitlines():
+            try:
+                item = json.loads(line)
+                if isinstance(item, dict) and item.get("type") == "result":
+                    result = item
+            except ValueError:
+                continue
+        if result is None:
+            raise RuntimeError(f"Claude Code returned no terminal planning result (exit {process.returncode})")
     return result
 
 
@@ -110,7 +121,7 @@ async def plan_with_opus(request: ShotRequest, reference_paths: list[str], asset
     message = {"type": "user", "message": {"role": "user", "content": content}, "parent_tool_use_id": None}
     args = ["-p", "--safe-mode", "--restricted", "--tools", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
             "--setting-sources", "", "--no-session-persistence", "--model", "opus", "--effort", "low",
-            "--max-turns", "1", "--input-format", "stream-json", "--output-format", "json",
+            "--max-turns", "1", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
             "--system-prompt", SYSTEM_PROMPT, "--json-schema", json.dumps(DirectorDecisions.model_json_schema())]
     # Exactly one bounded print invocation; no retry or model/API fallback.
     result = await run_cli(args, (json.dumps(message) + "\n").encode())

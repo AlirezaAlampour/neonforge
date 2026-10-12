@@ -56,7 +56,7 @@ The gateway does not have the Docker socket. The supervisor is internal-only and
 | Avatar | EchoMimicV3-Flash target | Disabled until ARM64 real render passes |
 | Lip Sync | LatentSync 1.6 service | 32 GiB cold-start floor, 5-minute warm window |
 | System Info | Gateway and supervisor inspection | Always-on control plane |
-| Motion Director (unmerged, privately active) | Existing external H3 ComfyUI; local validated shot planner | 90 GiB admission, shared exclusive lease; external H3 is never started/stopped |
+| Motion Director (unmerged, privately active) | Existing H3; optional subscription Opus/local direction; manual Grok import | 90 GiB before each bounded clip, shared exclusive lease, verified-idle cache cleanup; H3 never started/stopped |
 
 ComfyUI is intentionally shared by the two managed graph workflows. The gateway supplies the managed workflow identity and bounded frame/resolution inputs. The supervisor applies small measured admission rules, checks warm containers too, and rejects competing active heavy claims.
 
@@ -85,7 +85,8 @@ and reuses uploads, the heavy semaphore, supervisor claims, output storage and
 history. `H3_COMFYUI_URL` is blank by default. Once a private route is verified,
 the external H3 reservation joins the same claim exclusion rules and guards
 other model admissions by inspecting its queue. H3 never becomes a Compose
-lifecycle target. Hermes/Grok are interface boundaries only; annotations guide
+lifecycle target. Hermes/Grok generation stays gated on OAuth/entitlement; manual
+video import and comparison are available. Annotations guide
 the prompt until control-video inputs are validated. See [Motion Director's
 activation notes](docs/motion-director-v0.1.md).
 
@@ -96,5 +97,15 @@ through bridge-only TCP 18189. Managed GPU claims coordinate with the existing
 Forge3D lease, preserving/restoring approved idle workloads. Optional Claude
 Code Opus checks subscription quota and refuses paid overflow; validated plans
 are persisted and never regenerated during inference. Real reference-to-video
-acceptance passed and the tested images are privately active; Opus remains
-disabled while paid extra usage is enabled. See [activation evidence](docs/motion-director-activation.md).
+acceptance passed and the tested images are privately active. Claude extra usage
+is now verified off and one real subscription Opus plan passed. See
+[continuation evidence](docs/motion-director-continuation.md).
+
+5–30-second scenes persist individual segment intents/prompts/results. Each
+bounded clip is admitted at 90 GiB; its predecessor supplies a short reference
+video and a boundary-frame guide through inspected existing H3 nodes. CPU FFmpeg
+trims and joins clips. The director runs once for the scene, outside rendering.
+Cancellation/unknown acknowledgements retain reservations. Idle H3 cache is
+reclaimed under the existing exclusive lease and paused workers restored.
+The authenticated socket directory uses `RuntimeDirectoryPreserve=restart` to
+keep Docker mounts valid; missing supervisor host safety disables admission.

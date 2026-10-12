@@ -20,6 +20,7 @@ from pydantic import Field, model_validator
 
 from .claude_host import plan_with_opus, subscription_status
 from .planner import ShotRequest, StrictModel
+from .hermes_grok import status as grok_status
 from shared.host_auth import Verifier
 
 STATE_DIR = Path(os.getenv("NEONFORGE_HOST_STATE_DIR", str(Path(__file__).resolve().parents[2] / ".motion-runtime")))
@@ -106,6 +107,7 @@ class Coordinator:
         self.claims = {}
         self.token = None
         self.last_restore = None
+        self.last_cleanup = None
         self.renew_task = None
         self.client = httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(uds=LEASE_SOCKET), timeout=180)
         self.http = httpx.AsyncClient(timeout=10)
@@ -183,6 +185,9 @@ class Coordinator:
                 raise RuntimeError("Existing Hunyuan workload state is unknown; GPU admission is refused.")
             if (snapshot.get("hunyuan") or {}).get("busy"):
                 raise RuntimeError("Hunyuan is actively generating.")
+            loaded = (snapshot.get("hunyuan") or {}).get("loaded", {})
+            if loaded.get("shape") or loaded.get("paint"):
+                raise RuntimeError("Unrelated Hunyuan models are resident; approved pipeline-only pausing cannot unload them.")
             if state.get("releasable", {}).get("items") and not ALLOW_IDLE_PAUSE:
                 raise RuntimeError("Cross-project idle coordination requires the owner's approval.")
             acquired = await self.lease("acquire", {"lease_seconds": 900})
@@ -215,6 +220,7 @@ class Coordinator:
         return {"released": True, "restore": self.last_restore}
 
     async def free_idle_h3(self):
+        before = memory()["available_gb"]
         response = await self.http.get("http://127.0.0.1:8189/queue")
         response.raise_for_status()
         queue = response.json()
@@ -223,6 +229,17 @@ class Coordinator:
         response = await self.http.post("http://127.0.0.1:8189/free", json={"unload_models": True, "free_memory": True})
         response.raise_for_status()
         await asyncio.sleep(2)
+        self.last_cleanup = {"before_gib": before, "after_gib": memory()["available_gb"], "at": time.time()}
+        return {"memory": memory(), "cleanup": self.last_cleanup}
+
+    async def reclaim_idle_h3(self):
+        # A maintenance slot loads no model and verifies all external queues.
+        claim = ClaimRequest(claim_id="h3-idle-reclaim-" + secrets.token_hex(8), service="comfyui", minimum_gb=0)
+        await self.acquire(claim)
+        try:
+            return await self.free_idle_h3()
+        finally:
+            await self.release(claim.claim_id)
 
     async def release(self, claim_id):
         async with self.lock:
@@ -236,6 +253,8 @@ class Coordinator:
                     await asyncio.sleep(.5)
                 else:
                     raise RuntimeError("H3 still has active work; reservation and restoration remain pending.")
+                if memory()["available_gb"] < 90:
+                    await self.free_idle_h3()
             return await self._release(claim_id)
 
     async def close(self):
@@ -288,7 +307,7 @@ async def bounded_request(request: Request, call_next):
 @app.get("/resources")
 async def resources():
     result = await telemetry()
-    result.update(exclusive_claims=coordinator.claims, last_restore=coordinator.last_restore, idle_coordination_allowed=ALLOW_IDLE_PAUSE)
+    result.update(exclusive_claims=coordinator.claims, last_restore=coordinator.last_restore, last_h3_cleanup=coordinator.last_cleanup, idle_coordination_allowed=ALLOW_IDLE_PAUSE)
     try:
         shared = await coordinator.lease("state")
         result["shared_gpu"] = {"exclusive": shared.get("exclusive"), "lease": shared.get("lease"), "releasable": shared.get("releasable"), "last_restore": shared.get("last_restore")}
@@ -319,15 +338,27 @@ async def free_idle(request: ClaimRequest):
     if request.claim_id not in coordinator.claims:
         raise HTTPException(409, "Only the owner of the GPU reservation can request idle cache release")
     try:
-        await coordinator.free_idle_h3()
-        return {"freed": True}
+        return {"freed": True, **(await coordinator.free_idle_h3())}
     except (RuntimeError, httpx.HTTPError) as exc:
         raise HTTPException(409, "H3 cache is busy or unreachable; it was not forcibly released") from exc
+
+
+@app.post("/h3/reclaim")
+async def reclaim_idle():
+    try:
+        return await coordinator.reclaim_idle_h3()
+    except (RuntimeError, httpx.HTTPError) as exc:
+        raise HTTPException(409, str(exc) if isinstance(exc, RuntimeError) else "Idle H3 reclamation is unavailable") from exc
 
 
 @app.get("/claude/status")
 async def claude_status():
     return await subscription_status()
+
+
+@app.get("/grok/status")
+async def existing_grok_status():
+    return grok_status()
 
 
 @app.post("/claude/plan")
@@ -336,4 +367,5 @@ async def claude_plan(request: PlanRequest):
         try:
             return await plan_with_opus(request.shot, request.references, ASSETS)
         except (RuntimeError, TimeoutError, ValueError, OSError) as exc:
-            raise HTTPException(503, "Opus planning unavailable or invalid; use the deterministic fallback") from exc
+            # Only static error types are reported; no CLI stderr/account/token.
+            raise HTTPException(503, f"Opus planning unavailable ({type(exc).__name__}); use the local cinematic fallback") from exc

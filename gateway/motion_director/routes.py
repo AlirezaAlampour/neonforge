@@ -8,12 +8,13 @@ import uuid
 from datetime import datetime
 
 import httpx
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy import String, Text, DateTime, desc, select
 from sqlalchemy.orm import Mapped, mapped_column
 
-from .planner import LocalDirector, ShotRequest, ShotSpec
+from .planner import LocalDirector, ShotRequest, ShotSpec, segment_shot
+from . import media
 from .renderers import SubmissionUncertain, get_renderer
 from .host_client import host_request
 
@@ -49,18 +50,30 @@ def create_router(runtime):
 
     runtime.MotionPlan = MotionPlan
 
+    class MotionSegment(runtime.Base):
+        __tablename__ = "motion_director_segments"
+        id: Mapped[str] = mapped_column(String(48), primary_key=True)
+        job_id: Mapped[str] = mapped_column(String(36), index=True)
+        position: Mapped[int] = mapped_column()
+        status: Mapped[str] = mapped_column(String(32), default="waiting")
+        prompt_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+        output_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+        source_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    runtime.MotionSegment = MotionSegment
+
     def fingerprint(request):
         return hashlib.sha256(json.dumps(request.model_dump(exclude={"plan_id"}), sort_keys=True).encode()).hexdigest()
 
-    async def planned_shot(request):
+    async def planned_shot(request, reuse_cache=True):
         async with planning_lock:
             key = fingerprint(request)
             with runtime.SessionLocal() as db:
                 saved = db.execute(select(MotionPlan).where(MotionPlan.request_hash == key).order_by(desc(MotionPlan.created_at))).scalars().first()
-            if saved:
+            if saved and reuse_cache:
                 return ShotSpec.model_validate_json(saved.shot_json)
             shot = LocalDirector().plan(request)
-            if request.director == "opus":
+            if request.director == "opus" or (request.director == "auto" and getattr(runtime, "HOST_CONTROL_SOCKET", "")):
                 try:
                     data = await host_request(runtime, "claude/plan", {"shot": request.model_dump(), "references": [asset.relative_path for asset in assets_for(request)]})
                     candidate = ShotSpec.model_validate(data)
@@ -95,7 +108,11 @@ def create_router(runtime):
             return row
 
     def serialize(row):
-        return {"job_id": row.id, "service": "h3", "status": row.status, "message": row.message,
+        with runtime.SessionLocal() as db:
+            clips = db.execute(select(MotionSegment).where(MotionSegment.job_id == row.id).order_by(MotionSegment.position)).scalars().all()
+        return {"job_id": row.id, "service": json.loads(row.shot_json).get("request", {}).get("engine", "h3"), "status": row.status, "message": row.message,
+                "segments": [{"index": c.position, "status": c.status, "prompt_id": c.prompt_id} for c in clips],
+                "completed_segments": sum(c.status == "completed" for c in clips), "total_segments": len(clips),
                 "error": row.error, "created_at": row.created_at.isoformat(), "prompt_id": row.prompt_id,
                 "result_path": row.output_path, "shot": json.loads(row.shot_json),
                 "preview_url": f"/api/v1/outputs/{row.output_path}" if row.output_path else None,
@@ -122,6 +139,12 @@ def create_router(runtime):
                 raise HTTPException(404, "Reference image file is missing")
         return assets
 
+    async def recover_memory():
+        response = await runtime.http_client.post(f"{runtime.SUPERVISOR_URL.rstrip('/')}/reclaim/h3", json={}, timeout=45)
+        if response.status_code != 200:
+            raise HTTPException(409, response.json().get("detail", "Memory recovery is unavailable while GPU work is active"))
+        return response.json()
+
     async def capabilities():
         h3 = await get_renderer("h3", runtime).available()
         memory = runtime.get_memory_status()
@@ -134,13 +157,15 @@ def create_router(runtime):
             try:
                 response = await runtime.http_client.get(f"{runtime.SUPERVISOR_URL.rstrip('/')}/workloads/status", timeout=10)
                 response.raise_for_status()
-                scheduler = "h3" in response.json().get("managed_services", {})
+                status = response.json()
+                scheduler = ("h3" in status.get("managed_services", {})
+                             and (status.get("host") is None or bool(status["host"].get("gpu", {}).get("cap_active"))))
             except (httpx.HTTPError, ValueError, TypeError):
                 pass
         h3.update(scheduler_ready=scheduler, available_gb=round(available_gb, 1), minimum_gb=90,
                   render_ready=bool(h3.get("available") and scheduler and available_gb >= 90 and not h3.get("busy")))
         if h3.get("available") and not scheduler:
-            h3["reason"] = "H3 reservation policy is not enabled in the supervisor. Configure the verified private H3 route in both services."
+            h3["reason"] = "H3 safety coordination is unavailable. Wait for the resource scheduler and its private host connection to recover."
         elif h3.get("available") and available_gb < 90:
             h3["reason"] = f"H3 requires 90 GiB available; current {available_gb:.1f} GiB. Existing services will be preserved."
         elif h3.get("busy"):
@@ -153,16 +178,138 @@ def create_router(runtime):
                 status = await host_request(runtime, "claude/status")
                 planner.update(opus_available=status.get("available", False), subscription=status.get("subscription"), reason=status.get("reason"))
                 resources = await host_request(runtime, "resources")
-                if resources.get("blockers") or resources.get("exclusive_claims"):
+                if resources.get("blockers") or resources.get("exclusive_claims") or resources.get("shared_gpu", {}).get("exclusive"):
                     h3["render_ready"] = False
                     h3["reason"] = " ".join(resources.get("blockers", [])) or "A GPU-exclusive generation is already active."
             except (RuntimeError, httpx.HTTPError, OSError):
                 h3.update(render_ready=False, reason="Authenticated host GPU safety/coordination is unavailable.")
+        h3["can_recover_memory"] = bool(h3.get("available") and scheduler and available_gb < 90 and not h3.get("busy") and resources
+                                        and not resources.get("exclusive_claims") and not resources.get("shared_gpu", {}).get("exclusive")
+                                        and not [b for b in resources.get("blockers", []) if not b.startswith("H3 needs")])
         return {"h3": h3, "grok": await get_renderer("grok", runtime).available(), "planner": planner, "resources": resources}
+
+    def segment_update(segment_id, **changes):
+        with runtime.SessionLocal() as db:
+            clip = db.get(MotionSegment, segment_id)
+            for key, value in changes.items():
+                setattr(clip, key, value)
+            db.commit()
+            return clip
+
+    async def run_sequence(job_id, shot):
+        renderer = get_renderer("h3", runtime)
+        count = shot.request.duration // 5
+        row = load(job_id)
+        claim_id = row.claim_id
+        submitted = False
+        terminal = False
+        uncertain = False
+        with runtime.SessionLocal() as db:
+            for i in range(count):
+                segment_id = f"{job_id}-{i}"
+                if not db.get(MotionSegment, segment_id):
+                    db.add(MotionSegment(id=segment_id, job_id=job_id, position=i, status="waiting"))
+            db.commit()
+        async with runtime.gpu_heavy_sem:
+            try:
+                if not claim_id:
+                    await update(job_id, status="preparing", message="Reserving H3 and recovering idle model memory…")
+                    ready = await capabilities()
+                    if ready["h3"].get("can_recover_memory"):
+                        await recover_memory()
+                    prepared = await runtime.prepare_workload("h3", job_id=job_id, claim_id=job_id, workload_id="motion-h3",
+                                                              model_label="MiniMax H3 sequential", frames=124, width=shot.width, height=shot.height)
+                    claim_id = prepared["claim_id"]
+                    await update(job_id, claim_id=claim_id)
+                previous = None
+                outputs = []
+                for i in range(count):
+                    segment_id = f"{job_id}-{i}"
+                    with runtime.SessionLocal() as db:
+                        clip = db.get(MotionSegment, segment_id)
+                    submitted = bool(clip.prompt_id)
+                    terminal = clip.status == "completed"
+                    if terminal and clip.output_path:
+                        previous = runtime.resolve_output_path(clip.output_path)
+                        outputs.append(previous)
+                        continue
+                    bounded = segment_shot(shot, i)
+                    if not submitted:
+                        if i:
+                            await update(job_id, status="preparing", message=f"Clip {i+1}/{count}: recovering 90 GiB before continuing…")
+                            response = await runtime.http_client.post(f"{runtime.SUPERVISOR_URL.rstrip('/')}/recheck/h3", json={"claim_id": claim_id}, timeout=45)
+                            response.raise_for_status()
+                        context = await media.continuation(previous, runtime.resolve_output_path(f"motion_director/{job_id}"), i, shot.width, shot.height) if previous else None
+                        # Persist submission intent before POST: uncertain acks and
+                        # gateway restarts must never submit this clip twice.
+                        if clip.status == "submitting":
+                            uncertain = True
+                            raise SubmissionUncertain("A clip submission acknowledgement is missing. Inspect H3 before retrying.")
+                        segment_update(segment_id, status="submitting")
+                        await update(job_id, status="loading", message=f"Clip {i+1}/{count}: continuing the planned scene…")
+                        uncertain = True
+                        try:
+                            prompt_id = await renderer.submit(bounded, assets_for(shot.request), segment_id, context)
+                        except httpx.HTTPStatusError:
+                            uncertain = False  # definite non-acceptance, not cancellation
+                            raise
+                        uncertain = False
+                        submitted = True
+                        clip = segment_update(segment_id, status="running", prompt_id=prompt_id)
+                        await update(job_id, prompt_id=prompt_id, status="running", message=f"Generating clip {i+1}/{count}…")
+                    absent_since = None
+                    while True:
+                        try:
+                            entry = await renderer.history(clip.prompt_id)
+                            if entry:
+                                status = entry.get("status", {})
+                                if status.get("status_str") == "error" or any(m[0] in {"execution_error", "execution_interrupted"} for m in status.get("messages", [])):
+                                    terminal = True
+                                    segment_update(segment_id, status="failed")
+                                    raise RuntimeError(f"H3 clip {i+1} failed; no new clip or automatic retry was submitted")
+                                if status.get("completed") or status.get("status_str") == "success":
+                                    terminal = True
+                                    await update(job_id, status="finalizing", message=f"Saving clip {i+1}/{count}…")
+                                    source = await renderer.retrieve(entry, segment_id)
+                                    relative = f"motion_director/{job_id}/clip-{i}.mp4"
+                                    previous = runtime.resolve_output_path(relative)
+                                    await media.trim(runtime.resolve_output_path(source), previous, 5, bool(i))
+                                    segment_update(segment_id, status="completed", source_path=source, output_path=relative)
+                                    outputs.append(previous)
+                                    break
+                            queue = await renderer.queue()
+                            present = any(len(item) > 1 and item[1] == clip.prompt_id for item in queue.get("queue_running", []) + queue.get("queue_pending", []))
+                            if not entry and not present:
+                                absent_since = absent_since or asyncio.get_running_loop().time()
+                                if asyncio.get_running_loop().time() - absent_since > 60:
+                                    terminal = True
+                                    raise RuntimeError("Accepted clip disappeared. No automatic resubmission.")
+                            else:
+                                absent_since = None
+                        except httpx.HTTPError:
+                            await update(job_id, message=f"Clip {i+1}/{count}: reconnecting to H3; its reservation is retained…")
+                        await asyncio.sleep(runtime.COMFYUI_POLL_INTERVAL_SEC)
+                await update(job_id, status="finalizing", message="Joining continuous clips and restoring resources…")
+                output = f"motion_director/{job_id}.mp4"
+                await media.assemble(outputs, runtime.resolve_output_path(output), shot.request.duration)
+                history_id = runtime.persist_generation_record(job_id=job_id, service="motion_director", payload=shot.model_dump(mode="json"), output_path=output, model_used="MiniMax H3 sequential")
+                await update(job_id, status="completed", message=f"{shot.request.duration}-second video ready · {count} clips", output_path=output,
+                             history_id=history_id, error=None, completed_at=runtime._now_utc())
+            except SubmissionUncertain as exc:
+                uncertain = True
+                await update(job_id, status="failed", message="Clip submission needs inspection", error=str(exc), completed_at=runtime._now_utc())
+            except Exception as exc:
+                await update(job_id, status="failed", message="Video stopped safely", error=str(exc)[:1200], completed_at=runtime._now_utc())
+            finally:
+                if claim_id and not uncertain and (not submitted or terminal):
+                    await runtime.release_workload("h3", claim_id)
 
     async def run(job_id):
         row = load(job_id)
         shot = ShotSpec.model_validate_json(row.shot_json)
+        if shot.request.duration >= 5:
+            await run_sequence(job_id, shot)
+            return
         renderer = get_renderer("h3", runtime)
         claim_id = row.claim_id
         submitted = bool(row.prompt_id)
@@ -183,7 +330,13 @@ def create_router(runtime):
                                                               frames=shot.frames, width=shot.width, height=shot.height)
                     claim_id = prepared["claim_id"]
                     await update(job_id, status="loading", message="Uploading references to the existing H3 instance…", claim_id=claim_id)
-                    prompt_id = await renderer.submit(shot, assets_for(shot.request), job_id)
+                    uncertain = True
+                    try:
+                        prompt_id = await renderer.submit(shot, assets_for(shot.request), job_id)
+                    except httpx.HTTPStatusError:
+                        uncertain = False
+                        raise
+                    uncertain = False
                     submitted = True
                     row = await update(job_id, status="queued", message="H3 accepted the shot", prompt_id=prompt_id)
                 else:
@@ -248,6 +401,56 @@ def create_router(runtime):
     async def get_capabilities():
         return await capabilities()
 
+    @router.post("/memory/recover")
+    async def recover_idle_memory():
+        return await recover_memory()
+
+    @router.post("/imports/grok")
+    async def import_grok(file: UploadFile = File(...), reference_job_id: str | None = Form(default=None)):
+        # Manual uploads only: never fetch caller URLs, resolve API keys or spend
+        # credits. Original file is preserved separately from the phone preview.
+        job_id = str(uuid.uuid4())
+        original = runtime.resolve_output_path(f"motion_director/imports/{job_id}-original.mp4")
+        original.parent.mkdir(parents=True, exist_ok=True)
+        size = 0
+        try:
+            header = await file.read(32)
+            if b"ftyp" not in header:
+                raise HTTPException(400, "Import an MP4 exported from Grok")
+            with original.open("xb") as target:
+                target.write(header)
+                while chunk := await file.read(1024**2):
+                    size += len(chunk)
+                    if size > 200 * 1024**2:
+                        raise HTTPException(413, "Imported video exceeds 200 MiB")
+                    target.write(chunk)
+            data = await media.probe(original)
+            videos = [s for s in data["streams"] if s.get("codec_type") == "video"]
+            duration = float(data["format"]["duration"])
+            if not videos or not (0 < duration <= 60) or not (0 < videos[0]["width"] <= 4096 and 0 < videos[0]["height"] <= 4096):
+                raise HTTPException(422, "Import a video up to 60 seconds and 4096 pixels per axis")
+            base = ShotSpec.model_validate_json(load(reference_job_id).shot_json) if reference_job_id else None
+            request = ShotRequest(prompt=base.request.prompt if base else "Grok Imagine video imported for comparison",
+                                  reference_ids=base.reference_ids if base else ["manual-import"], engine="grok",
+                                  duration=min((5, 10, 15, 30), key=lambda n: abs(n-duration)),
+                                  orientation="vertical" if videos[0]["height"] > videos[0]["width"] else "horizontal")
+            shot = LocalDirector().plan(request)
+            shot.planner = "manual-import"
+            shot.notes = [f"Manually imported Grok video, {duration:.2f} seconds. No Hermes/xAI generation call was made."]
+            shot.frames = round(duration * 24)
+            output = f"motion_director/{job_id}.mp4"
+            await media.normalize_import(original, runtime.resolve_output_path(output), shot.width, shot.height)
+            history_id = runtime.persist_generation_record(job_id=job_id, service="motion_director", payload=shot.model_dump(mode="json"), output_path=output, model_used="Grok manual import")
+            with runtime.SessionLocal() as db:
+                row = MotionJob(id=job_id, shot_json=shot.model_dump_json(), status="completed", message="Grok video imported · ready to compare",
+                                output_path=output, history_id=history_id, created_at=runtime._now_utc(), completed_at=runtime._now_utc())
+                db.add(row); db.commit()
+            return serialize(row)
+        except (RuntimeError, ValueError, KeyError) as exc:
+            raise HTTPException(422, "The imported MP4 could not be validated or prepared for playback") from exc
+        finally:
+            await file.close()
+
     @router.post("/references")
     async def upload_reference(file: UploadFile = File(...)):
         header = await file.read(32)
@@ -276,13 +479,20 @@ def create_router(runtime):
     @router.post("/jobs", status_code=202)
     async def submit(request: ShotRequest):
         assets_for(request)
-        shot = submitted_plan(request)
+        if request.engine != "h3":
+            raise HTTPException(503, "Hermes Grok OAuth video access is unverified; use manual import/compare. No paid fallback is allowed.")
         ready = await capabilities()
+        if ready["h3"].get("can_recover_memory"):
+            await recover_memory()
+            ready = await capabilities()
         if not ready["h3"]["render_ready"]:
             raise HTTPException(503, ready["h3"].get("reason", "H3 is unavailable"))
         workflow = ready["h3"].get("workflows", {}).get(request.workflow, {})
         if not workflow.get("available"):
             raise HTTPException(503, workflow.get("reason", "Selected H3 workflow is unavailable"))
+        if request.duration > 5 and not ready["h3"].get("continuation_available"):
+            raise HTTPException(503, "Installed H3 continuation nodes are unavailable")
+        shot = submitted_plan(request) if request.plan_id else await planned_shot(request, reuse_cache=False)
         with runtime.SessionLocal() as db:
             active_count = db.query(MotionJob).filter(MotionJob.status.notin_(["completed", "failed"])).count()
             if active_count >= 4:

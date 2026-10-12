@@ -7,6 +7,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 import sys
+import os
 
 import httpx
 import uvicorn
@@ -19,7 +20,7 @@ from motion_director.routes import shutdown_motion_jobs
 class BrowserH3(MockH3):
     def handle(self, request):
         if request.url.path == "/view":
-            return httpx.Response(200, content=Path("/tmp/neonforge-motion-ui-20261012.mp4").read_bytes(), headers={"Content-Type": "video/mp4"})
+            return httpx.Response(200, content=Path(os.getenv("MOTION_BROWSER_FIXTURE", "/tmp/neonforge-motion-ui-long.mp4")).read_bytes(), headers={"Content-Type": "video/mp4"})
         return super().handle(request)
 
 

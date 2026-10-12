@@ -1,23 +1,31 @@
 # NeonForge v0.2 state
 
-Branch: `neonforge-v0.2`, based on tested MisoTTS `994fc92`. Updated 2026-09-30.
+Base: `neonforge-v0.2`, based on tested MisoTTS `994fc92`. Current feature branch:
+`motion-director-v0.1`, unmerged. Updated 2026-10-12.
 
-Motion Director v0.1 is privately activated from `motion-director-v0.1`
-(2026-10-12), without merging. One real local H3 reference-to-video test passed:
-384×672 H.264/AAC, requested 2 seconds (56 padded frames, 2.333 seconds),
-46.19 seconds of H3 execution. The real take is available for preview/download
-at `http://100.103.129.82:3000/motion-director`.
+Motion Director is privately active at `http://100.103.129.82:3000/motion-director`.
+The longest real validated H3 output is **10.031 seconds**, 384×672 H.264/AAC,
+two continued 5-second clips. The phone flow is upload → describe → optional
+drawing → duration/engine → Generate, with automatic professional direction.
+5/10/15/30-second outputs use bounded sequential clips, motion context and a
+boundary-frame guide; original images and editable drawings stay separate.
 
-The owner-approved managed WirePlumber restart recovered ~14.7 GiB; the separate
-login-session audio process was untouched. H3 admitted at 99.4 GiB, observed
-96% GPU utilization/44°C, and retained the 2000 MHz cap and 90 GiB admission
-requirement. The verified idle pipeline worker was paused under the shared lease
-and restored. H3 idle cache was released under a maintenance lease to recover
-~97.6 GiB for the next render. 164 backend regressions and frontend build pass.
-Private HTTP drawing UUID compatibility and shared-lease acquisition were fixed
-during activation. Claude extra usage remains enabled, so Opus stays disabled;
-the local planner works. First-frame weights, Hermes/Grok and Blender remain
-unactivated. See [activation evidence](docs/motion-director-activation.md).
+Retained H3 model cache caused post-render availability to fall to ~58 GiB.
+Verified-idle cleanup now restores ~97.3 GiB automatically before another clip
+and after generation. Every clip still needs 90 GiB available; the existing
+2000 MHz cap remains. The real test reached 96% GPU/51°C and restored the idle
+pipeline worker. Both audio processes were preserved in this continuation.
+The private socket directory now survives adapter restarts without stale mounts.
+
+Claude CLI and VS Code share the existing Pro login. Extra usage is now verified
+off; one real Opus scene plan passed after fixing the CLI streaming format.
+Automatic planning uses Opus once when available and local direction otherwise.
+Hermes's existing Pinokio xAI video plugin was found, but its launcher is offline
+and no Grok OAuth is saved. Grok generation stays unavailable; manual MP4 import/
+compare works. 176 backend regressions, frontend builds and phone/browser checks
+pass. No paid API calls, models, subscriptions or profiles were added. First-frame
+weights and Blender remain unactivated. See [continuation evidence and actions](docs/motion-director-continuation.md)
+and [initial activation evidence](docs/motion-director-activation.md).
 
 Primary surfaces: Voiceover, Video, Character, Avatar, Lip Sync, System Info.
 Voiceover UI is preserved. Video, Character and Lip Sync have focused input workspaces, shared large results and compact settings. The three duplicate creator routes are deleted.

@@ -534,6 +534,29 @@ class ResourceManager:
             self._event("released", service, claim_id=claim_id, found=released)
             return {"service": service, "claim_id": claim_id, "released": released}
 
+    async def next_h3_segment(self, claim_id: str):
+        async with self._lock:
+            claim = self.claims.get(claim_id)
+            if not claim or claim.service != "h3":
+                raise RuntimeError("A matching H3-exclusive reservation is required")
+            response = await self._http.get(self.policies["h3"].url.rstrip("/") + "/queue")
+            response.raise_for_status()
+            queue = response.json()
+            if queue.get("queue_running") or queue.get("queue_pending"):
+                raise RuntimeError("H3 is active; no models will be unloaded or new clip submitted")
+            if self.memory_reader()["available_gb"] < 90 and self._host:
+                await self.host_request("h3/free-idle", {"claim_id": claim_id, "service": "h3", "minimum_gb": 90})
+            available = self.memory_reader()["available_gb"]
+            if available < 90:
+                raise RuntimeError(f"Next H3 clip requires 90 GiB; only {available:.1f} GiB is available")
+            return {"ready": True, "minimum_available_gb": 90, "memory": self.memory_reader()}
+
+    async def reclaim_idle_h3(self):
+        async with self._lock:
+            if self.claims or not self._host:
+                raise RuntimeError("Idle cleanup requires verified host coordination and no active GPU claims")
+            return await self.host_request("h3/reclaim", {})
+
     async def idle_sweep(self) -> list[str]:
         stopped: list[str] = []
         async with self._lock:

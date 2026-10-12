@@ -37,11 +37,12 @@ class ShotRequest(StrictModel):
     annotations: list[Annotation] = Field(default_factory=list, max_length=64)
     mode: Literal["auto", "manual"] = "auto"
     preset: Literal["professional", "intimate", "reveal", "action"] = "professional"
-    duration: Literal[2, 3, 5] = 2
+    duration: Literal[2, 3, 5, 10, 15, 30] = 2
     orientation: Literal["vertical", "horizontal"] = "vertical"
     workflow: Literal["reference", "image"] = "reference"
     seed: int = Field(default=42, ge=0, le=2**53 - 1)
-    director: Literal["local", "opus"] = "local"
+    director: Literal["local", "opus", "auto"] = "local"
+    engine: Literal["h3", "grok"] = "h3"
     plan_id: str | None = Field(default=None, max_length=36)
 
     @model_validator(mode="after")
@@ -58,6 +59,8 @@ class ShotRequest(StrictModel):
             raise ValueError("Annotation IDs must be unique")
         if self.workflow == "image" and len(self.reference_ids) != 1:
             raise ValueError("Image-to-video requires exactly one first-frame image")
+        if self.workflow == "image" and self.duration > 5:
+            raise ValueError("Long videos use the installed reference-to-video continuation graph")
         return self
 
 
@@ -133,6 +136,24 @@ class ShotSpec(StrictModel):
     notes: list[str]
 
 
+def segment_shot(scene: ShotSpec, index: int) -> ShotSpec:
+    """One bounded clip from a single already-validated scene plan; no LLM calls."""
+    duration = min(scene.request.duration, 5)
+    count = math.ceil(scene.request.duration / duration)
+    if not 0 <= index < count:
+        raise ValueError("Invalid segment index")
+    start, end = index * duration, (index + 1) * duration
+    beats = [Beat(start=max(b.start, start) - start, end=min(b.end, end) - start, action=b.action)
+             for b in scene.timing if b.start < end and b.end > start]
+    refs = " ".join(f"<Picture {i+1}> preserves reference identity {r}." for i, r in enumerate(scene.reference_ids))
+    context = ("<Video 1> is the preceding shot's final motion. Continue its direction, lighting, pose and geography. "
+               "The guide image is the exact boundary frame. Start there and continue naturally; no reset or cut." if index else "Establish the scene without rushing.")
+    timeline = " ".join(f"{b.start:.2f}–{b.end:.2f}s: {b.action}" for b in beats)
+    prompt = f"{refs} {scene.request.prompt}\nClip {index+1}/{count}, scene time {start}–{end}s. {context}\nCamera: {scene.camera.movement}. {scene.composition}\n{timeline}\n{' '.join(scene.subject_constraints)}\n" + " ".join(describe_annotation(a, scene.reference_ids.index(a.reference_id)+1) for a in scene.camera.paths + scene.staging)
+    return scene.model_copy(update={"request": scene.request.model_copy(update={"duration": duration, "seed": (scene.request.seed + index) % (2**53), "plan_id": None}),
+                                   "frames": 5 + 17 * math.ceil((duration * 24 - 5) / 17), "timing": beats, "renderer_prompt": prompt})
+
+
 class ShotPlanner(Protocol):
     def plan(self, request: ShotRequest) -> ShotSpec: ...
 
@@ -201,10 +222,10 @@ class LocalDirector:
         return ShotSpec(request=request, reference_ids=request.reference_ids,
                         camera=Camera(movement=movement, targets=[a.label or a.id for a in staging if a.kind == "subject"] or ["main subject"], paths=paths if request.mode == "manual" else []),
                         timing=timing, composition=composition, subject_constraints=constraints, staging=staging,
-                        width=width, height=height, frames=5 + 17 * math.ceil((duration * 24 - 5) / 17),
+                        width=width, height=height, frames=(duration * 24 if duration > 5 else 5 + 17 * math.ceil((duration * 24 - 5) / 17)),
                         renderer_prompt=renderer_prompt,
                         notes=["Drawings guide the prompt; exact trajectories are not guaranteed. Control-video conditioning awaits a validated, size-matched control input.",
-                               "Duration rounds up to H3's 17k+5 frame grid."])
+                               "5–30 seconds use sequential bounded clips with reference-video context and a boundary-frame guide. Final output is trimmed to the requested duration." if duration >= 5 else "Duration rounds up to H3's 17k+5 frame grid."])
 
 
 class HermesDirector:

@@ -82,6 +82,21 @@ def test_api_environment_disables_opus_before_any_execution(monkeypatch):
     assert not status["available"] and "API/provider" in status["reason"]
 
 
+def test_claude_stream_parser_keeps_only_terminal_structured_output(monkeypatch):
+    class Process:
+        returncode = 0
+        async def communicate(self, data):
+            return (b'{"type":"system","private_metadata":"not-returned"}\n'
+                    b'{"type":"assistant","message":{"content":[]}}\n'
+                    b'{"type":"result","structured_output":{"camera_movement":"slow push"}}\n', b'private stderr not returned')
+    async def spawn(*args, **kwargs):
+        assert "ANTHROPIC_API_KEY" not in kwargs["env"]
+        return Process()
+    monkeypatch.setattr(claude_host.asyncio, "create_subprocess_exec", spawn)
+    result = asyncio.run(claude_host.run_cli(["-p"]))
+    assert result == {"type": "result", "structured_output": {"camera_movement": "slow push"}}
+
+
 def test_director_cannot_change_reference_or_hardware_bounds():
     base = LocalDirector().plan(ShotRequest(prompt="A portrait", reference_ids=["r"], director="opus"))
     decisions = DirectorDecisions(camera_movement="A motivated gentle push", targets=["main subject"], composition="Eye-level portrait",
@@ -116,7 +131,10 @@ def test_opus_plans_once_then_render_reuses_the_persisted_plan(studio, monkeypat
     assert len(calls) == 1
     edited = {**one["request"], "prompt": "A different portrait"}
     assert client.post("/api/v1/motion-director/jobs", json=edited).status_code == 409
-    assert client.post("/api/v1/motion-director/jobs", json=request).status_code == 409
+    generated = client.post("/api/v1/motion-director/jobs", json=request)
+    assert generated.status_code == 202
+    assert await_job(client, generated.json()["job_id"])["status"] == "completed"
+    assert len(calls) == 2  # Generate automatically plans this new generation once.
 
 
 def test_invalid_opus_output_uses_local_fallback_once(studio, monkeypatch):
@@ -168,6 +186,7 @@ def test_host_h3_floor_cannot_be_lowered_and_failed_admission_restores_lease(tmp
 
 def test_h3_reservation_is_not_released_until_engine_is_idle(tmp_path, monkeypatch):
     monkeypatch.setattr(host_control, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(host_control, "memory", lambda: {"available_gb": 95})
     coordinator = host_control.Coordinator()
     coordinator.claims = {"job": {"service": "h3", "at": 1}}
     coordinator.token = "test-lease"

@@ -9,6 +9,7 @@ Environment=PATH=@USER_BIN@:/usr/local/bin:/usr/bin:/bin
 Environment=NEONFORGE_ALLOW_IDLE_EXTERNAL_PAUSE=false
 RuntimeDirectory=neonforge-motion
 RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=restart
 UMask=0077
 NoNewPrivileges=yes
 Restart=on-failure

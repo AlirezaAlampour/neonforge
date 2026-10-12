@@ -336,6 +336,22 @@ async def workloads_status():
     return await resource_manager.status()
 
 
+@app.post("/recheck/h3")
+async def recheck_h3(request: ReleaseRequest):
+    try:
+        return await resource_manager.next_h3_segment(request.claim_id)
+    except (RuntimeError, httpx.HTTPError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/reclaim/h3")
+async def reclaim_h3():
+    try:
+        return await resource_manager.reclaim_idle_h3()
+    except (RuntimeError, httpx.HTTPError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
 @app.post("/start/{service}")
 async def start(service: str, wait_ready: bool = True):
     """Compatibility endpoint; prepare then hand the service to idle cleanup."""
