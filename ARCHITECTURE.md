@@ -88,3 +88,12 @@ other model admissions by inspecting its queue. H3 never becomes a Compose
 lifecycle target. Hermes/Grok are interface boundaries only; annotations guide
 the prompt until control-video inputs are validated. See [Motion Director's
 activation notes](docs/motion-director-v0.1.md).
+
+The continuation adds an opt-in authenticated Unix-socket host adapter. Separate
+gateway/supervisor HMAC capabilities expose only planning/resource operations;
+provider credentials stay on the host. The installed socket proxy reaches H3
+through bridge-only TCP 18189. Managed GPU claims coordinate with the existing
+Forge3D lease, preserving/restoring approved idle workloads. Optional Claude
+Code Opus checks subscription quota and refuses paid overflow; validated plans
+are persisted and never regenerated during inference. Production activation
+is gated on real acceptance; see [current preparation and blockers](docs/motion-director-activation.md).

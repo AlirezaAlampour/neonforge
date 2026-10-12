@@ -41,6 +41,8 @@ class ShotRequest(StrictModel):
     orientation: Literal["vertical", "horizontal"] = "vertical"
     workflow: Literal["reference", "image"] = "reference"
     seed: int = Field(default=42, ge=0, le=2**53 - 1)
+    director: Literal["local", "opus"] = "local"
+    plan_id: str | None = Field(default=None, max_length=36)
 
     @model_validator(mode="after")
     def check_references(self):
@@ -60,8 +62,8 @@ class ShotRequest(StrictModel):
 
 
 class Camera(StrictModel):
-    movement: str
-    targets: list[str]
+    movement: str = Field(max_length=800)
+    targets: list[str] = Field(max_length=8)
     paths: list[Annotation]
     easing: str = "gentle ease-in, steady middle, gentle ease-out"
 
@@ -69,7 +71,47 @@ class Camera(StrictModel):
 class Beat(StrictModel):
     start: float = Field(ge=0)
     end: float = Field(gt=0)
-    action: str
+    action: str = Field(max_length=1200)
+
+    @model_validator(mode="after")
+    def valid_interval(self):
+        if self.end <= self.start:
+            raise ValueError("A beat must end after it starts")
+        return self
+
+
+class DirectorDecisions(StrictModel):
+    camera_movement: str = Field(min_length=1, max_length=800)
+    targets: list[str] = Field(min_length=1, max_length=8)
+    composition: str = Field(min_length=1, max_length=1200)
+    subject_constraints: list[str] = Field(min_length=1, max_length=12)
+    timing: list[Beat] = Field(min_length=1, max_length=6)
+
+
+def apply_director_decisions(base: "ShotSpec", decisions: DirectorDecisions) -> "ShotSpec":
+    beats = decisions.timing
+    if abs(beats[0].start) > .01 or abs(beats[-1].end - base.request.duration) > .01:
+        raise ValueError("Director timing must cover the requested duration")
+    if any(abs(a.end - b.start) > .01 for a, b in zip(beats, beats[1:])):
+        raise ValueError("Director timing must be contiguous")
+    if any(len(s) > 500 for s in decisions.subject_constraints + decisions.targets):
+        raise ValueError("Director text exceeds safe bounds")
+    camera = base.camera.model_copy(update={"movement": decisions.camera_movement, "targets": decisions.targets})
+    constraints = list(dict.fromkeys(base.subject_constraints + decisions.subject_constraints))
+    # Keep references, editable drawings, staging and resource bounds server-owned.
+    guidance = " ".join(describe_annotation(a, base.reference_ids.index(a.reference_id) + 1)
+                        for a in base.camera.paths + base.staging)
+    reference_text = " ".join(f"<Picture {i + 1}> is reference {r}." for i, r in enumerate(base.reference_ids))
+    if base.request.workflow == "image":
+        reference_text = "Animate the supplied first frame."
+        guidance = guidance.replace("<Picture 1>", "the first frame")
+    timeline = " ".join(f"{b.start:.1f}–{b.end:.1f}s: {b.action}" for b in beats)
+    prompt = f"{reference_text} {base.request.prompt}\nCamera: {camera.movement}. {decisions.composition}\n{timeline}\n{' '.join(constraints)}\n{guidance}"
+    if len(prompt) > 24000:
+        raise ValueError("Compiled director prompt is too large")
+    return base.model_copy(update={"planner": "claude-code-opus", "camera": camera, "timing": beats,
+                                   "composition": decisions.composition, "subject_constraints": constraints,
+                                   "renderer_prompt": prompt})
 
 
 class ShotSpec(StrictModel):

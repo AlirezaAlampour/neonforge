@@ -11,7 +11,7 @@ import { motionApi, downloadMotionJSON, type Annotation, type Capabilities, type
 type Reference = { id: string; name: string }
 type Draft = Omit<ShotRequest, 'reference_ids'> & { references: Reference[] }
 const KEY = 'neonforge-motion-director-v0.1'
-const initial: Draft = { references: [], annotations: [], prompt: '', mode: 'auto', preset: 'professional', duration: 2, orientation: 'vertical', workflow: 'reference', seed: 42 }
+const initial: Draft = { references: [], annotations: [], prompt: '', mode: 'auto', preset: 'professional', duration: 2, orientation: 'vertical', workflow: 'reference', seed: 42, director: 'local' }
 const tools: Tool[] = ['arrow', 'path', 'orbit', 'waypoint', 'subject', 'entry', 'exit']
 const selectClass = 'min-h-11 w-full rounded-md border border-white/15 bg-card px-3 text-sm'
 const terminal = (job: MotionJob) => ['completed', 'failed'].includes(job.status)
@@ -97,6 +97,7 @@ export default function MotionDirectorPage() {
   const comparison = completed.filter(j => compare.includes(j.job_id))
   return <div className="space-y-6 pb-12">
     <div className="flex items-start gap-3"><Clapperboard className="mt-1 h-7 w-7 shrink-0 text-sky-300" /><div><h1 className="text-2xl font-semibold">Motion Director <span className="text-sm text-muted-foreground">v0.1</span></h1><p className="mt-1 text-sm text-muted-foreground">Reference → direction → cinematic shot. Local MiniMax H3.</p></div></div>
+    {capabilities?.resources && <div className="rounded-lg border border-white/10 p-3 text-sm"><p>GPU-exclusive execution · {capabilities.resources.memory?.available_gb} GiB available · H3 needs 90 GiB</p><p className="mt-1 text-xs text-muted-foreground">GPU {capabilities.resources.gpu.utilization_pct ?? '—'}% · {capabilities.resources.gpu.temperature_c ?? '—'}°C · {capabilities.resources.gpu.cap_active ? '2000 MHz safety cap active' : 'Safety cap unverified'}</p></div>}
     <section className="space-y-4 rounded-xl border border-white/10 bg-card/40 p-3 sm:p-5">
       <h2 className="font-semibold">1. References & staging</h2>
       <label className="flex min-h-14 cursor-pointer items-center justify-center gap-2 rounded-lg border border-dashed border-sky-300/40 p-3 text-sm">
@@ -123,16 +124,19 @@ export default function MotionDirectorPage() {
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <label className="grid gap-1 text-sm">Director<select aria-label="Director" className={selectClass} value={draft.mode} onChange={e => patch({ mode: e.target.value as Draft['mode'] })}><option value="auto">Auto Director</option><option value="manual">Manual Director</option></select></label>
         <label className="grid gap-1 text-sm">Cinematic preset<select aria-label="Cinematic preset" className={selectClass} value={draft.preset} onChange={e => patch({ preset: e.target.value as Draft['preset'] })}><option value="professional">Professional Cinematic Director</option><option value="intimate">Intimate portrait</option><option value="reveal">Environmental reveal</option><option value="action">Readable action</option></select></label>
+        <label className="grid gap-1 text-sm">Planning engine<select aria-label="Planning engine" className={selectClass} value={draft.director || 'local'} onChange={e => patch({ director: e.target.value as Draft['director'] })}><option value="local">Local cinematic director</option><option value="opus" disabled={!capabilities?.planner.opus_available}>Claude Code Opus · subscription {capabilities?.planner.opus_available ? '' : '(unavailable)'}</option></select></label>
         <label className="grid gap-1 text-sm">Duration<select aria-label="Duration" className={selectClass} value={draft.duration} onChange={e => patch({ duration: Number(e.target.value) as Draft['duration'] })}><option value={2}>2 seconds · short draft</option><option value={3}>3 seconds</option><option value={5}>5 seconds</option></select></label>
         <label className="grid gap-1 text-sm">Output<select aria-label="Output" className={selectClass} value={draft.orientation} onChange={e => patch({ orientation: e.target.value as Draft['orientation'] })}><option value="vertical">Vertical · phone</option><option value="horizontal">Horizontal · landscape</option></select></label>
         <label className="grid gap-1 text-sm">Reference use<select aria-label="Reference use" className={selectClass} value={draft.workflow} onChange={e => patch({ workflow: e.target.value as Draft['workflow'] })}><option value="reference">Reference-to-video · identity & style</option><option value="image" disabled={draft.references.length !== 1 || !capabilities?.h3.workflows?.image?.available}>Image-to-video · first frame {capabilities?.h3.workflows?.image?.available ? '' : '(weights unavailable)'}</option></select></label>
         <label className="grid gap-1 text-sm">Renderer<select aria-label="Renderer" className={selectClass} value="h3" onChange={() => {}}><option value="h3">MiniMax H3 · local</option><option value="grok" disabled>Grok · access unverified</option></select></label>
       </div>
-      <details className="text-sm"><summary className="min-h-11 cursor-pointer py-3">Advanced: reproducible seed & planner</summary><label className="grid gap-1">Seed<Input type="number" min={0} max={9007199254740991} value={draft.seed} onChange={e => patch({ seed: Number(e.target.value) })} /></label><p className="mt-2 text-xs text-muted-foreground">{capabilities?.planner.reason || 'Planning uses the local cinematic preset. Hermes is awaiting launcher verification.'}</p></details>
+      <p className="text-xs text-muted-foreground">{capabilities?.planner.reason || 'The local planner remains available.'} Opus plans are saved once and reused during rendering.</p>
+      <details className="text-sm"><summary className="min-h-11 cursor-pointer py-3">Advanced: reproducible seed</summary><label className="grid gap-1">Seed<Input type="number" min={0} max={9007199254740991} value={draft.seed} onChange={e => patch({ seed: Number(e.target.value) })} /></label></details>
       <Button className="min-h-11 w-full sm:w-auto" disabled={Boolean(busy) || !draft.prompt.trim() || !draft.references.length} onClick={() => void planShot()}>{busy === 'plan' ? 'Planning…' : 'Plan shot'}</Button>
     </section>
     {plan && <section className="space-y-3 rounded-xl border border-sky-300/20 bg-sky-300/5 p-4">
       <h2 className="font-semibold">3. Review & generate</h2><p className="text-sm">{plan.camera.movement}</p><p className="text-xs text-muted-foreground">{plan.composition}</p>
+      <p className="text-xs text-sky-200">Planned by {plan.planner === 'claude-code-opus' ? 'Claude Code Opus' : 'Local Cinematic Director'}</p>
       <ol className="space-y-2 text-sm">{plan.timing.map((beat, i) => <li key={i}><span className="text-sky-300">{beat.start.toFixed(1)}–{beat.end.toFixed(1)}s</span> · {beat.action}</li>)}</ol>
       <p className="text-xs text-muted-foreground">{plan.width} × {plan.height} · {plan.frames} frames at {plan.fps} fps · {(plan.frames / plan.fps).toFixed(2)}s rendered · {plan.request.workflow === 'image' ? 8 : 4}-step H3 draft</p>
       {plan.notes.map(note => <p key={note} className="text-xs text-amber-200/80">{note}</p>)}

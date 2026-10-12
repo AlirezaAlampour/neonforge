@@ -327,6 +327,8 @@ async def release(service: str, request: ReleaseRequest):
         return await resource_manager.release(service, request.claim_id)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
 
 
 @app.get("/workloads/status")

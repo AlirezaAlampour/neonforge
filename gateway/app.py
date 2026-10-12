@@ -68,6 +68,8 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 SUPERVISOR_URL = os.getenv("SUPERVISOR_URL", "http://supervisor:8000")
 COMFYUI_URL = os.getenv("COMFYUI_URL", "http://comfyui:8188")
 H3_COMFYUI_URL = os.getenv("H3_COMFYUI_URL", "").strip()
+HOST_CONTROL_SOCKET = os.getenv("NEONFORGE_HOST_SOCKET", "").strip()
+HOST_CONTROL_KEY = os.getenv("NEONFORGE_HOST_KEY", "").strip()
 
 OUTPUTS_ROOT = Path(os.getenv("OUTPUTS_ROOT", "/outputs"))
 HISTORY_DB_PATH = Path(os.getenv("HISTORY_DB_PATH", str(OUTPUTS_ROOT / "neonforge_history.sqlite3")))

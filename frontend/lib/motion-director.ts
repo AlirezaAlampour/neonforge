@@ -1,5 +1,5 @@
 import { request } from './api'
-import type { ComfyUIAsset } from './types'
+import type { ComfyUIAsset, HostResourceStatus } from './types'
 
 export type Point = { x: number; y: number }
 export type Tool = 'arrow' | 'path' | 'orbit' | 'waypoint' | 'subject' | 'entry' | 'exit'
@@ -8,9 +8,11 @@ export type ShotRequest = {
   prompt: string; reference_ids: string[]; annotations: Annotation[]
   mode: 'auto' | 'manual'; preset: 'professional' | 'intimate' | 'reveal' | 'action'
   duration: 2 | 3 | 5; orientation: 'vertical' | 'horizontal'; workflow: 'reference' | 'image'; seed: number
+  director?: 'local' | 'opus'; plan_id?: string | null
 }
 export type ShotSpec = {
   version: '0.1'; request: ShotRequest; reference_ids: string[]
+  planner?: string
   camera: { movement: string; targets: string[]; paths: Annotation[]; easing: string }
   timing: { start: number; end: number; action: string }[]
   composition: string; subject_constraints: string[]; width: number; height: number; frames: number; fps: number
@@ -23,7 +25,8 @@ export type MotionJob = {
 export type Capabilities = {
   h3: { available: boolean; render_ready: boolean; reason?: string; busy?: boolean; available_gb: number; minimum_gb: number; workflows?: Record<string, { available: boolean; reason?: string }> }
   grok: { available: boolean; reason: string }
-  planner: { active: string; hermes_available: boolean; reason: string }
+  planner: { active: string; opus_available?: boolean; subscription?: string; reason: string }
+  resources?: HostResourceStatus | null
 }
 export const motionApi = {
   capabilities: () => request<Capabilities>('/api/v1/motion-director/capabilities'),

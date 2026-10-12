@@ -1,0 +1,32 @@
+# Opt-in activation overlay. Mounts only a private socket and one role key per
+# service. HMAC scopes and anti-replay checks are enforced by the host adapter.
+# Claude/provider credentials, profiles and host command execution are excluded.
+services:
+  supervisor:
+    environment:
+      H3_COMFYUI_URL: http://172.18.0.1:18189
+      NEONFORGE_HOST_SOCKET: /run/neonforge-motion/control.sock
+      NEONFORGE_HOST_KEY: /run/neonforge-supervisor.key
+    volumes:
+      - type: bind
+        source: /run/user/1000/neonforge-motion
+        target: /run/neonforge-motion
+        read_only: true
+      - type: bind
+        source: /home/xxfactionsxx/neonforge/.motion-runtime/supervisor.key
+        target: /run/neonforge-supervisor.key
+        read_only: true
+  gateway:
+    environment:
+      H3_COMFYUI_URL: http://172.18.0.1:18189
+      NEONFORGE_HOST_SOCKET: /run/neonforge-motion/control.sock
+      NEONFORGE_HOST_KEY: /run/neonforge-gateway.key
+    volumes:
+      - type: bind
+        source: /run/user/1000/neonforge-motion
+        target: /run/neonforge-motion
+        read_only: true
+      - type: bind
+        source: /home/xxfactionsxx/neonforge/.motion-runtime/gateway.key
+        target: /run/neonforge-gateway.key
+        read_only: true

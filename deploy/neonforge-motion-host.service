@@ -1,0 +1,18 @@
+[Unit]
+Description=NeonForge private DGX resource and Claude Code adapter
+After=network-online.target
+
+[Service]
+WorkingDirectory=@PROJECT_DIR@
+ExecStart=@UV_BIN@ run --locked --no-sync python -m uvicorn gateway.motion_director.host_control:app --uds %t/neonforge-motion/control.sock --log-level warning
+Environment=PATH=@USER_BIN@:/usr/local/bin:/usr/bin:/bin
+Environment=NEONFORGE_ALLOW_IDLE_EXTERNAL_PAUSE=false
+RuntimeDirectory=neonforge-motion
+RuntimeDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

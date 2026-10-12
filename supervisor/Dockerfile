@@ -29,6 +29,7 @@ ENV UV_PROJECT_ENVIRONMENT=/usr/local
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY supervisor/app.py supervisor/resource_manager.py ./
+COPY shared ./shared
 
 EXPOSE 8000
 

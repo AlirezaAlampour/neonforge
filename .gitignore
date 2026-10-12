@@ -57,3 +57,5 @@ docs/images/*.tmp.png
 # Temporary files
 *.tmp
 *.bak
+/.motion-runtime/
+/.motion-acceptance/

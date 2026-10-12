@@ -8,6 +8,14 @@ blockers](docs/motion-director-v0.1.md): private routing to the existing host H3
 90 GiB render safety, missing first-frame weights, and unverified Hermes launcher/
 Grok OAuth. Its reference-to-video slice is verified with mocked inference.
 
+Continuation: private H3 networking now works through Docker-bridge port 18189.
+Authenticated host resource/Claude adapters and immutable planning cache are
+prepared; 162 regressions and phone/mock/image checks pass. Production remains
+unchanged pending audio-memory recovery and idle cross-project coordination
+approval, 90 GiB admission and real H3 acceptance. Claude Pro is verified but
+paid extra usage is enabled, so Opus execution is refused. See
+[activation preparation](docs/motion-director-activation.md).
+
 Primary surfaces: Voiceover, Video, Character, Avatar, Lip Sync, System Info.
 Voiceover UI is preserved. Video, Character and Lip Sync have focused input workspaces, shared large results and compact settings. The three duplicate creator routes are deleted.
 

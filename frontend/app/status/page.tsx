@@ -158,6 +158,15 @@ export default function StatusPage() {
       </div>
 
       {workloads && (
+        <>
+        {workloads.host && <Card><CardHeader><CardTitle className="text-base">DGX hardware & GPU coordination</CardTitle></CardHeader><CardContent className="space-y-3 text-sm">
+          <p>GPU {workloads.host.gpu.utilization_pct ?? '—'}% · {workloads.host.gpu.temperature_c ?? '—'}°C · {workloads.host.gpu.power_w ?? '—'} W · {workloads.host.gpu.clock_mhz ?? '—'} MHz</p>
+          <p>{workloads.host.gpu.cap_active ? '2000 MHz safety cap active' : 'GPU safety cap is unverified'} · {workloads.host.shared_gpu?.exclusive ? 'Exclusive lease held' : 'GPU lease idle'}</p>
+          <p>Available UMA {workloads.host.memory?.available_gb} GiB · swap {workloads.host.memory?.swap_used_gb}/{workloads.host.memory?.swap_total_gb} GiB · H3 floor 90 GiB</p>
+          <p>CPU {workloads.host.cpu?.cores} cores · load {workloads.host.cpu?.load.map(n => n.toFixed(1)).join(' / ')}</p>
+          {workloads.host.blockers.map(reason => <p key={reason} className="text-amber-200">{reason}</p>)}
+          <div><h3 className="font-medium">Largest resident processes</h3>{workloads.host.consumers?.map(process => <p key={process.pid} className="text-xs text-muted-foreground">{process.name} · {process.resident_gb} GiB · PID {process.pid}</p>)}</div>
+        </CardContent></Card>}
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
@@ -171,11 +180,11 @@ export default function StatusPage() {
                   <div className="flex items-center justify-between gap-2">
                     <p className="text-sm font-medium">{name}</p>
                     <Badge variant={policy.claimed ? 'warning' : policy.running ? 'success' : 'secondary'}>
-                      {policy.claimed ? 'In use' : policy.running ? 'Idle / ready' : 'Stopped'}
+                      {policy.claimed ? 'In use' : policy.running ? policy.lifecycle_managed === false ? 'External / ready' : 'Idle / ready' : 'Stopped'}
                     </Badge>
                   </div>
                   <p className="mt-2 text-xs text-muted-foreground">
-                    {policy.workload_class} · {policy.min_available_gb} GiB base minimum · idle unload {Math.round(policy.idle_timeout_sec / 60)}m
+                    {policy.workload_class} · {policy.min_available_gb} GiB base minimum · {policy.lifecycle_managed === false ? 'Existing host process; no start/stop authority' : `idle unload ${Math.round(policy.idle_timeout_sec / 60)}m`}
                   </p>
                 </div>
               ))}
@@ -197,6 +206,7 @@ export default function StatusPage() {
             </details>
           </CardContent>
         </Card>
+        </>
       )}
     </div>
   )

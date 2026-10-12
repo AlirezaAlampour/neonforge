@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import hashlib
 import uuid
 from datetime import datetime
 
@@ -14,8 +15,10 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from .planner import LocalDirector, ShotRequest, ShotSpec
 from .renderers import SubmissionUncertain, get_renderer
+from .host_client import host_request
 
 tasks: dict[str, asyncio.Task] = {}
+planning_lock = asyncio.Lock()
 
 
 def create_router(runtime):
@@ -36,6 +39,53 @@ def create_router(runtime):
         completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     runtime.MotionJob = MotionJob
+
+    class MotionPlan(runtime.Base):
+        __tablename__ = "motion_director_plans"
+        id: Mapped[str] = mapped_column(String(36), primary_key=True)
+        request_hash: Mapped[str] = mapped_column(String(64), index=True)
+        shot_json: Mapped[str] = mapped_column(Text)
+        created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    runtime.MotionPlan = MotionPlan
+
+    def fingerprint(request):
+        return hashlib.sha256(json.dumps(request.model_dump(exclude={"plan_id"}), sort_keys=True).encode()).hexdigest()
+
+    async def planned_shot(request):
+        async with planning_lock:
+            key = fingerprint(request)
+            with runtime.SessionLocal() as db:
+                saved = db.execute(select(MotionPlan).where(MotionPlan.request_hash == key).order_by(desc(MotionPlan.created_at))).scalars().first()
+            if saved:
+                return ShotSpec.model_validate_json(saved.shot_json)
+            shot = LocalDirector().plan(request)
+            if request.director == "opus":
+                try:
+                    data = await host_request(runtime, "claude/plan", {"shot": request.model_dump(), "references": [asset.relative_path for asset in assets_for(request)]})
+                    candidate = ShotSpec.model_validate(data)
+                    if fingerprint(candidate.request) != key or candidate.reference_ids != shot.reference_ids or (candidate.width, candidate.height, candidate.frames) != (shot.width, shot.height, shot.frames):
+                        raise ValueError("Director changed protected request or hardware bounds")
+                    shot = candidate
+                except (RuntimeError, httpx.HTTPError, ValueError, OSError):
+                    shot.notes.append("Opus unavailable or invalid. This shot uses the deterministic cinematic fallback; no retry occurs during rendering.")
+            plan_id = str(uuid.uuid4())
+            shot.request = request.model_copy(update={"plan_id": plan_id})
+            with runtime.SessionLocal() as db:
+                db.add(MotionPlan(id=plan_id, request_hash=key, shot_json=shot.model_dump_json(), created_at=runtime._now_utc()))
+                db.commit()
+            return shot
+
+    def submitted_plan(request):
+        if request.plan_id:
+            with runtime.SessionLocal() as db:
+                saved = db.get(MotionPlan, request.plan_id)
+            if not saved or saved.request_hash != fingerprint(request):
+                raise HTTPException(409, "The shot changed or its plan is missing. Plan it again before rendering.")
+            return ShotSpec.model_validate_json(saved.shot_json)
+        if request.director == "opus":
+            raise HTTPException(409, "Plan an Opus-directed shot first; rendering never calls the planner.")
+        return LocalDirector().plan(request)
 
     def load(job_id):
         with runtime.SessionLocal() as db:
@@ -95,9 +145,20 @@ def create_router(runtime):
             h3["reason"] = f"H3 requires 90 GiB available; current {available_gb:.1f} GiB. Existing services will be preserved."
         elif h3.get("busy"):
             h3["reason"] = "H3 has an existing workload. Wait for it to finish."
-        return {"h3": h3, "grok": await get_renderer("grok", runtime).available(),
-                "planner": {"active": "local-director", "hermes_available": False,
-                            "reason": "Existing Hermes state preserved; launcher and no-cost planning capabilities are unverified."}}
+        planner = {"active": "local-director", "opus_available": False,
+                   "reason": "The private host Claude Code adapter is unavailable. Deterministic planning remains available."}
+        resources = None
+        if getattr(runtime, "HOST_CONTROL_SOCKET", ""):
+            try:
+                status = await host_request(runtime, "claude/status")
+                planner.update(opus_available=status.get("available", False), subscription=status.get("subscription"), reason=status.get("reason"))
+                resources = await host_request(runtime, "resources")
+                if resources.get("blockers") or resources.get("exclusive_claims"):
+                    h3["render_ready"] = False
+                    h3["reason"] = " ".join(resources.get("blockers", [])) or "A GPU-exclusive generation is already active."
+            except (RuntimeError, httpx.HTTPError, OSError):
+                h3.update(render_ready=False, reason="Authenticated host GPU safety/coordination is unavailable.")
+        return {"h3": h3, "grok": await get_renderer("grok", runtime).available(), "planner": planner, "resources": resources}
 
     async def run(job_id):
         row = load(job_id)
@@ -210,12 +271,12 @@ def create_router(runtime):
     @router.post("/plan")
     async def plan(request: ShotRequest):
         assets_for(request)
-        return LocalDirector().plan(request)
+        return await planned_shot(request)
 
     @router.post("/jobs", status_code=202)
     async def submit(request: ShotRequest):
         assets_for(request)
-        shot = LocalDirector().plan(request)
+        shot = submitted_plan(request)
         ready = await capabilities()
         if not ready["h3"]["render_ready"]:
             raise HTTPException(503, ready["h3"].get("reason", "H3 is unavailable"))

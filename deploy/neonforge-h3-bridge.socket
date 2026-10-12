@@ -1,0 +1,10 @@
+[Unit]
+Description=NeonForge private Docker bridge to existing host H3
+
+[Socket]
+ListenStream=@BRIDGE_IPV4@:18189
+NoDelay=true
+FreeBind=true
+
+[Install]
+WantedBy=sockets.target

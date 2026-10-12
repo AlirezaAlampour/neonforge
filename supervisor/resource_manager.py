@@ -5,13 +5,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
 import httpx
+from shared.host_auth import signed_headers
 
 log = logging.getLogger("supervisor.resources")
 
@@ -39,6 +41,7 @@ class Claim:
     prepared_at: float | None
     memory_before_gb: float
     min_available_gb_observed: float
+    paused_services: list[str] = field(default_factory=list)
 
 
 def read_uma_memory(path: str = "/proc/meminfo") -> dict[str, float]:
@@ -148,6 +151,34 @@ class ResourceManager:
         self._lock = asyncio.Lock()
         self._http = httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0))
         self._idle_task: asyncio.Task | None = None
+        host_socket = os.getenv("NEONFORGE_HOST_SOCKET", "")
+        self._host = httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(uds=host_socket), timeout=180) if host_socket else None
+
+    async def host_request(self, route: str, payload: dict | None = None):
+        if not self._host:
+            return None
+        request = self._host.build_request("POST" if payload is not None else "GET", f"http://localhost/{route}", json=payload)
+        request.headers.update(signed_headers(os.environ["NEONFORGE_HOST_KEY"], "supervisor", request.method, request.url.path, request.content))
+        response = await self._host.send(request)
+        if response.status_code != 200:
+            raise RuntimeError(response.json().get("detail", "Host resource coordination is unavailable"))
+        return response.json()
+
+    async def verified_idle(self, service: str) -> bool:
+        if any(claim.service == service for claim in self.claims.values()):
+            return False
+        policy = self.policies[service]
+        if service == "comfyui":
+            try:
+                response = await self._http.get(f"{policy.url.rstrip('/')}/queue", timeout=8)
+                response.raise_for_status()
+                queue = response.json()
+                return not (queue.get("queue_running") or queue.get("queue_pending"))
+            except (httpx.HTTPError, ValueError):
+                return False
+        # Only allowlisted, private NeonForge model services are eligible. All
+        # generations reserve a claim; external/unrelated services never enter.
+        return policy.lifecycle_managed and service not in self.protected_services
 
     def validate(self, service: str) -> ServicePolicy:
         policy = self.policies.get(service)
@@ -223,6 +254,25 @@ class ResourceManager:
         result: dict[str, float] = {}
         for line in stdout.splitlines():
             try:
+                # Bind every managed generation to the existing cross-project
+                # lease. Whisper is CPU-only on this host and remains protected.
+                if self._host:
+                    if service == "h3" and before["available_gb"] < minimum:
+                        hardware = await self.host_request("resources")
+                        if hardware.get("shared_gpu", {}).get("exclusive") or hardware.get("gpu", {}).get("utilization_pct", 100) > 10:
+                            raise RuntimeError("Existing GPU work prevents idle reclamation.")
+                        candidates = select_reclamation_candidates(target=service, running=await self.running_services(),
+                                                                   claimed={c.service for c in self.claims.values()}, policies=self.policies,
+                                                                   memory_gb=await self.memory_consumers())
+                        for candidate in candidates:
+                            if not await self.verified_idle(candidate):
+                                continue
+                            await self._stop(candidate, reason=f"prepare:{service}")
+                            self.claims[token].paused_services.append(candidate)
+                            if (await self._wait_for_memory(minimum))["available_gb"] >= minimum:
+                                break
+                    await self.host_request("gpu/acquire", {"claim_id": token, "service": service, "minimum_gb": minimum,
+                                                           "paused_services": self.claims[token].paused_services})
                 item = json.loads(line)
             except json.JSONDecodeError:
                 continue
@@ -326,8 +376,8 @@ class ResourceManager:
                 # External H3 uses the same claims but grants no Docker authority.
                 # Never reclaim another service to make room for this unmeasured path.
                 if not policy.lifecycle_managed:
-                    if before["available_gb"] < minimum:
-                        raise RuntimeError(f"Need {minimum:.1f} GiB available for H3; current {before['available_gb']:.1f} GiB. Existing services were preserved.")
+                    if self.memory_reader()["available_gb"] < minimum:
+                        raise RuntimeError(f"Need {minimum:.1f} GiB available for H3; current {self.memory_reader()['available_gb']:.1f} GiB. Active and unrelated services were preserved.")
                     await self._wait_ready(policy)
                     after = self.memory_reader()
                     if after["available_gb"] < minimum:
@@ -370,8 +420,14 @@ class ResourceManager:
                         memory_gb=consumers,
                     )
                     for candidate in candidates:
+                        if self._host and not await self.verified_idle(candidate):
+                            continue
                         await self._stop(candidate, reason=f"prepare:{service}")
                         stopped.append(candidate)
+                        if self._host:
+                            self.claims[token].paused_services.append(candidate)
+                            await self.host_request("gpu/acquire", {"claim_id": token, "service": service, "minimum_gb": minimum,
+                                                                   "paused_services": self.claims[token].paused_services})
                         memory = await self._wait_for_memory(required)
                         if memory["available_gb"] >= required:
                             break
@@ -410,9 +466,42 @@ class ResourceManager:
                 }
             except Exception as exc:
                 self.metrics["prepare_failures"] += 1
-                self.claims.pop(token, None)
+                await self._restore_paused(token)
+                pending_restore = bool(self.claims[token].paused_services)
+                if self._host and not pending_restore:
+                    try:
+                        await self.host_request("gpu/release", {"claim_id": token, "service": service, "minimum_gb": minimum})
+                    except Exception:
+                        self._event("restore_pending", service, claim_id=token)
+                if not pending_restore:
+                    self.claims.pop(token, None)
                 self._event("prepare_failed", service, claim_id=token, reason=str(exc))
                 raise
+
+    async def _restore_paused(self, token: str):
+        claim = self.claims.get(token)
+        if not claim:
+            return
+        for service in list(claim.paused_services):
+            policy = self.policies[service]
+            if self.memory_reader()["available_gb"] < policy.min_available_gb:
+                if self._host:
+                    try:
+                        await self.host_request("h3/free-idle", {"claim_id": token, "service": claim.service, "minimum_gb": 0})
+                        await self._wait_for_memory(policy.min_available_gb)
+                    except Exception:
+                        pass
+                if self.memory_reader()["available_gb"] < policy.min_available_gb:
+                    self._event("restore_pending", service, reason="Insufficient UMA headroom to restore safely")
+                    continue
+            try:
+                await self._start(policy)
+                await self._wait_ready(policy)
+                claim.paused_services.remove(service)
+                self.touched.add(service); self.last_used[service] = time.time()
+                self._event("restored", service, claim_id=token)
+            except Exception:
+                self._event("restore_pending", service, reason="Service readiness could not be verified")
 
     async def release(self, service: str, claim_id: str) -> dict[str, Any]:
         self.validate(service)
@@ -433,6 +522,11 @@ class ResourceManager:
                     min_available_gb=claim.min_available_gb_observed,
                     memory_on_release_gb=memory["available_gb"],
                 )
+            await self._restore_paused(claim_id)
+            if claim and claim.paused_services:
+                raise RuntimeError("Restoration is pending; the GPU reservation is retained until services can be restored safely.")
+            if self._host:
+                await self.host_request("gpu/release", {"claim_id": claim_id, "service": service, "minimum_gb": 0})
             released = self.claims.pop(claim_id, None) is not None
             self.last_used[service] = time.time()
             self._event("released", service, claim_id=claim_id, found=released)
@@ -469,6 +563,15 @@ class ResourceManager:
         # Adopt explicitly managed warm containers after a control-plane restart.
         # Give them a full idle window; protected/unrelated services are excluded.
         try:
+            if self._host:
+                status = await self.host_request("resources")
+                async with self._lock:
+                    for token, saved in status.get("exclusive_claims", {}).items():
+                        service = saved["service"]
+                        if service in self.policies:
+                            available = self.memory_reader()["available_gb"]
+                            self.claims[token] = Claim(token, service, token, saved["at"], service, saved["at"], available, available,
+                                                       [s for s in saved.get("paused_services", []) if s in self.policies and self.policies[s].lifecycle_managed])
             running = await self.running_services()
             async with self._lock:
                 for service in running.intersection(self.policies):
@@ -480,6 +583,14 @@ class ResourceManager:
             await asyncio.sleep(self.idle_scan_sec)
             try:
                 self._sample_claim_memory()
+                async with self._lock:
+                    for token, claim in list(self.claims.items()):
+                        if claim.prepared_at is None and claim.paused_services:
+                            await self._restore_paused(token)
+                            if not claim.paused_services:
+                                if self._host:
+                                    await self.host_request("gpu/release", {"claim_id": token, "service": claim.service, "minimum_gb": 0})
+                                self.claims.pop(token, None)
                 await self.idle_sweep()
             except Exception:
                 log.exception("Idle lifecycle sweep failed")
@@ -496,19 +607,37 @@ class ResourceManager:
             except asyncio.CancelledError:
                 pass
         await self._http.aclose()
+        if self._host:
+            await self._host.aclose()
 
     async def status(self) -> dict[str, Any]:
         self._sample_claim_memory()
         running = await self.running_services()
         consumers = await self.memory_consumers()
         now = time.time()
+        external_ready = set()
+        for name, policy in self.policies.items():
+            if not policy.lifecycle_managed:
+                try:
+                    response = await self._http.get(policy.url.rstrip('/') + policy.ready_path, timeout=5)
+                    if response.status_code == 200:
+                        external_ready.add(name)
+                except httpx.HTTPError:
+                    pass
+        host = None
+        if self._host:
+            try:
+                host = await self.host_request("resources")
+            except Exception:
+                host = {"blockers": ["Host safety and GPU coordination are unavailable."], "gpu": {}}
         return {
+            "host": host,
             "memory": self.memory_reader(),
             "protected_services": sorted(self.protected_services),
             "managed_services": {
                 name: {
                     **asdict(policy),
-                    "running": name in running,
+                    "running": name in running or name in external_ready,
                     "claimed": any(claim.service == name for claim in self.claims.values()),
                     "memory_gb": consumers.get(name),
                     "idle_for_sec": round(now - self.last_used[name], 1) if name in self.last_used else None,

@@ -19,6 +19,7 @@ ENV UV_PROJECT_ENVIRONMENT=/usr/local
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY gateway ./gateway
+COPY shared ./gateway/shared
 WORKDIR /app/gateway
 
 EXPOSE 8000

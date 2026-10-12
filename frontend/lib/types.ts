@@ -33,6 +33,7 @@ export interface ServiceStatus {
 export type ServicesStatus = Record<string, ServiceStatus>
 
 export interface WorkloadLifecycleStatus {
+  host?: HostResourceStatus | null
   memory: MemoryStatus
   protected_services: string[]
   managed_services: Record<string, {
@@ -40,6 +41,7 @@ export interface WorkloadLifecycleStatus {
     workload_class: string
     min_available_gb: number
     idle_timeout_sec: number
+    lifecycle_managed?: boolean
     running: boolean
     claimed: boolean
     memory_gb?: number | null
@@ -48,6 +50,17 @@ export interface WorkloadLifecycleStatus {
   claims: Array<{ claim_id: string; service: string; job_id?: string | null; model_label: string }>
   metrics: Record<string, number>
   events: Array<{ at: number; event: string; service: string; reason?: string; recovered_gb?: number; min_available_gb?: number }>
+}
+
+export interface HostResourceStatus {
+  memory?: { total_gb: number; available_gb: number; swap_total_gb: number; swap_used_gb: number }
+  cpu?: { cores: number; load: number[] }
+  gpu: { utilization_pct?: number; clock_mhz?: number; temperature_c?: number; power_w?: number; cap_mhz?: number; cap_active?: boolean }
+  blockers: string[]
+  consumers?: Array<{ pid: number; name: string; resident_gb: number }>
+  exclusive_claims?: Record<string, { service: string; at: number }>
+  shared_gpu?: { exclusive: boolean; lease?: { remaining_s: number }; releasable?: { total_est_gb: number } }
+  idle_coordination_allowed?: boolean
 }
 
 export type JobState = 'preparing' | 'loading' | 'queued' | 'running' | 'finalizing' | 'completed' | 'failed'
