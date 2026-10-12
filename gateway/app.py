@@ -25,6 +25,7 @@ import shutil
 import tempfile
 import time
 import uuid
+import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from enum import Enum
@@ -40,6 +41,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import DateTime, String, Text, create_engine, desc, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from voiceover.routes import router as voiceover_router
+from motion_director.routes import create_router as create_motion_router, resume_motion_jobs, shutdown_motion_jobs
 
 # ---------------------------------------------------------------------------
 # Env parsing helpers
@@ -65,6 +67,7 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 SUPERVISOR_URL = os.getenv("SUPERVISOR_URL", "http://supervisor:8000")
 COMFYUI_URL = os.getenv("COMFYUI_URL", "http://comfyui:8188")
+H3_COMFYUI_URL = os.getenv("H3_COMFYUI_URL", "").strip()
 
 OUTPUTS_ROOT = Path(os.getenv("OUTPUTS_ROOT", "/outputs"))
 HISTORY_DB_PATH = Path(os.getenv("HISTORY_DB_PATH", str(OUTPUTS_ROOT / "neonforge_history.sqlite3")))
@@ -2291,6 +2294,7 @@ async def lifespan(app: FastAPI):
     rdb = aioredis.from_url(REDIS_URL, decode_responses=True)
     http_client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0))
     await resume_incomplete_comfyui_jobs()
+    await resume_motion_jobs(sys.modules[__name__])
 
     log.info(
         "Gateway v3 started (history_db=%s, comfyui_templates=%s, hard_limit=%d%%, "
@@ -2303,6 +2307,7 @@ async def lifespan(app: FastAPI):
     )
     yield
 
+    await shutdown_motion_jobs()
     if http_client:
         await http_client.aclose()
     if rdb:
@@ -2320,6 +2325,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(voiceover_router)
+app.include_router(create_motion_router(sys.modules[__name__]))
 
 
 # ---------------------------------------------------------------------------

@@ -2,6 +2,12 @@
 
 Branch: `neonforge-v0.2`, based on tested MisoTTS `994fc92`. Updated 2026-09-30.
 
+Motion Director v0.1 is implemented on `motion-director-v0.1` (2026-10-12),
+without production deployment. See [implementation, host audit and activation
+blockers](docs/motion-director-v0.1.md): private routing to the existing host H3,
+90 GiB render safety, missing first-frame weights, and unverified Hermes launcher/
+Grok OAuth. Its reference-to-video slice is verified with mocked inference.
+
 Primary surfaces: Voiceover, Video, Character, Avatar, Lip Sync, System Info.
 Voiceover UI is preserved. Video, Character and Lip Sync have focused input workspaces, shared large results and compact settings. The three duplicate creator routes are deleted.
 

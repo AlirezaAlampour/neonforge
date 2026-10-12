@@ -56,6 +56,7 @@ The gateway does not have the Docker socket. The supervisor is internal-only and
 | Avatar | EchoMimicV3-Flash target | Disabled until ARM64 real render passes |
 | Lip Sync | LatentSync 1.6 service | 32 GiB cold-start floor, 5-minute warm window |
 | System Info | Gateway and supervisor inspection | Always-on control plane |
+| Motion Director (feature branch) | Existing external H3 ComfyUI; local validated shot planner | Opt-in reservation only, 90 GiB floor; no lifecycle/reclamation authority |
 
 ComfyUI is intentionally shared by the two managed graph workflows. The gateway supplies the managed workflow identity and bounded frame/resolution inputs. The supervisor applies small measured admission rules, checks warm containers too, and rejects competing active heavy claims.
 
@@ -78,3 +79,12 @@ ComfyUI is intentionally shared by the two managed graph workflows. The gateway 
 - Service wrappers expose liveness separately from model/readiness state.
 
 This is a small single-machine control plane, not Kubernetes, a DAG engine, a plugin system, or a universal GPU scheduler.
+
+Motion Director adds a persistent shot/job table to the existing SQLite metadata
+and reuses uploads, the heavy semaphore, supervisor claims, output storage and
+history. `H3_COMFYUI_URL` is blank by default. Once a private route is verified,
+the external H3 reservation joins the same claim exclusion rules and guards
+other model admissions by inspecting its queue. H3 never becomes a Compose
+lifecycle target. Hermes/Grok are interface boundaries only; annotations guide
+the prompt until control-video inputs are validated. See [Motion Director's
+activation notes](docs/motion-director-v0.1.md).

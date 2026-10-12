@@ -83,6 +83,7 @@ services:
       MISOTTS_URL: http://misotts:8000
       BREEZE_TTS_URL: http://breeze_tts:8000
       COMFYUI_URL: http://comfyui:8188
+      H3_COMFYUI_URL: ${H3_COMFYUI_URL:-}
       IDLE_SCAN_INTERVAL: ${IDLE_SCAN_INTERVAL:-15}
       MEMORY_RECLAIM_TIMEOUT: ${MEMORY_RECLAIM_TIMEOUT:-90}
       F5TTS_IDLE_TIMEOUT: ${F5TTS_IDLE_TIMEOUT:-900}
@@ -126,6 +127,7 @@ services:
       VOXCPM2_ENABLED: ${VOXCPM2_ENABLED:-false}
       VOXCPM2_INTERNAL_URL: ${VOXCPM2_INTERNAL_URL:-http://voxcpm2:8000}
       COMFYUI_URL: http://comfyui:8188
+      H3_COMFYUI_URL: ${H3_COMFYUI_URL:-}
       COMFYUI_MODEL_ROOTS: ${COMFYUI_MODEL_ROOTS:-/models/comfyui,/opt/ComfyUI/custom_nodes/comfyui_controlnet_aux/ckpts}
       MEMORY_WARN_THRESHOLD: ${MEMORY_WARN_THRESHOLD:-70}
       MEMORY_HARD_LIMIT: ${MEMORY_HARD_LIMIT:-80}

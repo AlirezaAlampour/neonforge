@@ -42,6 +42,10 @@ POLICIES = {
     "comfyui": ServicePolicy("comfyui", COMFYUI_CONTAINER_NAME, "video", os.getenv("COMFYUI_URL", "http://comfyui:8188"), "/", "video / character", 48, int(os.getenv("COMFYUI_IDLE_TIMEOUT", "300"))),
     "lipsync": ServicePolicy("lipsync", "ai-lipsync", "lip-sync", os.getenv("LIPSYNC_URL", "http://lipsync:8000"), "/readyz", "lip-sync", 32, int(os.getenv("LIPSYNC_IDLE_TIMEOUT", "300"))),
 }
+# Opt-in only after the existing host instance has a verified private route.
+# No Compose service, container name, model download or idle-stop authority.
+if os.getenv("H3_COMFYUI_URL", "").strip():
+    POLICIES["h3"] = ServicePolicy("h3", "", None, os.environ["H3_COMFYUI_URL"], "/queue", "video", 90, 0, lifecycle_managed=False)
 PROTECTED_SERVICES = {"gateway", "frontend", "redis", "supervisor", "whisper"}
 MANAGED_SERVICES = set(POLICIES)
 SCAN_TARGETS = {
@@ -348,6 +352,8 @@ async def start(service: str, wait_ready: bool = True):
 @app.post("/stop/{service}")
 async def stop(service: str):
     _validate_service(service)
+    if not POLICIES[service].lifecycle_managed:
+        raise HTTPException(409, "External H3 cannot be stopped by NeonForge")
     if any(claim.service == service for claim in resource_manager.claims.values()):
         raise HTTPException(409, f"Service {service} has an active workload and cannot be stopped")
     log.info("Stopping service: %s", service)

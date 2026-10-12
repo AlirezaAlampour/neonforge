@@ -26,6 +26,7 @@ class ServicePolicy:
     workload_class: str
     min_available_gb: float
     idle_timeout_sec: int
+    lifecycle_managed: bool = True
 
 
 @dataclass
@@ -66,6 +67,10 @@ def read_uma_memory(path: str = "/proc/meminfo") -> dict[str, float]:
 def workload_minimum_gb(service: str, workload_id: str | None, *, frames: int | None = None,
                         width: int | None = None, height: int | None = None) -> float | None:
     """Bounded Spark admission rules, based on real renders; values are GiB."""
+    if service == "h3":
+        if workload_id != "motion-h3" or frames not in {56, 73, 124} or (width, height) not in {(384, 672), (672, 384)}:
+            raise ValueError("Motion Director supports 2/3/5 second H3 drafts at 384×672 or 672×384 only.")
+        return 90.0
     if service != "comfyui":
         return None
     if workload_id == "wan-character-swap":
@@ -95,7 +100,8 @@ def select_reclamation_candidates(
     memory_gb: dict[str, float],
 ) -> list[str]:
     """Return only idle, allowlisted services, largest consumers first."""
-    candidates = running.intersection(policies).difference({target}).difference(claimed)
+    candidates = {name for name in running.intersection(policies).difference({target}).difference(claimed)
+                  if policies[name].lifecycle_managed}
     return sorted(
         candidates,
         key=lambda name: (
@@ -176,6 +182,8 @@ class ResourceManager:
         return proc.returncode or 0, stdout.decode(errors="replace"), stderr.decode(errors="replace")
 
     async def container_state(self, policy: ServicePolicy) -> str:
+        if not policy.lifecycle_managed:
+            return "external"
         code, stdout, _ = await self._command(
             "docker", "inspect", "-f", "{{.State.Status}}", policy.container, timeout=15
         )
@@ -203,7 +211,9 @@ class ResourceManager:
         return 0.0
 
     async def memory_consumers(self) -> dict[str, float]:
-        containers = [policy.container for policy in self.policies.values()]
+        containers = [policy.container for policy in self.policies.values() if policy.lifecycle_managed]
+        if not containers:
+            return {}
         code, stdout, _ = await self._command(
             "docker", "stats", "--no-stream", "--format", "{{json .}}", *containers, timeout=30
         )
@@ -224,7 +234,8 @@ class ResourceManager:
 
     async def _stop(self, service: str, *, reason: str) -> None:
         # The policy lookup is the security boundary: no unlisted name reaches Docker.
-        self.validate(service)
+        if not self.validate(service).lifecycle_managed:
+            raise RuntimeError(f"{service} is external; lifecycle operations are forbidden")
         code, _, stderr = await self._command("docker", "compose", "stop", service, timeout=180)
         if code != 0:
             raise RuntimeError(f"Unable to stop {service}: {stderr.strip()[:300]}")
@@ -233,6 +244,8 @@ class ResourceManager:
         self._event("stopped", service, reason=reason)
 
     async def _start(self, policy: ServicePolicy) -> None:
+        if not policy.lifecycle_managed:
+            raise RuntimeError(f"{policy.service} is external; lifecycle operations are forbidden")
         args = ["docker", "compose"]
         if policy.profile:
             args.extend(["--profile", policy.profile])
@@ -310,6 +323,32 @@ class ResourceManager:
                 min_available_gb_observed=before["available_gb"],
             )
             try:
+                # External H3 uses the same claims but grants no Docker authority.
+                # Never reclaim another service to make room for this unmeasured path.
+                if not policy.lifecycle_managed:
+                    if before["available_gb"] < minimum:
+                        raise RuntimeError(f"Need {minimum:.1f} GiB available for H3; current {before['available_gb']:.1f} GiB. Existing services were preserved.")
+                    await self._wait_ready(policy)
+                    after = self.memory_reader()
+                    if after["available_gb"] < minimum:
+                        raise RuntimeError("Shared memory changed during H3 readiness; reservation refused without stopping services.")
+                    claim = self.claims[token]
+                    claim.prepared_at = time.time()
+                    self._event("prepared", service, claim_id=token, stopped=[])
+                    return {"service": service, "claim_id": token, "state": "ready", "minimum_available_gb": minimum,
+                            "memory_before": before, "memory_after": after, "stopped_services": []}
+                # Check an enabled external H3 before admitting another GPU model,
+                # including after a gateway restart lost its in-process semaphore.
+                for external in self.policies.values():
+                    if not external.lifecycle_managed:
+                        try:
+                            response = await self._http.get(f"{external.url.rstrip('/')}/queue", timeout=8)
+                            response.raise_for_status()
+                            queue = response.json()
+                        except (httpx.HTTPError, ValueError) as exc:
+                            raise RuntimeError("Unable to inspect enabled external H3. GPU admission is paused until its queue can be checked.") from exc
+                        if queue.get("queue_running") or queue.get("queue_pending"):
+                            raise RuntimeError("External H3 is busy. Wait for its existing job to finish.")
                 running = await self.running_services()
                 state = await self.container_state(policy)
                 required = minimum
