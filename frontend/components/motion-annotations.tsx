@@ -1,7 +1,7 @@
 'use client'
 
 import { useRef, useState, type PointerEvent } from 'react'
-import { finishAnnotation, normalizedPoint, type Annotation, type Point, type Tool } from '@/lib/motion-director'
+import { annotationId, finishAnnotation, normalizedPoint, type Annotation, type Point, type Tool } from '@/lib/motion-director'
 
 export function AnnotationCanvas({ referenceId, annotations, tool, label, onAdd }: {
   referenceId: string; annotations: Annotation[]; tool: Tool; label: string; onAdd: (annotation: Annotation) => void
@@ -15,7 +15,7 @@ export function AnnotationCanvas({ referenceId, annotations, tool, label, onAdd 
     if (!drawing || drawing.pointer !== e.pointerId) return
     drawing.points.push(point(e))
     const points = finishAnnotation(drawing.tool, drawing.points)
-    if (points) onAdd({ id: crypto.randomUUID(), reference_id: drawing.reference, kind: drawing.tool, points, label: label.trim() })
+    if (points) onAdd({ id: annotationId(), reference_id: drawing.reference, kind: drawing.tool, points, label: label.trim() })
     active.current = null; setStroke([])
   }
   const drawn = annotations.filter(a => a.reference_id === referenceId)

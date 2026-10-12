@@ -1,8 +1,10 @@
-# Motion Director activation preparation (2026-10-12)
+# Motion Director private activation (2026-10-12)
 
-Continues `ad258f8` on `motion-director-v0.1`. Production frontend, gateway and
-supervisor have not been replaced. Their original image IDs and behavior remain
-unchanged. No H3 render or paid model call has been made in this continuation.
+Continues `ad258f8` and `8592e14` on the unmerged `motion-director-v0.1` branch.
+The prepared frontend, gateway and corrected supervisor are privately active
+after one successful real H3 test. Original images remain tagged
+`neonforge-motion-base-{frontend,gateway,supervisor}:motion-v01-ready` for rollback.
+No paid model call, model download or second H3 instance was used.
 
 ## Verified networking and hardware
 
@@ -22,11 +24,11 @@ WirePlumber processes (~15.4 and ~14.6 GiB). H3 has ~1.0 GiB resident before
 rendering; the other containers are small, and the managed NeonForge model
 containers are stopped. Whisper runs on CPU/int8 and stays protected.
 
-The managed WirePlumber service is PID 1705555 (at audit time); the separate
-login-session process is PID 91552. Restarting the managed audio service may
-briefly interrupt desktop audio and is **pending owner approval**. The second
-process is not a target. No swap reset, cache-drop, process kill, threshold
-reduction or GPU-cap change is performed. Actual H3 inference remains gated
+The owner approved restarting managed WirePlumber and pausing the pipeline worker
+only when idle. Managed WirePlumber was restarted (PID 1705555 → 3545175),
+recovering ~14.7 GiB; the login-session process PID 91552 was untouched and remains
+running. Managed audio is active. No swap reset, system cache-drop, process kill,
+threshold reduction or GPU-cap change was performed. H3 admission remains gated
 by the documented **90 GiB** floor and confirmed idle/cool hardware.
 
 ## Authenticated coordination and optional Opus
@@ -54,12 +56,11 @@ supervisor restart adopts host claim/paused-service records. H3 queue activity
 prevents premature restoration. Cached H3 models are released only when needed
 for safe restoration, with an empty queue.
 
-The existing helper would pause `pipeline-worker.service` and restore it after
-the lease. It currently reports no active job/queue, no Ollama models and no
-loaded Hunyuan pipeline. Cross-project pausing is **pending owner approval**;
-`NEONFORGE_ALLOW_IDLE_EXTERNAL_PAUSE=false` remains in the host unit. No other
-project has been paused or unloaded. If approved, use a user-unit drop-in to set
-that flag to true and reload only this idle adapter; do not reinstall the helper.
+The approved user-unit drop-in sets `NEONFORGE_ALLOW_IDLE_EXTERNAL_PAUSE=true`.
+The existing helper paused only `pipeline-worker.service` after verifying empty
+queues, no current job, no resident Ollama models and no loaded Hunyuan pipeline.
+It restored the worker after the render and again after idle-cache maintenance;
+worker health is `ok`. No active or unrelated project job was interrupted.
 
 Claude Code **2.1.289** is installed at `~/.local/bin/claude` and is authenticated
 as `claude.ai`/first-party **Pro**. No API environment/key helper was detected.
@@ -86,9 +87,16 @@ CLI/auth behavior was checked against the installed CLI and the official
 
 ## Tested, reviewable activation artifacts
 
-- 162 backend regressions pass with mocked inference, including HMAC scope,
+- 164 backend regressions pass with mocked inference, including HMAC scope,
   tamper/replay protection, billing refusal, one-call plan reuse, protected
   dimensions, strict H3 floor, lease restoration and active-H3 release guards.
+- Activation caught misplaced shared-lease acquisition in the Docker stats parser.
+  The original supervisor was restored before inference, the guard moved before
+  workload readiness, and actual status/acquisition regressions added. Read-only
+  status never acquires GPU leases; both H3 and managed models acquire before load.
+- The private HTTP origin lacks `crypto.randomUUID`; drawing IDs now use
+  `crypto.getRandomValues` to construct UUID v4. Browser coverage disables
+  `randomUUID` even on localhost to reproduce this phone-origin behavior.
 - TypeScript/Next production builds pass. Phone-sized Chromium acceptance
   passes upload, pointer/touch drawing, undo/clear, persistence, multiple
   references, planning, mocked rendering, playable MP4, download and comparison.
@@ -106,29 +114,44 @@ The image override is
 gateway URL is the existing `http://gateway:8000`; it is not the mock test URL.
 `docker-compose.motion.yml` supplies authenticated role mounts/private H3 route.
 
-## Next authorized sequence
+## Real acceptance and activation
 
-1. Obtain the pending audio-restart and idle cross-project coordination approvals.
-   Disable paid Claude extra usage before enabling optional Opus.
-2. Restart only the approved managed audio service; verify it is running again,
-   availability is at least 90 GiB, GPU cap/cooling hold, and every relevant
-   generation queue/claim is idle. Do not touch the login-session audio process.
-3. Enable only the approved idle-coordination flag. Recheck live billing/auth;
-   keep local planning available if Opus remains blocked.
-4. Use the prepared, tested supervisor to protect the real short acceptance
-   job, preserving its original image for rollback. Run **one** 2-second,
-   single-image reference-to-video H3 job through the existing process with
-   telemetry and verify the MP4 and restoration. Do not download first-frame
-   weights, start a second H3, bypass 90 GiB or interrupt unrelated active work.
-5. Only after successful real acceptance, promote the three prepared images
-   together using the existing Compose project `dgx-ai-stack`, base Compose,
-   authenticated motion overlay and image override (`--no-build --no-deps`).
-   If acceptance fails, return the control plane to its original image and
-   leave production unchanged. No merge is authorized yet.
-6. Verify actual phone upload/planning/progress/MP4 playback on the private
-   frontend and recheck existing workflows, queues and restored worker health.
+One single-image reference test used the existing `older_man.png`, local
+Professional Cinematic Director, a subject marker and the installed ref2va
+checkpoint/4-step LoRA. It passed upload → persisted plan → supervisor/shared
+reservation → existing H3 → retrieval → MP4 validation. Admission was 99.4 GiB.
 
-Currently live phone URL: `http://100.103.129.82:3000/status` (existing production).
-After activation: `http://100.103.129.82:3000/motion-director` → upload a GPT
-reference → prompt → Plan shot → Generate H3 video. The feature route is not
-live yet; no mock preview is presented as a real H3 result.
+- Job: `e49f0c44-8ad6-4dcc-bffb-b72e2a10dfa1`.
+- H3 prompt: `4bf5910e-2417-4ddc-895c-6bbe12799c06` (submitted once).
+- H3 execution: 46.19 seconds; full acceptance/retrieval/probe: 53.2 seconds.
+- H.264 video/AAC audio, 384×672, 24 fps, 56 frames, 153175 bytes.
+- Requested 2-second draft is padded by the inspected graph to 2.333 seconds.
+- Sampled peak GPU: 96%, 44°C, maximum 1989 MHz; minimum sampled available
+  UMA during rendering: 58.36 GiB. The 90 GiB requirement is an admission floor.
+- Completed artifact/metadata were imported into existing gateway storage;
+  this did not resubmit inference. The phone gallery contains this real take.
+- Idle H3 cache retained ~41 GiB afterward. A private exclusive maintenance
+  claim verified all queues idle, released only H3 cache, and restored the idle
+  pipeline worker. Available UMA recovered to ~97.6 GiB for the next admission.
+- Final live private-HTTP Chromium acceptance at 390×844 passed upload,
+  mouse/touch drawings, undo/clear, persisted vector data, local planning,
+  actual H.264 playback/download and resource status. Desktop width also passed;
+  Opus/Grok were disabled, no page errors occurred and no extra render was sent.
+  All eight existing frontend routes returned 200; frontend/gateway/supervisor,
+  Redis and CPU Whisper remained healthy. Both WirePlumber processes and the
+  restored pipeline worker were verified running, with no GPU claim left held.
+
+Activation uses the existing Compose project and no builds during promotion:
+
+```sh
+docker compose -p dgx-ai-stack -f docker-compose.yml -f docker-compose.motion.yml \
+  -f .motion-runtime/images/motion-v01-ready/images.json \
+  up -d --no-build --no-deps supervisor gateway frontend
+```
+
+Live phone URL: `http://100.103.129.82:3000/motion-director` → preview/download
+the completed take, or upload a GPT reference → prompt → Plan shot → Generate
+H3 video. Local planning works; Opus remains disabled until Claude extra usage
+is off and read-only subscription checks pass. Grok/first-frame mode stay gated.
+No merge is authorized. Preserve the floor/cap and recheck queues before any
+additional heavy test. Prepared backups and unrelated files remain intact.

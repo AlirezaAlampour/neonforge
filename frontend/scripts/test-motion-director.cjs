@@ -8,6 +8,8 @@ const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR
   const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH, headless: true, args: ['--no-sandbox'] })
   try {
     const page = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 1 })
+    // Emulate the private HTTP phone origin even on secure-context localhost.
+    await page.addInitScript(() => Object.defineProperty(crypto, 'randomUUID', { value: undefined }))
     const errors = []
     page.on('pageerror', error => errors.push(String(error)))
     await page.goto(`${baseURL}/motion-director`)

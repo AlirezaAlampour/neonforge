@@ -9,6 +9,49 @@ if str(ROOT) not in sys.path:
 from supervisor.resource_manager import ResourceManager, ServicePolicy, select_reclamation_candidates, workload_minimum_gb
 
 
+def test_resource_status_reads_stats_without_acquiring_gpu(monkeypatch):
+    import httpx
+    from unittest.mock import AsyncMock
+    manager = ResourceManager(compose_dir="/tmp", policies={"comfyui": _policy("comfyui", 48)},
+                              protected_services={"gateway"}, memory_reader=_MemoryReader(99))
+    async def scenario():
+        manager._host = httpx.AsyncClient()
+        manager._command = AsyncMock(return_value=(0, '{"Name":"ai-comfyui","MemUsage":"2GiB / 121GiB"}\n', ""))
+        manager.host_request = AsyncMock(return_value={"blockers": [], "exclusive_claims": {}})
+        status = await manager.status()
+        assert status["managed_services"]["comfyui"]["memory_gb"] == 2
+        assert status["claims"] == []
+        manager.host_request.assert_awaited_once_with("resources")
+        await manager.close()
+    asyncio.run(scenario())
+
+
+def test_gpu_lease_is_acquired_before_h3_or_managed_model_readiness():
+    import httpx
+    from unittest.mock import AsyncMock
+    async def scenario(service):
+        policy = (ServicePolicy("h3", "", None, "http://h3", "/queue", "video", 90, 0, lifecycle_managed=False)
+                  if service == "h3" else _policy("misotts", 40))
+        manager = _FakeResourceManager(compose_dir="/tmp", policies={service: policy},
+                                       protected_services={"gateway"}, memory_reader=_MemoryReader(99), memory_wait_sec=0)
+        manager._host = httpx.AsyncClient()
+        calls = []
+        async def host(route, payload=None):
+            calls.append(route)
+            return {"ready": True}
+        async def ready(policy):
+            assert calls == ["gpu/acquire"]
+        manager.host_request = host
+        manager._wait_ready = ready
+        result = await manager.prepare(service, claim_id="acceptance", minimum_available_gb=1)
+        assert result["minimum_available_gb"] == (90 if service == "h3" else 1)
+        await manager.release(service, result["claim_id"])
+        assert calls == ["gpu/acquire", "gpu/release"]
+        await manager.close()
+    asyncio.run(scenario("h3"))
+    asyncio.run(scenario("misotts"))
+
+
 def test_workload_limits_scale_and_reject_known_oom_configuration():
     import pytest
     assert workload_minimum_gb("comfyui", "wan-character-swap", frames=17) == 64

@@ -40,6 +40,16 @@ export const motionApi = {
   reconcile: (jobId: string) => request<MotionJob>(`/api/v1/motion-director/jobs/${jobId}/reconcile`, { method: 'POST' }),
 }
 
+export function annotationId(): string {
+  // Private Tailscale HTTP origins do not expose crypto.randomUUID on phones.
+  // getRandomValues remains available there; preserve UUID v4 entropy/format.
+  const bytes = crypto.getRandomValues(new Uint8Array(16))
+  bytes[6] = (bytes[6] & 0x0f) | 0x40
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
 export function normalizedPoint(clientX: number, clientY: number, rect: { left: number; top: number; width: number; height: number }): Point {
   return { x: Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(1, rect.width))), y: Math.max(0, Math.min(1, (clientY - rect.top) / Math.max(1, rect.height))) }
 }

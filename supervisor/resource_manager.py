@@ -254,25 +254,6 @@ class ResourceManager:
         result: dict[str, float] = {}
         for line in stdout.splitlines():
             try:
-                # Bind every managed generation to the existing cross-project
-                # lease. Whisper is CPU-only on this host and remains protected.
-                if self._host:
-                    if service == "h3" and before["available_gb"] < minimum:
-                        hardware = await self.host_request("resources")
-                        if hardware.get("shared_gpu", {}).get("exclusive") or hardware.get("gpu", {}).get("utilization_pct", 100) > 10:
-                            raise RuntimeError("Existing GPU work prevents idle reclamation.")
-                        candidates = select_reclamation_candidates(target=service, running=await self.running_services(),
-                                                                   claimed={c.service for c in self.claims.values()}, policies=self.policies,
-                                                                   memory_gb=await self.memory_consumers())
-                        for candidate in candidates:
-                            if not await self.verified_idle(candidate):
-                                continue
-                            await self._stop(candidate, reason=f"prepare:{service}")
-                            self.claims[token].paused_services.append(candidate)
-                            if (await self._wait_for_memory(minimum))["available_gb"] >= minimum:
-                                break
-                    await self.host_request("gpu/acquire", {"claim_id": token, "service": service, "minimum_gb": minimum,
-                                                           "paused_services": self.claims[token].paused_services})
                 item = json.loads(line)
             except json.JSONDecodeError:
                 continue
@@ -351,6 +332,8 @@ class ResourceManager:
     ) -> dict[str, Any]:
         policy = self.validate(service)
         minimum = policy.min_available_gb if minimum_available_gb is None else minimum_available_gb
+        if service == "h3":
+            minimum = max(minimum, 90.0)
         token = claim_id or str(uuid.uuid4())
         async with self._lock:
             self.metrics["prepare_requests"] += 1
@@ -373,8 +356,27 @@ class ResourceManager:
                 min_available_gb_observed=before["available_gb"],
             )
             try:
+                # Acquire before readiness/model loading, never during read-only
+                # telemetry. Every managed GPU generation joins the shared lease.
+                if self._host:
+                    if service == "h3" and before["available_gb"] < minimum:
+                        hardware = await self.host_request("resources")
+                        if hardware.get("shared_gpu", {}).get("exclusive") or hardware.get("gpu", {}).get("utilization_pct", 100) > 10:
+                            raise RuntimeError("Existing GPU work prevents idle reclamation.")
+                        candidates = select_reclamation_candidates(target=service, running=await self.running_services(),
+                                                                   claimed={c.service for c in self.claims.values()}, policies=self.policies,
+                                                                   memory_gb=await self.memory_consumers())
+                        for candidate in candidates:
+                            if not await self.verified_idle(candidate):
+                                continue
+                            await self._stop(candidate, reason=f"prepare:{service}")
+                            self.claims[token].paused_services.append(candidate)
+                            if (await self._wait_for_memory(minimum))["available_gb"] >= minimum:
+                                break
+                    await self.host_request("gpu/acquire", {"claim_id": token, "service": service, "minimum_gb": minimum,
+                                                           "paused_services": self.claims[token].paused_services})
                 # External H3 uses the same claims but grants no Docker authority.
-                # Never reclaim another service to make room for this unmeasured path.
+                # Never start or stop the external H3 process.
                 if not policy.lifecycle_managed:
                     if self.memory_reader()["available_gb"] < minimum:
                         raise RuntimeError(f"Need {minimum:.1f} GiB available for H3; current {self.memory_reader()['available_gb']:.1f} GiB. Active and unrelated services were preserved.")

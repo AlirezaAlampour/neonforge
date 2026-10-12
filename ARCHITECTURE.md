@@ -56,7 +56,7 @@ The gateway does not have the Docker socket. The supervisor is internal-only and
 | Avatar | EchoMimicV3-Flash target | Disabled until ARM64 real render passes |
 | Lip Sync | LatentSync 1.6 service | 32 GiB cold-start floor, 5-minute warm window |
 | System Info | Gateway and supervisor inspection | Always-on control plane |
-| Motion Director (feature branch) | Existing external H3 ComfyUI; local validated shot planner | Opt-in reservation only, 90 GiB floor; no lifecycle/reclamation authority |
+| Motion Director (unmerged, privately active) | Existing external H3 ComfyUI; local validated shot planner | 90 GiB admission, shared exclusive lease; external H3 is never started/stopped |
 
 ComfyUI is intentionally shared by the two managed graph workflows. The gateway supplies the managed workflow identity and bounded frame/resolution inputs. The supervisor applies small measured admission rules, checks warm containers too, and rejects competing active heavy claims.
 
@@ -95,5 +95,6 @@ provider credentials stay on the host. The installed socket proxy reaches H3
 through bridge-only TCP 18189. Managed GPU claims coordinate with the existing
 Forge3D lease, preserving/restoring approved idle workloads. Optional Claude
 Code Opus checks subscription quota and refuses paid overflow; validated plans
-are persisted and never regenerated during inference. Production activation
-is gated on real acceptance; see [current preparation and blockers](docs/motion-director-activation.md).
+are persisted and never regenerated during inference. Real reference-to-video
+acceptance passed and the tested images are privately active; Opus remains
+disabled while paid extra usage is enabled. See [activation evidence](docs/motion-director-activation.md).
