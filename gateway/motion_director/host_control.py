@@ -22,6 +22,8 @@ from .claude_host import plan_with_opus, subscription_status
 from .planner import ShotRequest, StrictModel
 from .hermes_grok import status as grok_status
 from shared.host_auth import Verifier
+from .scene import SceneSpec
+from . import scene_host
 
 STATE_DIR = Path(os.getenv("NEONFORGE_HOST_STATE_DIR", str(Path(__file__).resolve().parents[2] / ".motion-runtime")))
 ASSETS = Path(os.getenv("NEONFORGE_HOST_UPLOADS_DIR", "/srv/ai/assets/comfyui/uploads"))
@@ -50,6 +52,23 @@ async def command(*args, timeout=8):
     if process.returncode:
         raise RuntimeError("Host safety probe unavailable")
     return out.decode()
+
+
+async def verified_stopped_container(name: str) -> bool:
+    """An offline health endpoint is safe only with authoritative stopped state.
+
+    Fixed existing containers only; never start/stop them or infer idle from a
+    failed network probe. Missing Docker access/state remains a hard blocker.
+    """
+    if name not in {'3d-generator-trellis', '3d-generator-hunyuan'}:
+        return False
+    try:
+        raw = await command('docker', 'inspect', '--format', '{{json .State}}', name)
+        state = json.loads(raw)
+        return (state.get('Status') in {'exited','created'} and state.get('Running') is False
+                and not state.get('Restarting') and not state.get('Paused') and state.get('Pid') == 0)
+    except (OSError, RuntimeError, TimeoutError, ValueError):
+        return False
 
 
 async def telemetry() -> dict:
@@ -93,6 +112,7 @@ class ClaimRequest(StrictModel):
 class PlanRequest(StrictModel):
     shot: ShotRequest
     references: list[str] = Field(min_length=1, max_length=4)
+    previous_scene: SceneSpec | None = None
 
     @model_validator(mode="after")
     def references_match(self):
@@ -149,10 +169,14 @@ class Coordinator:
         health = response.json()
         if health.get("worker", {}).get("current_job_id") or health.get("queue_depth", 0):
             raise RuntimeError("Content-factory has active or queued work; it will not be interrupted.")
-        response = await self.http.get("http://100.103.129.82:8189/system")
-        response.raise_for_status()
-        if response.json().get("active_job"):
-            raise RuntimeError("Trellis has an active or queued job; it will not be interrupted.")
+        try:
+            response = await self.http.get("http://100.103.129.82:8189/system")
+            response.raise_for_status()
+            if response.json().get("active_job"):
+                raise RuntimeError("Trellis has an active or queued job; it will not be interrupted.")
+        except httpx.HTTPError:
+            if not await verified_stopped_container('3d-generator-trellis'):
+                raise RuntimeError('Trellis health is unavailable and its existing container is not verified stopped.')
         for url in ("http://127.0.0.1:8189", "http://127.0.0.1:8188"):
             response = await self.http.get(url + "/queue")
             response.raise_for_status()
@@ -181,7 +205,8 @@ class Coordinator:
             snapshot = state.get("snapshot", {})
             if snapshot.get("ollama"):
                 raise RuntimeError("Ollama has resident models whose request activity cannot be verified; no automatic unload is permitted.")
-            if snapshot.get("hunyuan") is None:
+            hunyuan_stopped = snapshot.get("hunyuan") is None
+            if hunyuan_stopped and not await verified_stopped_container('3d-generator-hunyuan'):
                 raise RuntimeError("Existing Hunyuan workload state is unknown; GPU admission is refused.")
             if (snapshot.get("hunyuan") or {}).get("busy"):
                 raise RuntimeError("Hunyuan is actively generating.")
@@ -365,7 +390,38 @@ async def existing_grok_status():
 async def claude_plan(request: PlanRequest):
     async with planning_lock:
         try:
-            return await plan_with_opus(request.shot, request.references, ASSETS)
+            return await plan_with_opus(request.shot, request.references, ASSETS, request.previous_scene.model_dump() if request.previous_scene else None)
         except (RuntimeError, TimeoutError, ValueError, OSError) as exc:
             # Only static error types are reported; no CLI stderr/account/token.
             raise HTTPException(503, f"Opus planning unavailable ({type(exc).__name__}); use the local cinematic fallback") from exc
+
+
+class PreviewRequest(StrictModel):
+    id: str = Field(pattern=r'^[a-f0-9-]{36}$')
+    scene: SceneSpec
+    duration: int
+    width: int
+    height: int
+    prompt: str = Field(max_length=24000)
+
+
+class PreviewStatusRequest(StrictModel):
+    id: str = Field(pattern=r'^[a-f0-9-]{36}$')
+
+
+@app.get('/scene/capabilities')
+async def scene_capabilities():
+    return scene_host.status()
+
+
+@app.post('/scene/start')
+async def scene_start(request: PreviewRequest):
+    try:
+        return scene_host.start(request.id, request.scene, request.duration, request.width, request.height, request.prompt)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(422, 'Invalid scene or unavailable asset') from exc
+
+
+@app.post('/scene/status')
+async def scene_status(request: PreviewStatusRequest):
+    return scene_host.read_status(request.id)

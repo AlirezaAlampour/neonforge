@@ -26,7 +26,7 @@ class Renderer(Protocol):
     async def queue(self) -> dict: ...
 
 
-def build_h3_graph(shot: ShotSpec, image_names: list[str], job_id: str, context: dict | None = None) -> dict:
+def build_h3_graph(shot: ShotSpec, image_names: list[str], job_id: str, context: dict | None = None, scene_video: str | None = None) -> dict:
     graph = json.loads(WORKFLOW_PATH.read_text())
     graph["138"]["inputs"]["value"] = shot.renderer_prompt
     graph["129"]["inputs"]["noise_seed"] = shot.request.seed
@@ -58,6 +58,16 @@ def build_h3_graph(shot: ShotSpec, image_names: list[str], job_id: str, context:
         graph["boundary_guide"] = {"class_type": "MiniMaxH3AddGuide", "inputs": {
             "positive": ["136", 0], "latent": ["136", 1], "vae": ["119", 0], "image": ["boundary_image", 0], "frame_idx": 0}}
         graph["126"]["inputs"]["conditioning"] = ["boundary_guide", 0]
+    if scene_video:
+        if shot.request.workflow != "reference":
+            raise ValueError("Blender conditioning requires the reference checkpoint")
+        graph["blender_video"] = {"class_type": "LoadVideo", "inputs": {"file": scene_video}}
+        graph["blender_frames"] = {"class_type": "GetVideoComponents", "inputs": {"video": ["blender_video", 0]}}
+        # Preserve the tested one-video/22-frame budget. Continuations keep the
+        # exact previous boundary guide, with this clip's Blender motion window.
+        node["ref_videos.ref_video_0"] = ["blender_frames", 0]
+        graph.pop("context_video", None); graph.pop("context_frames", None)
+        graph["138"]["inputs"]["value"] += "\n<Video 1> is the rendered Blender spatial/action/camera reference for this clip. Follow its travel direction and camera placement; keep identity and style from <Picture 1>. It shows only the opening 22 frames; continue the specified action for the full clip."
     return graph
 
 
@@ -93,6 +103,7 @@ class H3Renderer:
                                and IMAGE_LORA in schemas["LoraLoaderModelOnly"]["input"]["required"]["lora_name"][0])
             queue = await self.queue()
             return {"available": True, "busy": bool(queue.get("queue_running") or queue.get("queue_pending")), "control_video": False,
+                    "reference_video": all(n in schemas for n in ("LoadVideo", "GetVideoComponents")),
                     "continuation_available": all(n in schemas for n in ("MiniMaxH3AddGuide", "LoadVideo", "GetVideoComponents")),
                     "control_nodes_present": "MiniMaxH3FunControlNetApply" in schemas,
                     "workflows": {"reference": {"available": True}, "image": {"available": image_available,
@@ -105,7 +116,7 @@ class H3Renderer:
         response.raise_for_status()
         return response.json()
 
-    async def submit(self, shot: ShotSpec, assets: list, job_id: str, context_paths: tuple[Path, Path] | None = None) -> str:
+    async def submit(self, shot: ShotSpec, assets: list, job_id: str, context_paths: tuple[Path, Path] | None = None, scene_path: Path | None = None) -> str:
         queue = await self.queue()
         if queue.get("queue_running") or queue.get("queue_pending"):
             raise RuntimeError("H3 already has a workload. Wait for it to finish.")
@@ -130,7 +141,15 @@ class H3Renderer:
                 response.raise_for_status()
                 uploaded = response.json()
                 context[kind] = str(Path(uploaded.get("subfolder", "")) / uploaded["name"])
-        graph = build_h3_graph(shot, names, job_id, context)
+        scene_video = None
+        if scene_path:
+            with scene_path.open("rb") as source:
+                response = await self.client.post(f"{self.url}/upload/image", files={"image": (scene_path.name, source, "video/mp4")},
+                                                  data={"type": "input", "overwrite": "false"}, timeout=60)
+            response.raise_for_status()
+            uploaded = response.json()
+            scene_video = str(Path(uploaded.get("subfolder", "")) / uploaded["name"])
+        graph = build_h3_graph(shot, names, job_id, context, scene_video)
         try:
             response = await self.client.post(f"{self.url}/prompt", json={"prompt": graph, "client_id": job_id}, timeout=120)
         except httpx.TransportError as exc:

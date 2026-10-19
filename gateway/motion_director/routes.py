@@ -17,9 +17,16 @@ from .planner import LocalDirector, ShotRequest, ShotSpec, segment_shot
 from . import media
 from .renderers import SubmissionUncertain, get_renderer
 from .host_client import host_request
+from .scene import SceneSpec
+from .planner import StrictModel
+from pydantic import Field
 
 tasks: dict[str, asyncio.Task] = {}
 planning_lock = asyncio.Lock()
+
+
+class Revision(StrictModel):
+    instruction: str = Field(min_length=1, max_length=1200)
 
 
 def create_router(runtime):
@@ -62,6 +69,20 @@ def create_router(runtime):
 
     runtime.MotionSegment = MotionSegment
 
+    def load_plan(plan_id):
+        with runtime.SessionLocal() as db:
+            row = db.get(MotionPlan, plan_id)
+        if not row:
+            raise HTTPException(404, "Scene plan not found")
+        return ShotSpec.model_validate_json(row.shot_json)
+
+    def preview_response(state):
+        root = f"/api/v1/outputs/motion_director/scenes/{state['id']}"
+        if state['status'] == 'completed':
+            state.update(preview_url=root+'/preview.mp4', first_frame_url=root+'/first-frame.png',
+                         export_url=root+'/grok-export.zip', prompt_url=root+'/prompt.txt', script_url=root+'/scene.py')
+        return state
+
     def fingerprint(request):
         return hashlib.sha256(json.dumps(request.model_dump(exclude={"plan_id"}), sort_keys=True).encode()).hexdigest()
 
@@ -73,15 +94,34 @@ def create_router(runtime):
             if saved and reuse_cache:
                 return ShotSpec.model_validate_json(saved.shot_json)
             shot = LocalDirector().plan(request)
+            previous = None
+            if request.parent_plan_id:
+                with runtime.SessionLocal() as db:
+                    parent = db.get(MotionPlan, request.parent_plan_id)
+                if not parent:
+                    raise HTTPException(404, "The scene to revise is missing")
+                previous = ShotSpec.model_validate_json(parent.shot_json).scene
             if request.director == "opus" or (request.director == "auto" and getattr(runtime, "HOST_CONTROL_SOCKET", "")):
                 try:
-                    data = await host_request(runtime, "claude/plan", {"shot": request.model_dump(), "references": [asset.relative_path for asset in assets_for(request)]})
+                    payload = {"shot": request.model_dump(), "references": [asset.relative_path for asset in assets_for(request)]}
+                    if previous:
+                        payload["previous_scene"] = previous
+                    data = await host_request(runtime, "claude/plan", payload)
                     candidate = ShotSpec.model_validate(data)
                     if fingerprint(candidate.request) != key or candidate.reference_ids != shot.reference_ids or (candidate.width, candidate.height, candidate.frames) != (shot.width, shot.height, shot.frames):
                         raise ValueError("Director changed protected request or hardware bounds")
                     shot = candidate
                 except (RuntimeError, httpx.HTTPError, ValueError, OSError):
+                    if request.pipeline == "3d":
+                        raise HTTPException(503, "Claude Opus could not produce a valid 3D scene. Check subscription availability and try planning again; no simulated scene or paid fallback was used.")
                     shot.notes.append("Opus unavailable or invalid. This shot uses the deterministic cinematic fallback; no retry occurs during rendering.")
+            if request.pipeline == "3d":
+                if not shot.scene:
+                    raise HTTPException(503, "3D scenes require the existing authenticated Claude Opus director")
+                try:
+                    shot.scene = SceneSpec.model_validate(shot.scene).validate_timeline(request.duration).model_dump()
+                except ValueError as exc:
+                    raise HTTPException(422, "Invalid 3D geometry or timeline; no render was started") from exc
             plan_id = str(uuid.uuid4())
             shot.request = request.model_copy(update={"plan_id": plan_id})
             with runtime.SessionLocal() as db:
@@ -110,7 +150,9 @@ def create_router(runtime):
     def serialize(row):
         with runtime.SessionLocal() as db:
             clips = db.execute(select(MotionSegment).where(MotionSegment.job_id == row.id).order_by(MotionSegment.position)).scalars().all()
+        scene_plan = json.loads(row.shot_json).get("request", {}).get("plan_id") if json.loads(row.shot_json).get("scene") else None
         return {"job_id": row.id, "service": json.loads(row.shot_json).get("request", {}).get("engine", "h3"), "status": row.status, "message": row.message,
+                "blender_preview_url": f"/api/v1/outputs/motion_director/scenes/{scene_plan}/preview.mp4" if scene_plan else None,
                 "segments": [{"index": c.position, "status": c.status, "prompt_id": c.prompt_id} for c in clips],
                 "completed_segments": sum(c.status == "completed" for c in clips), "total_segments": len(clips),
                 "error": row.error, "created_at": row.created_at.isoformat(), "prompt_id": row.prompt_id,
@@ -173,20 +215,32 @@ def create_router(runtime):
         planner = {"active": "local-director", "opus_available": False,
                    "reason": "The private host Claude Code adapter is unavailable. Deterministic planning remains available."}
         resources = None
+        resident_models = []
         if getattr(runtime, "HOST_CONTROL_SOCKET", ""):
             try:
                 status = await host_request(runtime, "claude/status")
                 planner.update(opus_available=status.get("available", False), subscription=status.get("subscription"), reason=status.get("reason"))
                 resources = await host_request(runtime, "resources")
+                resident_models = [item.get('name', 'another model') for item in resources.get('shared_gpu', {}).get('releasable', {}).get('items', [])
+                                   if item.get('kind') in {'ollama_model', 'hunyuan_models'}]
+                if resident_models:
+                    h3.update(render_ready=False, reason="Other models are resident (" + ", ".join(resident_models[:8]) + "). Unload them before H3; automatic unloading is disabled.")
                 if resources.get("blockers") or resources.get("exclusive_claims") or resources.get("shared_gpu", {}).get("exclusive"):
                     h3["render_ready"] = False
                     h3["reason"] = " ".join(resources.get("blockers", [])) or "A GPU-exclusive generation is already active."
             except (RuntimeError, httpx.HTTPError, OSError):
                 h3.update(render_ready=False, reason="Authenticated host GPU safety/coordination is unavailable.")
         h3["can_recover_memory"] = bool(h3.get("available") and scheduler and available_gb < 90 and not h3.get("busy") and resources
+                                        and not resident_models
                                         and not resources.get("exclusive_claims") and not resources.get("shared_gpu", {}).get("exclusive")
                                         and not [b for b in resources.get("blockers", []) if not b.startswith("H3 needs")])
-        return {"h3": h3, "grok": await get_renderer("grok", runtime).available(), "planner": planner, "resources": resources}
+        blender = {"available": False, "reason": "The private Blender host connection is unavailable"}
+        if getattr(runtime, "HOST_CONTROL_SOCKET", ""):
+            try:
+                blender = await host_request(runtime, "scene/capabilities")
+            except (RuntimeError, httpx.HTTPError, OSError):
+                pass
+        return {"h3": h3, "grok": await get_renderer("grok", runtime).available(), "planner": planner, "resources": resources, "blender": blender}
 
     def segment_update(segment_id, **changes):
         with runtime.SessionLocal() as db:
@@ -240,6 +294,7 @@ def create_router(runtime):
                             response = await runtime.http_client.post(f"{runtime.SUPERVISOR_URL.rstrip('/')}/recheck/h3", json={"claim_id": claim_id}, timeout=45)
                             response.raise_for_status()
                         context = await media.continuation(previous, runtime.resolve_output_path(f"motion_director/{job_id}"), i, shot.width, shot.height) if previous else None
+                        scene_path = await media.scene_window(runtime.resolve_output_path(f"motion_director/scenes/{shot.request.plan_id}/preview.mp4"), runtime.resolve_output_path(f"motion_director/{job_id}"), i, shot.width, shot.height) if shot.scene else None
                         # Persist submission intent before POST: uncertain acks and
                         # gateway restarts must never submit this clip twice.
                         if clip.status == "submitting":
@@ -249,7 +304,10 @@ def create_router(runtime):
                         await update(job_id, status="loading", message=f"Clip {i+1}/{count}: continuing the planned scene…")
                         uncertain = True
                         try:
-                            prompt_id = await renderer.submit(bounded, assets_for(shot.request), segment_id, context)
+                            if shot.scene:
+                                prompt_id = await renderer.submit(bounded, assets_for(shot.request), segment_id, context, scene_path=scene_path)
+                            else:
+                                prompt_id = await renderer.submit(bounded, assets_for(shot.request), segment_id, context)
                         except httpx.HTTPStatusError:
                             uncertain = False  # definite non-acceptance, not cancellation
                             raise
@@ -332,7 +390,11 @@ def create_router(runtime):
                     await update(job_id, status="loading", message="Uploading references to the existing H3 instance…", claim_id=claim_id)
                     uncertain = True
                     try:
-                        prompt_id = await renderer.submit(shot, assets_for(shot.request), job_id)
+                        if shot.scene:
+                            window = await media.scene_window(runtime.resolve_output_path(f"motion_director/scenes/{shot.request.plan_id}/preview.mp4"), runtime.resolve_output_path(f"motion_director/{job_id}"), 0, shot.width, shot.height)
+                            prompt_id = await renderer.submit(shot, assets_for(shot.request), job_id, scene_path=window)
+                        else:
+                            prompt_id = await renderer.submit(shot, assets_for(shot.request), job_id)
                     except httpx.HTTPStatusError:
                         uncertain = False
                         raise
@@ -406,7 +468,7 @@ def create_router(runtime):
         return await recover_memory()
 
     @router.post("/imports/grok")
-    async def import_grok(file: UploadFile = File(...), reference_job_id: str | None = Form(default=None)):
+    async def import_grok(file: UploadFile = File(...), reference_job_id: str | None = Form(default=None), reference_plan_id: str | None = Form(default=None)):
         # Manual uploads only: never fetch caller URLs, resolve API keys or spend
         # credits. Original file is preserved separately from the phone preview.
         job_id = str(uuid.uuid4())
@@ -429,12 +491,15 @@ def create_router(runtime):
             duration = float(data["format"]["duration"])
             if not videos or not (0 < duration <= 60) or not (0 < videos[0]["width"] <= 4096 and 0 < videos[0]["height"] <= 4096):
                 raise HTTPException(422, "Import a video up to 60 seconds and 4096 pixels per axis")
-            base = ShotSpec.model_validate_json(load(reference_job_id).shot_json) if reference_job_id else None
+            base = load_plan(reference_plan_id) if reference_plan_id else ShotSpec.model_validate_json(load(reference_job_id).shot_json) if reference_job_id else None
             request = ShotRequest(prompt=base.request.prompt if base else "Grok Imagine video imported for comparison",
                                   reference_ids=base.reference_ids if base else ["manual-import"], engine="grok",
                                   duration=min((5, 10, 15, 30), key=lambda n: abs(n-duration)),
                                   orientation="vertical" if videos[0]["height"] > videos[0]["width"] else "horizontal")
             shot = LocalDirector().plan(request)
+            if base and base.scene:
+                shot.scene = base.scene
+                shot.request.plan_id = base.request.plan_id
             shot.planner = "manual-import"
             shot.notes = [f"Manually imported Grok video, {duration:.2f} seconds. No Hermes/xAI generation call was made."]
             shot.frames = round(duration * 24)
@@ -476,11 +541,50 @@ def create_router(runtime):
         assets_for(request)
         return await planned_shot(request)
 
+    @router.post('/plans/{plan_id}/preview', status_code=202)
+    async def build_preview(plan_id: str):
+        shot = load_plan(plan_id)
+        if not shot.scene:
+            raise HTTPException(422, 'This older shot has no 3D scene; create a new 3D preview')
+        SceneSpec.model_validate(shot.scene).validate_timeline(shot.request.duration)
+        try:
+            state = await host_request(runtime, 'scene/start', {'id':plan_id, 'scene':shot.scene, 'duration':shot.request.duration,
+                                                               'width':shot.width, 'height':shot.height, 'prompt':shot.renderer_prompt})
+        except (RuntimeError, httpx.HTTPError, OSError) as exc:
+            raise HTTPException(503, 'The private Blender preview service is unavailable') from exc
+        return preview_response(state)
+
+    @router.get('/plans/{plan_id}/preview')
+    async def preview_status(plan_id: str):
+        load_plan(plan_id)
+        try:
+            return preview_response(await host_request(runtime, 'scene/status', {'id':plan_id}))
+        except (RuntimeError, httpx.HTTPError, OSError) as exc:
+            raise HTTPException(503, 'The private Blender preview service is unavailable') from exc
+
+    @router.post('/plans/{plan_id}/revise')
+    async def revise_scene(plan_id: str, change: Revision):
+        base = load_plan(plan_id)
+        if not base.scene or not change.instruction.strip():
+            raise HTTPException(422, 'Describe a correction to an existing 3D scene')
+        request = base.request.model_copy(update={'parent_plan_id':plan_id, 'revision':change.instruction.strip(), 'plan_id':None})
+        assets_for(request)
+        return await planned_shot(request)
+
     @router.post("/jobs", status_code=202)
     async def submit(request: ShotRequest):
         assets_for(request)
         if request.engine != "h3":
             raise HTTPException(503, "Hermes Grok OAuth video access is unverified; use manual import/compare. No paid fallback is allowed.")
+        if request.pipeline == '3d':
+            if not request.plan_id:
+                raise HTTPException(409, 'Build and review the Blender preview before generating the final video')
+            shot = submitted_plan(request)
+            if not shot.scene:
+                raise HTTPException(409, 'A validated 3D scene is required')
+            state = await host_request(runtime, 'scene/status', {'id':request.plan_id})
+            if state.get('status') != 'completed' or not runtime.resolve_output_path(f'motion_director/scenes/{request.plan_id}/preview.mp4').is_file():
+                raise HTTPException(409, 'Wait for the Blender preview to finish before generating H3')
         ready = await capabilities()
         if ready["h3"].get("can_recover_memory"):
             await recover_memory()
@@ -492,6 +596,8 @@ def create_router(runtime):
             raise HTTPException(503, workflow.get("reason", "Selected H3 workflow is unavailable"))
         if request.duration > 5 and not ready["h3"].get("continuation_available"):
             raise HTTPException(503, "Installed H3 continuation nodes are unavailable")
+        if request.pipeline == '3d' and not ready['h3'].get('reference_video'):
+            raise HTTPException(503, 'The installed H3 reference-video nodes are unavailable')
         shot = submitted_plan(request) if request.plan_id else await planned_shot(request, reuse_cache=False)
         with runtime.SessionLocal() as db:
             active_count = db.query(MotionJob).filter(MotionJob.status.notin_(["completed", "failed"])).count()

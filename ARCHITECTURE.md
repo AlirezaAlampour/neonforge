@@ -56,7 +56,7 @@ The gateway does not have the Docker socket. The supervisor is internal-only and
 | Avatar | EchoMimicV3-Flash target | Disabled until ARM64 real render passes |
 | Lip Sync | LatentSync 1.6 service | 32 GiB cold-start floor, 5-minute warm window |
 | System Info | Gateway and supervisor inspection | Always-on control plane |
-| Motion Director (unmerged, privately active) | Existing H3; optional subscription Opus/local direction; manual Grok import | 90 GiB before each bounded clip, shared exclusive lease, verified-idle cache cleanup; H3 never started/stopped |
+| Motion Director (unmerged, privately active) | Existing Opus Pro → CPU Blender scene/preview → H3 reference-video; manual Grok export/import | 90 GiB before each bounded clip, shared exclusive lease, verified-idle cache cleanup; H3 never started/stopped |
 
 ComfyUI is intentionally shared by the two managed graph workflows. The gateway supplies the managed workflow identity and bounded frame/resolution inputs. The supervisor applies small measured admission rules, checks warm containers too, and rejects competing active heavy claims.
 
@@ -85,9 +85,7 @@ and reuses uploads, the heavy semaphore, supervisor claims, output storage and
 history. `H3_COMFYUI_URL` is blank by default. Once a private route is verified,
 the external H3 reservation joins the same claim exclusion rules and guards
 other model admissions by inspecting its queue. H3 never becomes a Compose
-lifecycle target. Hermes/Grok generation stays gated on OAuth/entitlement; manual
-video import and comparison are available. Annotations guide
-the prompt until control-video inputs are validated. See [Motion Director's
+lifecycle target. Automatic Hermes/Grok generation remains disabled because the existing plugin calls the xAI API. Manual Blender export and video import/comparison are available. Classic annotations guide the prompt; the new validated 3D scene generates actual reference footage. See [Motion Director's
 activation notes](docs/motion-director-v0.1.md).
 
 The continuation adds an opt-in authenticated Unix-socket host adapter. Separate
@@ -109,3 +107,12 @@ Cancellation/unknown acknowledgements retain reservations. Idle H3 cache is
 reclaimed under the existing exclusive lease and paused workers restored.
 The authenticated socket directory uses `RuntimeDirectoryPreserve=restart` to
 keep Docker mounts valid; missing supervisor host safety disables admission.
+
+
+The 3D continuation persists immutable scene plans and revisions in the existing
+plan table. A scoped host adapter compiles validated geometry/rig/paths/camera
+data into Blender Python, runs CPU previews and exposes only rendered artifacts
+through a read-only output mount. H3 receives a 22-frame Blender window per clip
+through its real reference-video path, retaining prior AI boundary-image guides.
+No arbitrary model-generated code is executed, and strict ControlNet/trajectory
+control is not claimed. See [3D execution and limits](docs/motion-3d/WORKFLOW.md).

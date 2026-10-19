@@ -86,8 +86,8 @@ export function Sidebar() {
   return (
     <aside
       className={cn(
-        'flex shrink-0 flex-col border-r border-white/[0.06] bg-[#0a0c12]/95 backdrop-blur-xl transition-all duration-300 max-md:!w-14',
-        collapsed ? 'w-14' : 'w-[220px]',
+        'flex w-14 shrink-0 flex-col border-r border-white/[0.06] bg-[#0a0c12]/95 backdrop-blur-xl transition-all duration-300',
+        !collapsed && 'md:w-[220px]',
       )}
     >
       {/* Brand */}

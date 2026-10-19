@@ -9,6 +9,7 @@ export type ShotRequest = {
   mode: 'auto' | 'manual'; preset: 'professional' | 'intimate' | 'reveal' | 'action'
   duration: 2 | 3 | 5 | 10 | 15 | 30; orientation: 'vertical' | 'horizontal'; workflow: 'reference' | 'image'; seed: number
   director?: 'local' | 'opus' | 'auto'; engine?: 'h3' | 'grok'; plan_id?: string | null
+  pipeline?: 'prompt' | '3d'; parent_plan_id?: string | null; revision?: string
 }
 export type ShotSpec = {
   version: '0.1'; request: ShotRequest; reference_ids: string[]
@@ -16,22 +17,29 @@ export type ShotSpec = {
   camera: { movement: string; targets: string[]; paths: Annotation[]; easing: string }
   timing: { start: number; end: number; action: string }[]
   composition: string; subject_constraints: string[]; width: number; height: number; frames: number; fps: number
-  renderer_prompt: string; conditioning: 'prompt-guidance'; notes: string[]
+  renderer_prompt: string; conditioning: 'prompt-guidance' | 'reference-video'; notes: string[]
+  scene?: { description: string; reference_analysis: string; limitations: string[]; entities: {id: string; label: string; geometry: string; clip: string}[]; camera: {mode: string; distance: number} } | null
 }
 export type MotionJob = {
   job_id: string; service?: string; status: string; message: string; error?: string; created_at: string
   preview_url?: string; download_url?: string; shot: ShotSpec; prompt_id?: string
   completed_segments?: number; total_segments?: number
+  blender_preview_url?: string | null
 }
+export type ScenePreview = { id: string; status: string; message?: string; error?: string; preview_url?: string; first_frame_url?: string; export_url?: string; prompt_url?: string; script_url?: string }
 export type Capabilities = {
   h3: { available: boolean; render_ready: boolean; can_recover_memory?: boolean; reason?: string; busy?: boolean; available_gb: number; minimum_gb: number; workflows?: Record<string, { available: boolean; reason?: string }> }
   grok: { available: boolean; reason: string; authorization_url?: string | null; authorization_required?: boolean; manual_import?: boolean }
   planner: { active: string; opus_available?: boolean; subscription?: string; reason: string }
+  blender?: { available: boolean; reason?: string; assets?: {id: string; label: string; rigged: boolean}[] }
   resources?: HostResourceStatus | null
 }
 export const motionApi = {
   capabilities: () => request<Capabilities>('/api/v1/motion-director/capabilities'),
   plan: (body: ShotRequest) => request<ShotSpec>('/api/v1/motion-director/plan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+  buildPreview: (id: string) => request<ScenePreview>(`/api/v1/motion-director/plans/${id}/preview`, { method: 'POST' }),
+  preview: (id: string) => request<ScenePreview>(`/api/v1/motion-director/plans/${id}/preview`),
+  revise: (id: string, instruction: string) => request<ShotSpec>(`/api/v1/motion-director/plans/${id}/revise`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({instruction})}),
   submit: (body: ShotRequest) => request<MotionJob>('/api/v1/motion-director/jobs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
   jobs: () => request<{ items: MotionJob[] }>('/api/v1/motion-director/jobs'),
   upload: async (file: File) => {
@@ -40,9 +48,10 @@ export const motionApi = {
   },
   reconcile: (jobId: string) => request<MotionJob>(`/api/v1/motion-director/jobs/${jobId}/reconcile`, { method: 'POST' }),
   recoverMemory: () => request('/api/v1/motion-director/memory/recover', { method: 'POST' }),
-  importGrok: async (file: File, referenceJobId?: string) => {
+  importGrok: async (file: File, referenceJobId?: string, referencePlanId?: string) => {
     const body = new FormData(); body.append('file', file)
     if (referenceJobId) body.append('reference_job_id', referenceJobId)
+    if (referencePlanId) body.append('reference_plan_id', referencePlanId)
     return request<MotionJob>('/api/v1/motion-director/imports/grok', { method: 'POST', body })
   },
 }

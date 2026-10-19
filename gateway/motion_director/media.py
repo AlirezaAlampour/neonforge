@@ -27,6 +27,15 @@ async def continuation(previous: Path, folder: Path, index: int, width: int, hei
     return image, video
 
 
+async def scene_window(source: Path, folder: Path, index: int, width: int, height: int):
+    """One real-time opening motion window per clip; retain the tested 22-frame budget."""
+    folder.mkdir(parents=True, exist_ok=True)
+    video = folder / f"blender-motion-{index}.mp4"
+    await command("ffmpeg", "-v", "error", "-y", "-ss", str(index*5), "-i", str(source), "-an", "-vf",
+                  f"fps=24,scale={width}:{height}", "-frames:v", "22", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-threads", "2", str(video))
+    return video
+
+
 async def trim(source: Path, target: Path, duration: int, skip_boundary: bool):
     target.parent.mkdir(parents=True, exist_ok=True)
     await command("ffmpeg", "-v", "error", "-y", "-i", str(source), "-ss", str(1/24 if skip_boundary else 0),

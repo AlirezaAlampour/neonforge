@@ -44,6 +44,9 @@ class ShotRequest(StrictModel):
     director: Literal["local", "opus", "auto"] = "local"
     engine: Literal["h3", "grok"] = "h3"
     plan_id: str | None = Field(default=None, max_length=36)
+    pipeline: Literal["prompt", "3d"] = "prompt"
+    parent_plan_id: str | None = Field(default=None, pattern=r"^[a-f0-9-]{36}$")
+    revision: str = Field(default="", max_length=1200)
 
     @model_validator(mode="after")
     def check_references(self):
@@ -61,6 +64,8 @@ class ShotRequest(StrictModel):
             raise ValueError("Image-to-video requires exactly one first-frame image")
         if self.workflow == "image" and self.duration > 5:
             raise ValueError("Long videos use the installed reference-to-video continuation graph")
+        if self.pipeline == "3d" and self.workflow != "reference":
+            raise ValueError("3D direction uses the installed reference-video checkpoint")
         return self
 
 
@@ -110,6 +115,8 @@ def apply_director_decisions(base: "ShotSpec", decisions: DirectorDecisions) -> 
         guidance = guidance.replace("<Picture 1>", "the first frame")
     timeline = " ".join(f"{b.start:.1f}–{b.end:.1f}s: {b.action}" for b in beats)
     prompt = f"{reference_text} {base.request.prompt}\nCamera: {camera.movement}. {decisions.composition}\n{timeline}\n{' '.join(constraints)}\n{guidance}"
+    if base.request.revision:
+        prompt += "\nScene correction: " + base.request.revision
     if len(prompt) > 24000:
         raise ValueError("Compiled director prompt is too large")
     return base.model_copy(update={"planner": "claude-code-opus", "camera": camera, "timing": beats,
@@ -132,8 +139,11 @@ class ShotSpec(StrictModel):
     fps: Literal[24] = 24
     frames: int
     renderer_prompt: str
-    conditioning: Literal["prompt-guidance"] = "prompt-guidance"
+    conditioning: Literal["prompt-guidance", "reference-video"] = "prompt-guidance"
     notes: list[str]
+    # Kept as JSON here to avoid a schema import cycle; validate_scene is the
+    # mandatory boundary before persistence, rendering and inference.
+    scene: dict | None = None
 
 
 def segment_shot(scene: ShotSpec, index: int) -> ShotSpec:
@@ -148,8 +158,12 @@ def segment_shot(scene: ShotSpec, index: int) -> ShotSpec:
     refs = " ".join(f"<Picture {i+1}> preserves reference identity {r}." for i, r in enumerate(scene.reference_ids))
     context = ("<Video 1> is the preceding shot's final motion. Continue its direction, lighting, pose and geography. "
                "The guide image is the exact boundary frame. Start there and continue naturally; no reset or cut." if index else "Establish the scene without rushing.")
+    if scene.scene:
+        context = "<Video 1> is this clip's opening Blender motion reference. Keep the reference camera behind the running character when specified. " + ("Continue from the preceding AI clip's boundary image without a cut." if index else "Establish this rendered scene geography.")
     timeline = " ".join(f"{b.start:.2f}–{b.end:.2f}s: {b.action}" for b in beats)
     prompt = f"{refs} {scene.request.prompt}\nClip {index+1}/{count}, scene time {start}–{end}s. {context}\nCamera: {scene.camera.movement}. {scene.composition}\n{timeline}\n{' '.join(scene.subject_constraints)}\n" + " ".join(describe_annotation(a, scene.reference_ids.index(a.reference_id)+1) for a in scene.camera.paths + scene.staging)
+    if scene.request.revision:
+        prompt += "\nScene correction: " + scene.request.revision
     return scene.model_copy(update={"request": scene.request.model_copy(update={"duration": duration, "seed": (scene.request.seed + index) % (2**53), "plan_id": None}),
                                    "frames": 5 + 17 * math.ceil((duration * 24 - 5) / 17), "timing": beats, "renderer_prompt": prompt})
 

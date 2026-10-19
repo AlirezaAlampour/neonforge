@@ -10,10 +10,13 @@ const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR
     const page = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 1 })
     // Emulate the private HTTP phone origin even on secure-context localhost.
     await page.addInitScript(() => Object.defineProperty(crypto, 'randomUUID', { value: undefined }))
+    if(process.env.MOTION_TEST_API) await page.route('**/api/v1/**', async route => { const url = new URL(route.request().url()); const response = await route.fetch({url:process.env.MOTION_TEST_API+url.pathname+url.search}); await route.fulfill({response}) })
     const errors = []
     page.on('pageerror', error => errors.push(String(error)))
     await page.goto(`${baseURL}/motion-director`)
     await page.getByRole('heading', { name: /Motion Director/ }).waitFor()
+    await page.getByText('Advanced · settings & shot plan', {exact:true}).click()
+    await page.getByLabel('Workflow', {exact:true}).selectOption('prompt')
     await page.getByLabel('Upload reference images').setInputFiles({ name: 'phone-reference.png', mimeType: 'image/png', buffer: png })
     await page.getByText('Optional drawing · camera & subjects', { exact: true }).click()
     const canvas = page.getByRole('img', { name: /Draw .* on reference image/ })

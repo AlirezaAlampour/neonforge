@@ -1,31 +1,36 @@
 # NeonForge v0.2 state
 
-Base: `neonforge-v0.2`, based on tested MisoTTS `994fc92`. Current feature branch:
-`motion-director-v0.1`, unmerged. Updated 2026-10-12.
+Base: `neonforge-v0.2`. Current feature branch: `motion-director-v0.1`,
+unmerged. Updated 2026-10-19.
 
-Motion Director is privately active at `http://100.103.129.82:3000/motion-director`.
-The longest real validated H3 output is **10.031 seconds**, 384×672 H.264/AAC,
-two continued 5-second clips. The phone flow is upload → describe → optional
-drawing → duration/engine → Generate, with automatic professional direction.
-5/10/15/30-second outputs use bounded sequential clips, motion context and a
-boundary-frame guide; original images and editable drawings stay separate.
+Motion Director now connects original reference images → existing Claude Code Pro
+vision/structured scene specification → trusted Blender Python compiler → actual
+rigged 3D animation and independent camera → preview/corrections → H3 reference
+video conditioning → paired output comparison. This uses the existing ARM64
+Blender and H3 processes, with no new project, model service or Hermes profile.
 
-Retained H3 model cache caused post-render availability to fall to ~58 GiB.
-Verified-idle cleanup now restores ~97.3 GiB automatically before another clip
-and after generation. Every clip still needs 90 GiB available; the existing
-2000 MHz cap remains. The real test reached 96% GPU/51°C and restored the idle
-pipeline worker. Both audio processes were preserved in this continuation.
-The private socket directory now survives adapter restarts without stale mounts.
+Real browser acceptance passed for a running character with a camera behind it,
+including a natural-language correction from four to six metres. A real
+10.031-second H3 output (240 H.264 frames, AAC, two clips) passed. Every sampled
+Blender environment transform stayed stationary, but the final AI video moves
+bystanders and drifts in distance/framing; reference conditioning does not enforce
+exact choreography. Reusable clips are stylized; realistic mocap, detailed image
+reconstruction and complex rigged interactions remain unsupported.
 
-Claude CLI and VS Code share the existing Pro login. Extra usage is now verified
-off; one real Opus scene plan passed after fixing the CLI streaming format.
-Automatic planning uses Opus once when available and local direction otherwise.
-Hermes's existing Pinokio xAI video plugin was found, but its launcher is offline
-and no Grok OAuth is saved. Grok generation stays unavailable; manual MP4 import/
-compare works. 176 backend regressions, frontend builds and phone/browser checks
-pass. No paid API calls, models, subscriptions or profiles were added. First-frame
-weights and Blender remain unactivated. See [continuation evidence and actions](docs/motion-director-continuation.md)
-and [initial activation evidence](docs/motion-director-activation.md).
+The unchanged H3 gate requires 90 GiB before each bounded clip. Observed inference
+memory stayed ≥68.96 GiB and clocks ≤1989MHz under the existing 2000MHz cap. Qwen
+was temporarily unloaded with explicit owner approval and restored with its
+original context/pinned residency after verified-idle H3 cleanup. Resident Qwen
+continues to block H3 admission; no automatic model eviction was added.
+
+Forge3D GLB retrieval/import and an actual orbit render passed. The optional uv
+`blender` group supplies a missing OpenBLAS library only to Blender's subprocess.
+Existing installations remain untouched. The Hermes plugin uses the xAI API even
+with subscription OAuth, so automatic Grok stays disabled. Exported MP4/PNG/prompt
+and manual import/comparison are supported; a real Grok browser render remains
+untested. See [audit](docs/motion-3d/AUDIT.md),
+[workflow and limitations](docs/motion-3d/WORKFLOW.md) and
+[real verification](docs/motion-3d/VERIFICATION.md).
 
 Primary surfaces: Voiceover, Video, Character, Avatar, Lip Sync, System Info.
 Voiceover UI is preserved. Video, Character and Lip Sync have focused input workspaces, shared large results and compact settings. The three duplicate creator routes are deleted.

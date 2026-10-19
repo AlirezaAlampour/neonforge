@@ -24,7 +24,9 @@ export async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init)
   if (!res.ok) {
     const body = await res.text().catch(() => '')
-    throw new ApiError(res.status, body || `HTTP ${res.status}`)
+    let message = body || `HTTP ${res.status}`
+    try { const data = JSON.parse(body); if(typeof data.detail === 'string') message = data.detail } catch { /* Non-JSON errors keep the server message. */ }
+    throw new ApiError(res.status, message)
   }
   return res.json()
 }

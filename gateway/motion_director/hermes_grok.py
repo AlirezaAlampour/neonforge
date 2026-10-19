@@ -25,5 +25,4 @@ def status():
     return {"available": False, "connector": "existing-hermes-video-plugin", "installed": installed,
             "oauth_present": oauth_present, "authorization_required": not oauth_present, "manual_import": True,
             "authorization_url": None,
-            "reason": ("Existing Hermes xAI video plugin found; Grok OAuth is not saved. Launch the existing Pinokio Hermes app and authorize xai-oauth using existing SuperGrok access. No API-key fallback or new subscription is allowed. Manual import/compare is available."
-                       if installed and not oauth_present else "Hermes Grok video entitlement/no-cost access is unverified. Generation remains disabled; manual import/compare is available.")}
+            "reason": "Existing Hermes video plugin uses the xAI generation API even with subscription OAuth. Automatic Grok generation is disabled under your no-API constraint. Export the Blender MP4, first-frame PNG and prompt, then import a video made in the Grok browser. Existing Hermes profiles are preserved."}

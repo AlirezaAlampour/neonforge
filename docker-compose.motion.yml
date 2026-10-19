@@ -22,6 +22,12 @@ services:
       NEONFORGE_HOST_SOCKET: /run/neonforge-motion/control.sock
       NEONFORGE_HOST_KEY: /run/neonforge-gateway.key
     volumes:
+      # The unprivileged host renderer owns this directory. The gateway only
+      # reads its rendered media; Claude credentials and host executables stay out.
+      - type: bind
+        source: /home/xxfactionsxx/neonforge/.motion-runtime/scene-outputs/motion_director/scenes
+        target: /outputs/motion_director/scenes
+        read_only: true
       - type: bind
         source: /run/user/1000/neonforge-motion
         target: /run/neonforge-motion

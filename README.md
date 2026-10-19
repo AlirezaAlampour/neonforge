@@ -56,7 +56,7 @@ Open the frontend at the configured address (loopback port 3000 by default). Fol
 
 ## Models
 
-Voiceover preserves Breeze, F5, Fish, VoxCPM2 and Miso pending capability comparisons. Video currently uses HunyuanVideo 1.5; MiniMax H3 remains blocked pending applicable licensing and local proof. Character uses Wan2.2 Animate Replace; Lip Sync uses LatentSync 1.6.
+Voiceover preserves Breeze, F5, Fish, VoxCPM2 and Miso pending capability comparisons. Video uses HunyuanVideo 1.5; the unmerged Motion Director feature now has a verified local H3 reference-video workflow (see its audit and acceptance notes). Character uses Wan2.2 Animate Replace; Lip Sync uses LatentSync 1.6.
 
 See the dated [model matrix and licenses](docs/models.md), [pivot audit](docs/pivot-audit.md), and [real acceptance evidence](docs/acceptance-v0.2.md). Tests and health endpoints alone do not establish generation support.
 
@@ -86,3 +86,8 @@ Frontend commands above use existing locked dependencies. Python package managem
 ## License
 
 No NeonForge source license has been granted in this repository; absent a license, redistribution rights are not implied. Third-party code, checkpoints, voices, reference media and outputs retain their own terms. Review [model licenses](docs/models.md) before commercial use.
+
+Motion Director on the unmerged `motion-director-v0.1` branch now includes real
+Claude Pro → Blender 3D preview/revisions → H3 reference-video conditioning, plus
+Grok browser export/import. See the [audit and workflow](docs/motion-3d/WORKFLOW.md)
+and [measured acceptance](docs/motion-3d/VERIFICATION.md).
