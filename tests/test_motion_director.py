@@ -290,7 +290,8 @@ def test_external_h3_claim_has_no_lifecycle_authority_or_reclamation():
 def test_h3_workload_bounds_cannot_bypass_supervisor():
     for frames in [56, 73, 124]:
         assert workload_minimum_gb("h3", "motion-h3", frames=frames, width=384, height=672) == 90
-    for args in [(56, 1344, 768), (1000, 384, 672)]:
+    assert workload_minimum_gb('h3','motion-h3',frames=124,width=768,height=1344)==105
+    for args in [(56, 1920, 1080), (1000, 384, 672)]:
         with pytest.raises(ValueError):
             workload_minimum_gb("h3", "motion-h3", frames=args[0], width=args[1], height=args[2])
 

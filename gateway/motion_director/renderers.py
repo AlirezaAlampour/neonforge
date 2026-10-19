@@ -8,6 +8,7 @@ from typing import Protocol
 import httpx
 
 from .planner import ShotSpec
+from shared.motion_quality import PROFILES
 
 WORKFLOW_PATH = Path(__file__).with_name("h3.workflow.json")
 IMAGE_MODEL = "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
@@ -33,10 +34,13 @@ def build_h3_graph(shot: ShotSpec, image_names: list[str], job_id: str, context:
     graph["92"]["inputs"]["filename_prefix"] = f"motion_director/{job_id}"
     node = graph["136"]["inputs"]
     node.update(width=shot.width, height=shot.height, length=shot.frames)
+    profile = PROFILES[shot.request.quality]
+    if profile['crf'] is not None:
+        graph['92']['inputs'].update({'format.codec.encoding': 're-encode', 'format.codec.encoding.crf': profile['crf']})
     for index, name in enumerate(image_names):
         load, scaled = f"ref_{index}", f"scale_{index}"
         graph[load] = {"class_type": "LoadImage", "inputs": {"image": name}}
-        graph[scaled] = {"class_type": "ResizeImagesByLongerEdge", "inputs": {"images": [load, 0], "longer_edge": 672}}
+        graph[scaled] = {"class_type": "ResizeImagesByLongerEdge", "inputs": {"images": [load, 0], "longer_edge": max(shot.width,shot.height)}}
         node[f"ref_images.ref_image_{index}"] = [scaled, 0]
     if shot.request.workflow == "image":
         # The installed first/last-frame blueprint uses fl2va, not ref2va.
@@ -63,11 +67,16 @@ def build_h3_graph(shot: ShotSpec, image_names: list[str], job_id: str, context:
             raise ValueError("Blender conditioning requires the reference checkpoint")
         graph["blender_video"] = {"class_type": "LoadVideo", "inputs": {"file": scene_video}}
         graph["blender_frames"] = {"class_type": "GetVideoComponents", "inputs": {"video": ["blender_video", 0]}}
-        # Preserve the tested one-video/22-frame budget. Continuations keep the
-        # exact previous boundary guide, with this clip's Blender motion window.
+        # Use one bounded video. Continuations keep the exact previous boundary
+        # guide, with this clip's Blender motion window.
         node["ref_videos.ref_video_0"] = ["blender_frames", 0]
         graph.pop("context_video", None); graph.pop("context_frames", None)
-        graph["138"]["inputs"]["value"] += "\n<Video 1> is the rendered Blender spatial/action/camera reference for this clip. Follow its travel direction and camera placement; keep identity and style from <Picture 1>. It shows only the opening 22 frames; continue the specified action for the full clip."
+        graph["138"]["inputs"]["value"] += ("\n<Video 1> supplies motion timing, layout and camera tracking ONLY. Preserve the detailed subject identity, clothing, environment appearance and lighting from <Picture 1>; do not transfer the motion reference's materials or simplified subject shape. "
+            + ("It shows the clip's full motion; hold the same subject framing and camera speed throughout." if shot.request.quality == 'native' else "It shows only the opening 22 frames; continue the specified action for the full clip."))
+        if shot.request.quality == 'native' and not context:
+            graph['appearance_guide'] = {'class_type':'MiniMaxH3AddGuide','inputs':{
+                'positive':['136',0], 'latent':['136',1], 'vae':['119',0], 'image':['ref_0',0], 'frame_idx':0}}
+            graph['126']['inputs']['conditioning'] = ['appearance_guide',0]
     return graph
 
 

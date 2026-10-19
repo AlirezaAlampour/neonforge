@@ -91,3 +91,8 @@ Motion Director on the unmerged `motion-director-v0.1` branch now includes real
 Claude Pro → Blender 3D preview/revisions → H3 reference-video conditioning, plus
 Grok browser export/import. See the [audit and workflow](docs/motion-3d/WORKFLOW.md)
 and [measured acceptance](docs/motion-3d/VERIFICATION.md).
+
+The quality follow-up adds separate Opus scene/H3 plans, an optional editable
+AI Shot Plan, richer Blender control geometry and native-resolution profiles.
+See the [resolution/blur audit](docs/motion-quality/AUDIT.md) and
+[same-reference A/B/C/D results](docs/motion-quality/RESULTS.md).

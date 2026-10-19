@@ -10,7 +10,7 @@ from . import rig
 from . import geo
 
 
-def build(name, material, collection):
+def build(name, material, collection, look=None, make_material=None):
     """Create the rig and body. Returns the armature object."""
     arm_data = bpy.data.armatures.new(f"{name}_rig")
     arm = bpy.data.objects.new(name, arm_data)
@@ -18,10 +18,13 @@ def build(name, material, collection):
 
     view_layer = bpy.context.view_layer
     view_layer.objects.active = arm
+    look = look or {}
+    xscale = look.get('shoulder_width', .4)/.4
+    transform = lambda p: (p[0]*xscale,p[1],p[2])
     bpy.ops.object.mode_set(mode="EDIT")
     for bone, head, tail, parent in rig.BONES:
         eb = arm_data.edit_bones.new(bone)
-        eb.head, eb.tail, eb.roll = head, tail, 0.0
+        eb.head, eb.tail, eb.roll = transform(head), transform(tail), 0.0
         if parent:
             eb.parent = arm_data.edit_bones[parent]
     bpy.ops.object.mode_set(mode="OBJECT")
@@ -29,30 +32,48 @@ def build(name, material, collection):
     group_index = {bone: i for i, (bone, *_rest) in enumerate(rig.BONES)}
     bm = bmesh.new()
     deform = bm.verts.layers.deform.verify()
-    for kind, bone, *spec in rig.PARTS:
+    colors = ['skin','top','bottom','shoes','hair','bag']
+    palette = [make_material('#553721' if k=='bag' else look.get(k, '#8d7561')) for k in colors] if make_material else [material]
+    parts=list(rig.PARTS)
+    if look:
+        parts.append(('ellipsoid','head',(0,.015,1.75),(.102,.115,.075)))
+        if look.get('bag'):
+            parts.append(('box','chest',(.1,.16,1.15),(.22,.12,.26)))
+    for index,(kind, bone, *spec) in enumerate(parts):
+        old_faces=set(bm.faces)
+        old_vertices=set(bm.verts)
         if kind == "ellipsoid":
-            verts = geo.ellipsoid(bm, spec[0], spec[1], segments=(14, 9), smooth=False)
+            verts = geo.ellipsoid(bm, transform(spec[0]), transform(spec[1]), segments=(20, 12), smooth=True)
         elif kind == "limb":
             _, head, tail, _ = rig.BONE_INDEX[bone]
-            verts = geo.cylinder(bm, head, tail, spec[0], spec[1], segments=12, smooth=False)
+            verts = geo.cylinder(bm, transform(head), transform(tail), spec[0], spec[1], segments=16, smooth=True)
         elif kind == "box":
             c, s = spec
-            verts = geo.box(bm, [c[i] - s[i] / 2 for i in range(3)], [c[i] + s[i] / 2 for i in range(3)])
+            verts = geo.box(bm, transform([c[i] - s[i] / 2 for i in range(3)]), transform([c[i] + s[i] / 2 for i in range(3)]))
         else:
             raise ValueError(kind)
-        for v in verts:
+        for v in set(bm.verts)-old_vertices:
             v[deform][group_index[bone]] = 1.0
+        part='skin'
+        if bone in {'spine','chest'}:part='top'
+        if bone=='hips' or bone.startswith('thigh'):part='bottom'
+        if bone.startswith('foot'):part='shoes'
+        if index>=len(rig.PARTS):part='hair' if kind=='ellipsoid' else 'bag'
+        for face in set(bm.faces)-old_faces:
+            face.material_index=colors.index(part) if make_material else 0
 
     mesh = bpy.data.meshes.new(f"{name}_body")
     bm.to_mesh(mesh)
     bm.free()
-    mesh.materials.append(material)
+    for mat in palette:mesh.materials.append(mat)
     body = bpy.data.objects.new(f"{name}_body", mesh)
     collection.objects.link(body)
     for bone, *_rest in rig.BONES:
         body.vertex_groups.new(name=bone)
     body.parent = arm
     body.modifiers.new("rig", "ARMATURE").object = arm
+    if any(not v.groups for v in mesh.vertices):
+        raise ValueError('Every body vertex, including split cap vertices, must belong to the reusable rig')
 
     for pb in arm.pose.bones:
         pb.rotation_mode = "QUATERNION"

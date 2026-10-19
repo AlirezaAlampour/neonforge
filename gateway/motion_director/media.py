@@ -27,19 +27,25 @@ async def continuation(previous: Path, folder: Path, index: int, width: int, hei
     return image, video
 
 
-async def scene_window(source: Path, folder: Path, index: int, width: int, height: int):
-    """One real-time opening motion window per clip; retain the tested 22-frame budget."""
+async def scene_window(source: Path, folder: Path, index: int, width: int, height: int, quality='draft'):
+    """Real-time motion: draft opening window or native full-clip coverage."""
     folder.mkdir(parents=True, exist_ok=True)
     video = folder / f"blender-motion-{index}.mp4"
+    native = quality == 'native'
+    # Motion geometry needs temporal coverage more than fine texture. Keep its
+    # canvas bounded while original-image conditioning uses the native canvas.
+    mw,mh = ((384,672) if height>width else (672,384)) if native else (width,height)
+    filters = f'fps=24,scale={mw}:{mh}' + (',tpad=stop_mode=clone:stop_duration=0.17' if native else '')
     await command("ffmpeg", "-v", "error", "-y", "-ss", str(index*5), "-i", str(source), "-an", "-vf",
-                  f"fps=24,scale={width}:{height}", "-frames:v", "22", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-threads", "2", str(video))
+                  filters, "-frames:v", "124" if native else "22", "-c:v", "libx264", "-crf", "16" if native else "23",
+                  "-pix_fmt", "yuv420p", "-threads", "2", str(video))
     return video
 
 
-async def trim(source: Path, target: Path, duration: int, skip_boundary: bool):
+async def trim(source: Path, target: Path, duration: int, skip_boundary: bool, quality='draft'):
     target.parent.mkdir(parents=True, exist_ok=True)
     await command("ffmpeg", "-v", "error", "-y", "-i", str(source), "-ss", str(1/24 if skip_boundary else 0),
-                  "-t", str(duration), "-map", "0:v:0", "-map", "0:a:0?", "-vf", "fps=24", "-c:v", "libx264", "-crf", "18",
+                  "-t", str(duration), "-map", "0:v:0", "-map", "0:a:0?", "-vf", "fps=24", "-c:v", "libx264", "-crf", "16" if quality=='native' else "18",
                   "-pix_fmt", "yuv420p", "-c:a", "aac", "-threads", "2", "-movflags", "+faststart", str(target))
 
 

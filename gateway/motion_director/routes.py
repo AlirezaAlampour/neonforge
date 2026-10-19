@@ -6,6 +6,8 @@ import json
 import hashlib
 import uuid
 from datetime import datetime
+from typing import Literal
+from shared.motion_quality import PROFILES
 
 import httpx
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
@@ -84,7 +86,10 @@ def create_router(runtime):
         return state
 
     def fingerprint(request):
-        return hashlib.sha256(json.dumps(request.model_dump(exclude={"plan_id"}), sort_keys=True).encode()).hexdigest()
+        data = request.model_dump(exclude={"plan_id"})
+        if data.get('quality') == 'draft':
+            data.pop('quality')  # pre-quality saved plans keep their fingerprint
+        return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
     async def planned_shot(request, reuse_cache=True):
         async with planning_lock:
@@ -187,7 +192,8 @@ def create_router(runtime):
             raise HTTPException(409, response.json().get("detail", "Memory recovery is unavailable while GPU work is active"))
         return response.json()
 
-    async def capabilities():
+    async def capabilities(quality="draft"):
+        minimum = PROFILES[quality]["minimum_gib"]
         h3 = await get_renderer("h3", runtime).available()
         memory = runtime.get_memory_status()
         available_gb = memory.get("available_gb", 0)
@@ -204,12 +210,12 @@ def create_router(runtime):
                              and (status.get("host") is None or bool(status["host"].get("gpu", {}).get("cap_active"))))
             except (httpx.HTTPError, ValueError, TypeError):
                 pass
-        h3.update(scheduler_ready=scheduler, available_gb=round(available_gb, 1), minimum_gb=90,
-                  render_ready=bool(h3.get("available") and scheduler and available_gb >= 90 and not h3.get("busy")))
+        h3.update(scheduler_ready=scheduler, available_gb=round(available_gb, 1), minimum_gb=minimum, quality=quality, native_canvas=PROFILES[quality]["vertical"],
+                  render_ready=bool(h3.get("available") and scheduler and available_gb >= minimum and not h3.get("busy")))
         if h3.get("available") and not scheduler:
             h3["reason"] = "H3 safety coordination is unavailable. Wait for the resource scheduler and its private host connection to recover."
-        elif h3.get("available") and available_gb < 90:
-            h3["reason"] = f"H3 requires 90 GiB available; current {available_gb:.1f} GiB. Existing services will be preserved."
+        elif h3.get("available") and available_gb < minimum:
+            h3["reason"] = f"H3 requires {minimum:g} GiB available; current {available_gb:.1f} GiB. Existing services will be preserved."
         elif h3.get("busy"):
             h3["reason"] = "H3 has an existing workload. Wait for it to finish."
         planner = {"active": "local-director", "opus_available": False,
@@ -225,12 +231,13 @@ def create_router(runtime):
                                    if item.get('kind') in {'ollama_model', 'hunyuan_models'}]
                 if resident_models:
                     h3.update(render_ready=False, reason="Other models are resident (" + ", ".join(resident_models[:8]) + "). Unload them before H3; automatic unloading is disabled.")
-                if resources.get("blockers") or resources.get("exclusive_claims") or resources.get("shared_gpu", {}).get("exclusive"):
+                blockers = [b for b in resources.get("blockers", []) if not b.startswith("H3 needs")]
+                if blockers or resources.get("exclusive_claims") or resources.get("shared_gpu", {}).get("exclusive"):
                     h3["render_ready"] = False
-                    h3["reason"] = " ".join(resources.get("blockers", [])) or "A GPU-exclusive generation is already active."
+                    h3["reason"] = " ".join(blockers) or "A GPU-exclusive generation is already active."
             except (RuntimeError, httpx.HTTPError, OSError):
                 h3.update(render_ready=False, reason="Authenticated host GPU safety/coordination is unavailable.")
-        h3["can_recover_memory"] = bool(h3.get("available") and scheduler and available_gb < 90 and not h3.get("busy") and resources
+        h3["can_recover_memory"] = bool(h3.get("available") and scheduler and available_gb < minimum and not h3.get("busy") and resources
                                         and not resident_models
                                         and not resources.get("exclusive_claims") and not resources.get("shared_gpu", {}).get("exclusive")
                                         and not [b for b in resources.get("blockers", []) if not b.startswith("H3 needs")])
@@ -268,7 +275,7 @@ def create_router(runtime):
             try:
                 if not claim_id:
                     await update(job_id, status="preparing", message="Reserving H3 and recovering idle model memory…")
-                    ready = await capabilities()
+                    ready = await capabilities(shot.request.quality)
                     if ready["h3"].get("can_recover_memory"):
                         await recover_memory()
                     prepared = await runtime.prepare_workload("h3", job_id=job_id, claim_id=job_id, workload_id="motion-h3",
@@ -294,7 +301,7 @@ def create_router(runtime):
                             response = await runtime.http_client.post(f"{runtime.SUPERVISOR_URL.rstrip('/')}/recheck/h3", json={"claim_id": claim_id}, timeout=45)
                             response.raise_for_status()
                         context = await media.continuation(previous, runtime.resolve_output_path(f"motion_director/{job_id}"), i, shot.width, shot.height) if previous else None
-                        scene_path = await media.scene_window(runtime.resolve_output_path(f"motion_director/scenes/{shot.request.plan_id}/preview.mp4"), runtime.resolve_output_path(f"motion_director/{job_id}"), i, shot.width, shot.height) if shot.scene else None
+                        scene_path = await media.scene_window(runtime.resolve_output_path(f"motion_director/scenes/{shot.request.plan_id}/preview.mp4"), runtime.resolve_output_path(f"motion_director/{job_id}"), i, shot.width, shot.height, shot.request.quality) if shot.scene else None
                         # Persist submission intent before POST: uncertain acks and
                         # gateway restarts must never submit this clip twice.
                         if clip.status == "submitting":
@@ -331,7 +338,10 @@ def create_router(runtime):
                                     source = await renderer.retrieve(entry, segment_id)
                                     relative = f"motion_director/{job_id}/clip-{i}.mp4"
                                     previous = runtime.resolve_output_path(relative)
-                                    await media.trim(runtime.resolve_output_path(source), previous, 5, bool(i))
+                                    if shot.request.quality == 'native':
+                                        await media.trim(runtime.resolve_output_path(source), previous, 5, bool(i), quality='native')
+                                    else:
+                                        await media.trim(runtime.resolve_output_path(source), previous, 5, bool(i))
                                     segment_update(segment_id, status="completed", source_path=source, output_path=relative)
                                     outputs.append(previous)
                                     break
@@ -376,7 +386,7 @@ def create_router(runtime):
         async with runtime.gpu_heavy_sem:
             try:
                 if not submitted:
-                    ready = await capabilities()
+                    ready = await capabilities(shot.request.quality)
                     if not ready["h3"]["render_ready"]:
                         raise RuntimeError(ready["h3"].get("reason", "H3 is unavailable"))
                     workflow = ready["h3"].get("workflows", {}).get(shot.request.workflow, {})
@@ -391,7 +401,7 @@ def create_router(runtime):
                     uncertain = True
                     try:
                         if shot.scene:
-                            window = await media.scene_window(runtime.resolve_output_path(f"motion_director/scenes/{shot.request.plan_id}/preview.mp4"), runtime.resolve_output_path(f"motion_director/{job_id}"), 0, shot.width, shot.height)
+                            window = await media.scene_window(runtime.resolve_output_path(f"motion_director/scenes/{shot.request.plan_id}/preview.mp4"), runtime.resolve_output_path(f"motion_director/{job_id}"), 0, shot.width, shot.height, shot.request.quality)
                             prompt_id = await renderer.submit(shot, assets_for(shot.request), job_id, scene_path=window)
                         else:
                             prompt_id = await renderer.submit(shot, assets_for(shot.request), job_id)
@@ -460,8 +470,8 @@ def create_router(runtime):
     runtime.update_motion_job = update
 
     @router.get("/capabilities")
-    async def get_capabilities():
-        return await capabilities()
+    async def get_capabilities(quality: Literal["draft", "native"] = "draft"):
+        return await capabilities(quality)
 
     @router.post("/memory/recover")
     async def recover_idle_memory():
@@ -585,16 +595,16 @@ def create_router(runtime):
             state = await host_request(runtime, 'scene/status', {'id':request.plan_id})
             if state.get('status') != 'completed' or not runtime.resolve_output_path(f'motion_director/scenes/{request.plan_id}/preview.mp4').is_file():
                 raise HTTPException(409, 'Wait for the Blender preview to finish before generating H3')
-        ready = await capabilities()
+        ready = await capabilities(request.quality)
         if ready["h3"].get("can_recover_memory"):
             await recover_memory()
-            ready = await capabilities()
+            ready = await capabilities(request.quality)
         if not ready["h3"]["render_ready"]:
             raise HTTPException(503, ready["h3"].get("reason", "H3 is unavailable"))
         workflow = ready["h3"].get("workflows", {}).get(request.workflow, {})
         if not workflow.get("available"):
             raise HTTPException(503, workflow.get("reason", "Selected H3 workflow is unavailable"))
-        if request.duration > 5 and not ready["h3"].get("continuation_available"):
+        if (request.duration > 5 or request.quality == "native") and not ready["h3"].get("continuation_available"):
             raise HTTPException(503, "Installed H3 continuation nodes are unavailable")
         if request.pipeline == '3d' and not ready['h3'].get('reference_video'):
             raise HTTPException(503, 'The installed H3 reference-video nodes are unavailable')

@@ -217,7 +217,8 @@ class Coordinator:
                 raise RuntimeError("Cross-project idle coordination requires the owner's approval.")
             acquired = await self.lease("acquire", {"lease_seconds": 900})
             self.token = acquired["token"]
-            self.claims[request.claim_id] = {"service": request.service, "at": time.time(), "paused_services": request.paused_services}
+            self.claims[request.claim_id] = {"service": request.service, "at": time.time(), "paused_services": request.paused_services,
+                                             "minimum_gb": max(request.minimum_gb, 90 if request.service == 'h3' else 0)}
             self.save()
             minimum = max(request.minimum_gb, 90 if request.service == "h3" else 0)
             if memory()["available_gb"] < minimum:

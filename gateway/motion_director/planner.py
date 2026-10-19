@@ -6,6 +6,7 @@ import re
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from shared.motion_quality import dimensions
 
 
 class StrictModel(BaseModel):
@@ -47,6 +48,7 @@ class ShotRequest(StrictModel):
     pipeline: Literal["prompt", "3d"] = "prompt"
     parent_plan_id: str | None = Field(default=None, pattern=r"^[a-f0-9-]{36}$")
     revision: str = Field(default="", max_length=1200)
+    quality: Literal['draft', 'native'] = 'draft'
 
     @model_validator(mode="after")
     def check_references(self):
@@ -94,6 +96,33 @@ class DirectorDecisions(StrictModel):
     composition: str = Field(min_length=1, max_length=1200)
     subject_constraints: list[str] = Field(min_length=1, max_length=12)
     timing: list[Beat] = Field(min_length=1, max_length=6)
+
+
+class H3Direction(StrictModel):
+    """Reference-mode context IR; appearance is independent of Blender geometry."""
+    subject_definitions: list[str] = Field(min_length=1, max_length=12)
+    summary: str = Field(min_length=1, max_length=1200)
+    retention_analysis: list[str] = Field(min_length=1, max_length=12)
+    detailed_description: str = Field(min_length=1, max_length=5000)
+    overall_soundscape: str = Field(default='Quiet location ambience and natural footsteps. No dialogue.', max_length=1000)
+    non_diegetic_music: str = Field(default='N/A', max_length=500)
+    inferred_details: list[str] = Field(default_factory=list, max_length=8)
+
+    def compile(self, start=0, end=None, beats=(), continuation=False):
+        parts = []
+        for field in ('subject_definitions','summary','retention_analysis','detailed_description','overall_soundscape','non_diegetic_music'):
+            value = getattr(self, field)
+            parts.append(field + ':\n' + ('\n'.join(value) if isinstance(value,list) else value))
+        if end is not None:
+            # Scene-builder beats can contain implementation terms or obsolete
+            # source directions. H3's own detailed_description is authoritative.
+            parts.append(f'[Shot 1] Render only scene interval {start:.1f}–{end:.1f}s, lasting {end-start:.1f}s. Continue the specified action at its planned speed; no new event or cut.')
+        if continuation:
+            parts.append('Continue from the supplied boundary frame with no cut, reset, identity change or change of lens. Preserve all appearance from <Picture 1>.')
+        result = '\n\n'.join(parts)
+        if len(result)>24000 or any(len(s)>1500 for s in self.subject_definitions+self.retention_analysis+self.inferred_details):
+            raise ValueError('H3 context exceeds bounded reference-encoding size')
+        return result
 
 
 def apply_director_decisions(base: "ShotSpec", decisions: DirectorDecisions) -> "ShotSpec":
@@ -144,6 +173,7 @@ class ShotSpec(StrictModel):
     # Kept as JSON here to avoid a schema import cycle; validate_scene is the
     # mandatory boundary before persistence, rendering and inference.
     scene: dict | None = None
+    h3: H3Direction | None = None
 
 
 def segment_shot(scene: ShotSpec, index: int) -> ShotSpec:
@@ -164,6 +194,8 @@ def segment_shot(scene: ShotSpec, index: int) -> ShotSpec:
     prompt = f"{refs} {scene.request.prompt}\nClip {index+1}/{count}, scene time {start}–{end}s. {context}\nCamera: {scene.camera.movement}. {scene.composition}\n{timeline}\n{' '.join(scene.subject_constraints)}\n" + " ".join(describe_annotation(a, scene.reference_ids.index(a.reference_id)+1) for a in scene.camera.paths + scene.staging)
     if scene.request.revision:
         prompt += "\nScene correction: " + scene.request.revision
+    if scene.h3:
+        prompt = scene.h3.compile(start, end, beats, bool(index))
     return scene.model_copy(update={"request": scene.request.model_copy(update={"duration": duration, "seed": (scene.request.seed + index) % (2**53), "plan_id": None}),
                                    "frames": 5 + 17 * math.ceil((duration * 24 - 5) / 17), "timing": beats, "renderer_prompt": prompt})
 
@@ -232,7 +264,7 @@ class LocalDirector:
             drawing_text = drawing_text.replace("<Picture 1>", "the first frame")
         beats = " ".join(f"{b.start:.1f}–{b.end:.1f}s: {b.action}" for b in timing)
         renderer_prompt = f"{reference_text} {prompt}\nCamera: {movement}. {composition}\n{beats}\n{' '.join(constraints)}\n{drawing_text}"
-        width, height = (384, 672) if request.orientation == "vertical" else (672, 384)
+        width, height = dimensions(request.quality, request.orientation)
         return ShotSpec(request=request, reference_ids=request.reference_ids,
                         camera=Camera(movement=movement, targets=[a.label or a.id for a in staging if a.kind == "subject"] or ["main subject"], paths=paths if request.mode == "manual" else []),
                         timing=timing, composition=composition, subject_constraints=constraints, staging=staging,

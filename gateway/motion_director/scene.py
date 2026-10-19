@@ -21,10 +21,29 @@ class Key(StrictModel):
     position: Vec3
 
 
+class CharacterLook(StrictModel):
+    height_m: float = Field(default=1.8, ge=.8, le=2.4)
+    shoulder_width: float = Field(default=.4, ge=.2, le=.7)
+    skin: str = Field(default='#bd8b68', pattern=r'^#[a-fA-F0-9]{6}$')
+    hair: str = Field(default='#463127', pattern=r'^#[a-fA-F0-9]{6}$')
+    top: str = Field(default='#e6dccb', pattern=r'^#[a-fA-F0-9]{6}$')
+    bottom: str = Field(default='#746259', pattern=r'^#[a-fA-F0-9]{6}$')
+    shoes: str = Field(default='#d5b56c', pattern=r'^#[a-fA-F0-9]{6}$')
+    bag: bool = False
+
+
+class Lighting(StrictModel):
+    description: str = Field(default='Soft environment light matching the reference.', max_length=800)
+    key_color: str = Field(default='#ffe9cc', pattern=r'^#[a-fA-F0-9]{6}$')
+    fill_color: str = Field(default='#9585bf', pattern=r'^#[a-fA-F0-9]{6}$')
+    key_position: Vec3 = Field(default_factory=lambda: Vec3(x=-4,y=-2,z=7))
+    strength: float = Field(default=800, ge=50, le=2000)
+
+
 class Entity(StrictModel):
     id: str = Field(pattern=r'^[a-zA-Z][a-zA-Z0-9_-]{0,39}$')
     label: str = Field(min_length=1, max_length=100)
-    geometry: Literal['box', 'sphere', 'cylinder', 'mannequin', 'asset']
+    geometry: Literal['box', 'sphere', 'cylinder', 'mannequin', 'asset', 'train', 'building', 'sign', 'canopy']
     asset_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{16}$')
     position: Vec3
     size: Vec3 = Field(default_factory=lambda: Vec3(x=1, y=1, z=1))
@@ -32,6 +51,8 @@ class Entity(StrictModel):
     color: str = Field(default='#4fb3cf', pattern=r'^#[a-fA-F0-9]{6}$')
     clip: Literal['idle', 'walk', 'run'] = 'idle'
     path: list[Key] = Field(default_factory=list, max_length=12)
+    character: CharacterLook | None = None
+    accent_color: str = Field(default='#e4b548', pattern=r'^#[a-fA-F0-9]{6}$')
 
     @model_validator(mode='after')
     def geometry_contract(self):
@@ -69,6 +90,7 @@ class SceneSpec(StrictModel):
     sky_color: str = Field(default='#17243b', pattern=r'^#[a-fA-F0-9]{6}$')
     entities: list[Entity] = Field(min_length=1, max_length=24)
     camera: SceneCamera
+    lighting: Lighting = Field(default_factory=Lighting)
     limitations: list[str] = Field(default_factory=lambda: ['Editable approximate geometry, not exact single-image reconstruction.', 'The mannequin uses reusable stylized clips, not realistic human motion or automatic rigging.'], max_length=10)
 
     def validate_timeline(self, duration: float):

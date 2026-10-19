@@ -10,6 +10,7 @@ export type ShotRequest = {
   duration: 2 | 3 | 5 | 10 | 15 | 30; orientation: 'vertical' | 'horizontal'; workflow: 'reference' | 'image'; seed: number
   director?: 'local' | 'opus' | 'auto'; engine?: 'h3' | 'grok'; plan_id?: string | null
   pipeline?: 'prompt' | '3d'; parent_plan_id?: string | null; revision?: string
+  quality?: 'draft' | 'native'
 }
 export type ShotSpec = {
   version: '0.1'; request: ShotRequest; reference_ids: string[]
@@ -19,6 +20,7 @@ export type ShotSpec = {
   composition: string; subject_constraints: string[]; width: number; height: number; frames: number; fps: number
   renderer_prompt: string; conditioning: 'prompt-guidance' | 'reference-video'; notes: string[]
   scene?: { description: string; reference_analysis: string; limitations: string[]; entities: {id: string; label: string; geometry: string; clip: string}[]; camera: {mode: string; distance: number} } | null
+  h3?: {summary: string; subject_definitions: string[]; retention_analysis: string[]; detailed_description: string; inferred_details: string[]} | null
 }
 export type MotionJob = {
   job_id: string; service?: string; status: string; message: string; error?: string; created_at: string
@@ -35,7 +37,7 @@ export type Capabilities = {
   resources?: HostResourceStatus | null
 }
 export const motionApi = {
-  capabilities: () => request<Capabilities>('/api/v1/motion-director/capabilities'),
+  capabilities: (quality: 'draft' | 'native' = 'draft') => request<Capabilities>(`/api/v1/motion-director/capabilities?quality=${quality}`),
   plan: (body: ShotRequest) => request<ShotSpec>('/api/v1/motion-director/plan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
   buildPreview: (id: string) => request<ScenePreview>(`/api/v1/motion-director/plans/${id}/preview`, { method: 'POST' }),
   preview: (id: string) => request<ScenePreview>(`/api/v1/motion-director/plans/${id}/preview`),

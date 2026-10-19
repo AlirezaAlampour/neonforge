@@ -17,11 +17,18 @@ bystanders and drifts in distance/framing; reference conditioning does not enfor
 exact choreography. Reusable clips are stylized; realistic mocap, detailed image
 reconstruction and complex rigged interactions remain unsupported.
 
-The unchanged H3 gate requires 90 GiB before each bounded clip. Observed inference
+The H3 draft gate requires 90 GiB before each bounded clip. Historical inference
 memory stayed ≥68.96 GiB and clocks ≤1989MHz under the existing 2000MHz cap. Qwen
 was temporarily unloaded with explicit owner approval and restored with its
 original context/pinned residency after verified-idle H3 cleanup. Resident Qwen
 continues to block H3 admission; no automatic model eviction was added.
+
+The quality follow-up separates Opus's Blender scene from its resolved H3
+appearance context, adds optional AI Shot Plan editing and reference-derived
+character/environment geometry, and introduces a 768×1344 native profile with
+105 GiB per-clip admission. The 384×672 draft and 90 GiB minimum are preserved.
+See the [resolution and blur trace](docs/motion-quality/AUDIT.md) and
+[A/B/C/D measurements and visual limits](docs/motion-quality/RESULTS.md).
 
 Forge3D GLB retrieval/import and an actual orbit render passed. The optional uv
 `blender` group supplies a missing OpenBLAS library only to Blender's subprocess.

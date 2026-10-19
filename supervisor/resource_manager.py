@@ -8,6 +8,7 @@ import logging
 import os
 import time
 import uuid
+from shared.motion_quality import minimum_for_size, wait_native_cooldown
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -42,6 +43,7 @@ class Claim:
     memory_before_gb: float
     min_available_gb_observed: float
     paused_services: list[str] = field(default_factory=list)
+    minimum_available_gb: float = 90.0
 
 
 def read_uma_memory(path: str = "/proc/meminfo") -> dict[str, float]:
@@ -71,9 +73,9 @@ def workload_minimum_gb(service: str, workload_id: str | None, *, frames: int | 
                         width: int | None = None, height: int | None = None) -> float | None:
     """Bounded Spark admission rules, based on real renders; values are GiB."""
     if service == "h3":
-        if workload_id != "motion-h3" or frames not in {56, 73, 124} or (width, height) not in {(384, 672), (672, 384)}:
-            raise ValueError("Motion Director supports 2/3/5 second H3 drafts at 384×672 or 672×384 only.")
-        return 90.0
+        if workload_id != "motion-h3" or frames not in {56, 73, 124}:
+            raise ValueError("Motion Director supports only bounded 2/3/5 second H3 clips.")
+        return minimum_for_size(width, height)
     if service != "comfyui":
         return None
     if workload_id == "wan-character-swap":
@@ -354,6 +356,7 @@ class ResourceManager:
                 prepared_at=None,
                 memory_before_gb=before["available_gb"],
                 min_available_gb_observed=before["available_gb"],
+                minimum_available_gb=minimum,
             )
             try:
                 # Acquire before readiness/model loading, never during read-only
@@ -375,6 +378,8 @@ class ResourceManager:
                                 break
                     await self.host_request("gpu/acquire", {"claim_id": token, "service": service, "minimum_gb": minimum,
                                                            "paused_services": self.claims[token].paused_services})
+                    if service == 'h3' and minimum >= 105:
+                        await self.cool_native_h3()
                 # External H3 uses the same claims but grants no Docker authority.
                 # Never start or stop the external H3 process.
                 if not policy.lifecycle_managed:
@@ -534,6 +539,12 @@ class ResourceManager:
             self._event("released", service, claim_id=claim_id, found=released)
             return {"service": service, "claim_id": claim_id, "released": released}
 
+    async def cool_native_h3(self):
+        async def read_gpu():
+            hardware = await self.host_request('resources')
+            return hardware.get('gpu', {})
+        return await wait_native_cooldown(read_gpu)
+
     async def next_h3_segment(self, claim_id: str):
         async with self._lock:
             claim = self.claims.get(claim_id)
@@ -544,12 +555,15 @@ class ResourceManager:
             queue = response.json()
             if queue.get("queue_running") or queue.get("queue_pending"):
                 raise RuntimeError("H3 is active; no models will be unloaded or new clip submitted")
-            if self.memory_reader()["available_gb"] < 90 and self._host:
-                await self.host_request("h3/free-idle", {"claim_id": claim_id, "service": "h3", "minimum_gb": 90})
+            minimum = max(90.0, claim.minimum_available_gb)
+            if self.memory_reader()["available_gb"] < minimum and self._host:
+                await self.host_request("h3/free-idle", {"claim_id": claim_id, "service": "h3", "minimum_gb": minimum})
+            if minimum >= 105 and self._host:
+                await self.cool_native_h3()
             available = self.memory_reader()["available_gb"]
-            if available < 90:
-                raise RuntimeError(f"Next H3 clip requires 90 GiB; only {available:.1f} GiB is available")
-            return {"ready": True, "minimum_available_gb": 90, "memory": self.memory_reader()}
+            if available < minimum:
+                raise RuntimeError(f"Next H3 clip requires {minimum:g} GiB; only {available:.1f} GiB is available")
+            return {"ready": True, "minimum_available_gb": minimum, "memory": self.memory_reader()}
 
     async def reclaim_idle_h3(self):
         async with self._lock:
@@ -596,7 +610,8 @@ class ResourceManager:
                         if service in self.policies:
                             available = self.memory_reader()["available_gb"]
                             self.claims[token] = Claim(token, service, token, saved["at"], service, saved["at"], available, available,
-                                                       [s for s in saved.get("paused_services", []) if s in self.policies and self.policies[s].lifecycle_managed])
+                                                       [s for s in saved.get("paused_services", []) if s in self.policies and self.policies[s].lifecycle_managed],
+                                                       max(90.0, saved.get('minimum_gb', 90.0)))
             running = await self.running_services()
             async with self._lock:
                 for service in running.intersection(self.policies):

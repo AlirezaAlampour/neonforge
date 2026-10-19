@@ -11,7 +11,7 @@ import { motionApi, downloadMotionJSON, type Annotation, type Capabilities, type
 type Reference = { id: string; name: string }
 type Draft = Omit<ShotRequest, 'reference_ids'> & { references: Reference[] }
 const KEY = 'neonforge-motion-director-v0.1'
-const initial: Draft = { references: [], annotations: [], prompt: '', mode: 'auto', preset: 'professional', duration: 5, orientation: 'vertical', workflow: 'reference', seed: 42, director: 'opus', engine: 'h3', pipeline: '3d' }
+const initial: Draft = { references: [], annotations: [], prompt: '', mode: 'auto', preset: 'professional', duration: 5, orientation: 'vertical', workflow: 'reference', seed: 42, director: 'opus', engine: 'h3', pipeline: '3d', quality: 'native' }
 const tools: Tool[] = ['arrow', 'path', 'orbit', 'waypoint', 'subject', 'entry', 'exit']
 const toolNames: Record<Tool, string> = { arrow: 'Camera arrow', path: 'Camera path', orbit: 'Orbit around', waypoint: 'Camera stop', subject: 'Mark subject', entry: 'Enters here', exit: 'Exits here' }
 const toolHelp: Record<Tool, string> = { arrow: 'Drag from the camera’s starting point toward its destination.', path: 'Draw the path you want the camera to follow.', orbit: 'Drag from the subject outwards to draw an orbit.', waypoint: 'Tap each camera stop in order.', subject: 'Tap the person or object to keep in focus.', entry: 'Tap where the subject enters the scene.', exit: 'Tap where the subject leaves the scene.' }
@@ -28,6 +28,7 @@ export default function MotionDirectorPage() {
   const [plan, setPlan] = useState<ShotSpec | null>(null)
   const [preview, setPreview] = useState<ScenePreview | null>(null)
   const [correction, setCorrection] = useState('')
+  const [planEdit, setPlanEdit] = useState('')
   const [sceneCompare, setSceneCompare] = useState<string | null>(null)
   const [capabilities, setCapabilities] = useState<Capabilities | null>(null)
   const [jobs, setJobs] = useState<MotionJob[]>([])
@@ -36,6 +37,8 @@ export default function MotionDirectorPage() {
   const [error, setError] = useState('')
   const videos = useRef<Record<string, HTMLVideoElement | null>>({})
   const revision = useRef(0)
+  const qualityRef = useRef<'draft'|'native'>('native')
+  qualityRef.current = draft.quality || 'native'
   const patch = (change: Partial<Draft>) => { revision.current += 1; setDraft(prev => ({ ...prev, plan_id: undefined, ...change })); setPlan(null); setPreview(null) }
 
   useEffect(() => {
@@ -44,7 +47,7 @@ export default function MotionDirectorPage() {
       if (saved && Array.isArray(saved.references) && Array.isArray(saved.annotations)) {
         setDraft({ ...initial, ...saved, pipeline: saved.pipeline || '3d', director: saved.pipeline ? saved.director : 'opus', workflow: saved.pipeline ? saved.workflow : 'reference', duration: [5, 10, 15, 30].includes(saved.duration) ? saved.duration : 5 }); setSelected(saved.references[0]?.id || '')
         const previous = JSON.parse(localStorage.getItem(KEY+'-preview') || 'null')
-        if(previous?.plan?.scene) { setPlan(previous.plan); setPreview(previous.preview) }
+        if(previous?.plan?.scene && previous.plan.request.quality) { setPlan(previous.plan); setPreview(previous.preview) }
       }
     } catch { /* A private browser can still create shots. */ }
     setRestored(true)
@@ -54,7 +57,8 @@ export default function MotionDirectorPage() {
       catch { if (!cancelled) setError('Could not load shots. Check the gateway connection.') }
     }
     const check = async () => {
-      try { const data = await motionApi.capabilities(); if (!cancelled) setCapabilities(data) }
+      const quality = qualityRef.current
+      try { const data = await motionApi.capabilities(quality); if (!cancelled && quality === qualityRef.current) setCapabilities(data) }
       catch { if (!cancelled) setCapabilities(null) }
     }
     void load(); void check()
@@ -72,6 +76,9 @@ export default function MotionDirectorPage() {
     const poll=setInterval(async()=>{try {const state=await motionApi.preview(plan.request.plan_id!);if(!cancelled) {setPreview(state);if(state.error)setError(state.error)}} catch(e) {if(!cancelled)setError(String(e))}},1800)
     return()=>{cancelled=true;clearInterval(poll)}
   },[plan?.request.plan_id,preview?.status])
+
+  useEffect(() => { setPlanEdit(plan?.h3?.summary.slice(0,1000) || '') }, [plan?.request.plan_id])
+  useEffect(() => { let cancelled=false; const quality=qualityRef.current; void motionApi.capabilities(quality).then(data=>{if(!cancelled && quality===qualityRef.current)setCapabilities(data)}).catch(()=>{}); return()=>{cancelled=true} },[draft.quality])
 
   const upload = async (files: FileList | null) => {
     if (!files?.length) return
@@ -94,10 +101,10 @@ export default function MotionDirectorPage() {
     catch (e) { setError(e instanceof Error ? e.message : 'Planning failed') }
     finally { setBusy('') }
   }
-  const reviseScene = async () => {
-    if(!plan?.request.plan_id || !correction.trim()) return
+  const reviseScene = async (instruction=correction) => {
+    if(!plan?.request.plan_id || !instruction.trim()) return
     setBusy('revise');setError('');const current=revision.current
-    try {const planned=await motionApi.revise(plan.request.plan_id,correction);if(revision.current===current){setPlan(planned);setPreview(await motionApi.buildPreview(planned.request.plan_id!));setCorrection('')}}
+    try {const planned=await motionApi.revise(plan.request.plan_id,instruction);if(revision.current===current){setPlan(planned);setPreview(await motionApi.buildPreview(planned.request.plan_id!));setCorrection('')}}
     catch(e){setError(e instanceof Error?e.message:'Scene correction failed')}
     finally{setBusy('')}
   }
@@ -160,9 +167,17 @@ export default function MotionDirectorPage() {
           <a className="inline-flex min-h-11 items-center text-sm text-sky-300" href={preview.export_url} download>Export for Grok · MP4, PNG & prompt</a>
         </>}
       </div>}
+      {plan?.h3 && <details className="space-y-3 rounded-lg border border-white/10 p-3"><summary className="min-h-11 cursor-pointer py-2 text-sm font-medium">AI Shot Plan · optional review & edit</summary>
+        <p className="my-3 text-sm">{plan.h3.summary}</p><p className="text-xs text-muted-foreground">Your original prompt stays unchanged. Opus inferred these production details from the reference.</p>
+        <ul className="my-3 list-disc space-y-1 pl-4 text-sm">{plan.h3.subject_definitions.map(s=><li key={s}>{s}</li>)}</ul>
+        {plan.h3.inferred_details.map(s=><p key={s} className="my-1 text-xs text-muted-foreground">{s}</p>)}
+        <label className="my-3 grid gap-2 text-sm">Edit AI Shot Plan<Textarea rows={4} maxLength={1000} value={planEdit} onChange={e=>setPlanEdit(e.target.value)} /></label>
+        <Button variant="outline" className="min-h-11 w-full" disabled={Boolean(busy) || !planEdit.trim()} onClick={()=>void reviseScene('Apply this edited shot plan. Preserve reference identity and unchanged scene details: '+planEdit)}>Apply edited plan & preview</Button>
+      </details>}
       <details className="space-y-3 text-sm"><summary className="min-h-11 cursor-pointer py-3">Advanced · settings & shot plan</summary>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        <label className="grid gap-1 text-sm">Workflow<select aria-label="Workflow" className={selectClass} value={draft.pipeline} onChange={e=>patch({pipeline:e.target.value as Draft['pipeline'],director:e.target.value==='3d'?'opus':'auto',workflow:'reference'})}><option value="3d">3D scene · Claude + Blender</option><option value="prompt">Classic · prompt direction</option></select></label>
+        <label className="grid gap-1 text-sm">Generation quality<select aria-label="Generation quality" className={selectClass} value={draft.quality || 'native'} onChange={e=>patch({quality:e.target.value as Draft['quality']})}><option value="native">Native detail · 768 × 1344</option><option value="draft">Fast draft · 384 × 672</option></select></label>
+        <label className="grid gap-1 text-sm">Workflow<select aria-label="Workflow" className={selectClass} value={draft.pipeline} onChange={e=>patch({pipeline:e.target.value as Draft['pipeline'],director:e.target.value==='3d'?'opus':'auto',workflow:'reference',quality:e.target.value==='3d'?'native':'draft'})}><option value="3d">3D scene · Claude + Blender</option><option value="prompt">Classic · prompt direction</option></select></label>
         <label className="grid gap-1 text-sm">Director<select aria-label="Director" className={selectClass} value={draft.mode} onChange={e => patch({ mode: e.target.value as Draft['mode'] })}><option value="auto">Auto Director</option><option value="manual">Manual Director</option></select></label>
         <label className="grid gap-1 text-sm">Cinematic preset<select aria-label="Cinematic preset" className={selectClass} value={draft.preset} onChange={e => patch({ preset: e.target.value as Draft['preset'] })}><option value="professional">Professional Cinematic Director</option><option value="intimate">Intimate portrait</option><option value="reveal">Environmental reveal</option><option value="action">Readable action</option></select></label>
         <label className="grid gap-1 text-sm">Output<select aria-label="Output" className={selectClass} value={draft.orientation} onChange={e => patch({ orientation: e.target.value as Draft['orientation'] })}><option value="vertical">Vertical · phone</option><option value="horizontal">Horizontal · landscape</option></select></label>
@@ -176,7 +191,7 @@ export default function MotionDirectorPage() {
       <h2 className="font-semibold">Shot plan</h2>{plan.scene && <><p className="text-sm">{plan.scene.reference_analysis}</p><p className="text-xs text-muted-foreground">{plan.scene.entities.length} objects · {plan.scene.camera.mode} camera · {plan.scene.camera.distance} m distance</p>{plan.scene.limitations.map(note=><p key={note} className="text-xs text-amber-200">{note}</p>)}</>}<p className="text-sm">{plan.camera.movement}</p><p className="text-xs text-muted-foreground">{plan.composition}</p>
       <p className="text-xs text-sky-200">Planned by {plan.planner === 'claude-code-opus' ? 'Claude Code Opus' : 'Local Cinematic Director'}</p>
       <ol className="space-y-2 text-sm">{plan.timing.map((beat, i) => <li key={i}><span className="text-sky-300">{beat.start.toFixed(1)}–{beat.end.toFixed(1)}s</span> · {beat.action}</li>)}</ol>
-      <p className="text-xs text-muted-foreground">{plan.width} × {plan.height} · {plan.frames} frames at {plan.fps} fps · {(plan.frames / plan.fps).toFixed(2)}s rendered · {plan.request.workflow === 'image' ? 8 : 4}-step H3 draft</p>
+      <p className="text-xs text-muted-foreground">{plan.width} × {plan.height} · {plan.frames} frames at {plan.fps} fps · {(plan.frames / plan.fps).toFixed(2)}s rendered · {plan.request.workflow === 'image' ? 8 : 4}-step H3 · native generation canvas</p>
       {plan.notes.map(note => <p key={note} className="text-xs text-amber-200/80">{note}</p>)}
       <Button variant="outline" className="min-h-11" onClick={() => downloadMotionJSON(plan, 'motion-director-shot.json')}>Download shot plan</Button>
       {capabilities?.h3.workflows?.[plan.request.workflow]?.reason && <p className="text-xs text-amber-200">{capabilities.h3.workflows[plan.request.workflow].reason}</p>}
@@ -185,10 +200,10 @@ export default function MotionDirectorPage() {
     </section>
     <section className="space-y-3 rounded-xl border border-sky-300/20 bg-sky-300/5 p-3 sm:p-5"><h2 className="font-semibold">3 · Make the final clip</h2><p className="text-sm text-muted-foreground">{draft.pipeline === '3d' ? 'Happy with the preview? Use its motion as a reference for H3, or export it for Grok.' : 'Generate a clip using your reference and direction.'}</p>
       <Button className="min-h-12 w-full" disabled={Boolean(busy) || !draft.prompt.trim() || !draft.references.length || (draft.pipeline === '3d' && preview?.status !== 'completed') || (!capabilities?.h3.render_ready && !capabilities?.h3.can_recover_memory)} onClick={() => void generate()}>{busy === 'render' ? 'Preparing your final clip…' : 'Generate video'}</Button>
-      {capabilities?.resources && <p className="text-xs text-muted-foreground">{capabilities.resources.memory?.available_gb} GiB available · safe H3 generation needs 90 GiB</p>}
+      {capabilities?.resources && <p className="text-xs text-muted-foreground">{capabilities.resources.memory?.available_gb} GiB available · safe H3 generation needs {capabilities.h3.minimum_gb} GiB</p>}
     </section>
     {!capabilities ? <p role="status" className="text-sm text-muted-foreground">Checking local H3 availability…</p> : !capabilities.h3.render_ready && <p role="status" className="rounded-lg border border-amber-400/20 p-3 text-sm text-amber-200">{capabilities.h3.reason || 'H3 is unavailable.'} Planning and drawings remain available.</p>}
-    {capabilities?.h3.can_recover_memory && <Button variant="outline" className="min-h-11" disabled={Boolean(busy)} onClick={async () => { setBusy('memory'); try { await motionApi.recoverMemory(); setCapabilities(await motionApi.capabilities()) } catch(e) { setError(String(e)) } finally { setBusy('') } }}>Release idle H3 memory</Button>}
+    {capabilities?.h3.can_recover_memory && <Button variant="outline" className="min-h-11" disabled={Boolean(busy)} onClick={async () => { setBusy('memory'); try { await motionApi.recoverMemory(); setCapabilities(await motionApi.capabilities(qualityRef.current)) } catch(e) { setError(String(e)) } finally { setBusy('') } }}>Release idle H3 memory</Button>}
     <details className="rounded-xl border border-white/10 p-3"><summary className="min-h-11 cursor-pointer py-3">Grok · export, import & compare</summary><p className="my-3 text-sm text-muted-foreground">Export the Blender reference above, open Grok, and use its PNG and prompt to create your clip. If your Grok browser supports video references, use the MP4 too. Download the result and import it here.</p><p className="my-3 text-xs text-muted-foreground">{capabilities?.grok.reason}</p><a href="https://grok.com/imagine" target="_blank" rel="noreferrer" className="inline-flex min-h-11 items-center text-sky-300">Open Grok on your phone</a><label className="mt-3 flex min-h-12 cursor-pointer items-center justify-center rounded-lg border border-dashed p-3 text-sm">{busy === 'import' ? 'Preparing imported video…' : 'Import Grok MP4'}<input aria-label="Import Grok MP4" type="file" accept="video/mp4" className="sr-only" disabled={Boolean(busy)} onChange={async e => { const file=e.target.files?.[0]; e.target.value=''; if(!file) return; setBusy('import'); try { const reference=completed.find(j => j.service !== 'grok'); const job=await motionApi.importGrok(file,plan?.scene?undefined:reference?.job_id,plan?.scene?plan.request.plan_id||undefined:undefined); setJobs(prev=>[job,...prev]); if(job.blender_preview_url)setSceneCompare(job.job_id);else if(reference) setCompare([reference.job_id,job.job_id]) } catch(err) { setError(String(err)) } finally { setBusy('') } }} /></label><p className="mt-2 text-xs text-muted-foreground">Your original MP4 is preserved. Automatic Grok generation stays disabled.</p></details>
     <section className="space-y-4"><h2 className="font-semibold">Your takes</h2>
       {!jobs.length && <p className="text-sm text-muted-foreground">Completed videos appear here for preview, download and comparison.</p>}
@@ -196,7 +211,7 @@ export default function MotionDirectorPage() {
       {comparison.length === 2 && <div className="space-y-3 rounded-xl border border-sky-400/30 p-3"><div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-medium">Compare takes</h3><Button variant="outline" className="min-h-11" onClick={() => comparison.forEach(j => { const video = videos.current[j.job_id]; if (video) { video.currentTime = 0; void video.play().catch(() => {}) } })}>Play both from start</Button></div><div className="grid gap-3 md:grid-cols-2">{comparison.map((job, i) => <div key={job.job_id}><p className="mb-2 text-sm">Take {i + 1} · {job.shot.request.preset}</p><video ref={node => { videos.current[job.job_id] = node }} className="max-h-[60vh] w-full rounded-lg bg-black" src={job.preview_url!} playsInline controls preload="metadata" /></div>)}</div></div>}
       <div className="grid gap-4 lg:grid-cols-2">{jobs.map(job => <article key={job.job_id} className="min-w-0 space-y-3 rounded-xl border border-white/10 p-3 sm:p-4">
         <div className="flex items-center justify-between gap-2"><span className="text-sm font-medium capitalize">{job.status}</span><span className="text-xs text-muted-foreground">{new Date(job.created_at).toLocaleString()}</span></div>
-        <p className="line-clamp-2 text-sm">{job.shot.request.prompt}</p><p role="status" className="text-xs text-sky-200">{job.message}</p>
+        <p className="line-clamp-2 text-sm">{job.shot.request.prompt}</p><p className="text-xs text-muted-foreground">{job.shot.width} × {job.shot.height} {job.shot.planner === 'manual-import' ? 'output' : 'native'} · {job.shot.fps} fps</p><p role="status" className="text-xs text-sky-200">{job.message}</p>
         {!terminal(job) && <div className="h-1 overflow-hidden rounded bg-white/10"><div className="h-full w-1/3 animate-pulse rounded bg-sky-400" /></div>}
         {Boolean(job.total_segments) && <p className="text-xs text-muted-foreground">{job.completed_segments}/{job.total_segments} clips saved</p>}
         {job.error && <p className="break-words text-xs text-red-300">{job.error}</p>}
@@ -204,7 +219,7 @@ export default function MotionDirectorPage() {
         <div className="flex flex-wrap gap-2">{job.download_url && <a className="flex min-h-11 items-center rounded-md border border-white/15 px-3 text-sm" href={job.download_url}>Download video</a>}
           {job.blender_preview_url && job.status==='completed' && <Button variant="outline" className="min-h-11" onClick={()=>setSceneCompare(job.job_id)}>Compare with Blender</Button>}
           {job.status === 'completed' && <label className="flex min-h-11 cursor-pointer items-center gap-2 px-2 text-sm"><input type="checkbox" checked={compare.includes(job.job_id)} disabled={!compare.includes(job.job_id) && compare.length >= 2} onChange={e => setCompare(prev => e.target.checked ? [...prev, job.job_id] : prev.filter(id => id !== job.job_id))} />Compare take</label>}
-          {job.shot.planner !== 'manual-import' && <Button variant="ghost" className="min-h-11" onClick={() => { const { reference_ids, ...request } = job.shot.request; setDraft({ ...initial, ...request, pipeline: request.pipeline || 'prompt', duration: [5,10,15,30].includes(request.duration) ? request.duration : 5, plan_id: undefined, references: reference_ids.map((id, i) => ({ id, name: `Picture ${i + 1}` })) }); setSelected(reference_ids[0]); setPlan(null) }}>Reuse shot</Button>}
+          {job.shot.planner !== 'manual-import' && <Button variant="ghost" className="min-h-11" onClick={() => { const { reference_ids, ...request } = job.shot.request; setDraft({ ...initial, ...request, quality: request.quality || 'draft', pipeline: request.pipeline || 'prompt', duration: [5,10,15,30].includes(request.duration) ? request.duration : 5, plan_id: undefined, references: reference_ids.map((id, i) => ({ id, name: `Picture ${i + 1}` })) }); setSelected(reference_ids[0]); setPlan(null); setPreview(null) }}>Reuse shot</Button>}
           {job.status === 'failed' && job.prompt_id && <Button variant="ghost" className="min-h-11" onClick={() => void motionApi.reconcile(job.job_id).catch(e => setError(String(e)))}>Check accepted H3 shot</Button>}
         </div>
       </article>)}</div>

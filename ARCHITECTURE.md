@@ -112,7 +112,12 @@ keep Docker mounts valid; missing supervisor host safety disables admission.
 The 3D continuation persists immutable scene plans and revisions in the existing
 plan table. A scoped host adapter compiles validated geometry/rig/paths/camera
 data into Blender Python, runs CPU previews and exposes only rendered artifacts
-through a read-only output mount. H3 receives a 22-frame Blender window per clip
+through a read-only output mount. H3 receives a bounded Blender window per clip
 through its real reference-video path, retaining prior AI boundary-image guides.
+Draft uses 22 frames; native uses 124 real-time motion frames at 384×672 while
+generating 768×1344, with the original image as a first-frame appearance guide.
+Opus returns separate validated spatial and H3 appearance contexts. Native
+admission and per-clip rechecks require 105 GiB; draft keeps the 90 GiB floor.
 No arbitrary model-generated code is executed, and strict ControlNet/trajectory
-control is not claimed. See [3D execution and limits](docs/motion-3d/WORKFLOW.md).
+control is not claimed. See [3D execution and limits](docs/motion-3d/WORKFLOW.md)
+and the [quality comparison](docs/motion-quality/RESULTS.md).

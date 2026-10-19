@@ -8,18 +8,26 @@ import os
 from pathlib import Path
 import shutil
 import time
+import re
 
 import httpx
 
-from .planner import DirectorDecisions, LocalDirector, ShotRequest, apply_director_decisions
+from .planner import DirectorDecisions, H3Direction, LocalDirector, ShotRequest, apply_director_decisions
 from .scene import SceneSpec
 
 
 class SceneDecisions(DirectorDecisions):
     scene: SceneSpec
+    h3: H3Direction
 
 
 SCENE_RULES = """Also generate a complete editable metric 3D blockout scene. Z is up; x right, y depth. Infer approximate relative depth, scale and simple geometry from the images, never exact reconstruction. Describe the visual evidence and uncertainty in reference_analysis. Use reusable mannequin rigs only for people; choose idle, walk or run clips. Static props have empty paths and idle clips. Every moving path starts at time 0 at the initial position, ends at the exact requested duration, and uses increasing times. Use realistic travel speed (run about 3m/s), size x=1 for a 1.8m mannequin. Set boxes/spheres/cylinders with dimensions in metres. Avoid overlapping paths/obstacles. You may select asset IDs ONLY from the supplied existing Forge3D library; these assets are unrigged props. Camera targets must name an entity ID. Follow camera stays behind travel heading at the selected distance and height, aiming at aim_height. Use a follow camera when the user asks third-person/behind. Orbit uses orbit_start/end degrees; track/static need explicit timed camera positions. Use only a few props and 2-5 path points. No added character/object motion unless requested. Complex interactions and realistic anatomy/mocap are unavailable: explain these limitations. For revisions preserve all unspecified geometry, paths and settings from previous_scene. The validated specification will be compiled into Blender Python; do not output freeform executable code."""
+SCENE_RULES += """
+Interpret short prompts conservatively. 'Character running and camera following' means the visible main character runs continuously and the camera matches travel speed; infer framing and lens from the image, without inventing events, turns, cuts or a new story. Identify visible clothing, hair, accessories, dominant colors, major foreground/background objects, vanishing direction, relative depth and light sources. Use semantic train/building/sign/canopy geometry ONLY for corresponding visible structures; do not replace an entire environment with one wall. Keep background people idle unless asked to animate them. Use character height, shoulder_width, skin/hair/top/bottom/shoes colors and bag only as supported by image evidence; all are approximate. Use lighting colors/direction from the reference. Additional characters get independent rigs/paths only when their motion is requested. A follow camera must maintain subject scale and clear silhouette, not let the runner recede. Include conservative inferred production details in h3.inferred_details for review.
+
+Return TWO SEPARATE outputs: scene is the Blender spatial/motion specification; h3 is the appearance-preserving reference-generation context in the publisher's six-section format. Never describe the final H3 subject as a mannequin, proxy or placeholder, or carry Blender implementation details into the final appearance. h3.subject_definitions must bind <Subject 1> identity and clothing to <Picture 1>; bind environment/style/light to image evidence too. <Video 1> supplies ONLY relative spatial motion, timing and camera tracking. h3.retention_analysis must explicitly retain original image appearance, lighting and identity and exclude transfer of the video's simplified materials/character appearance. h3.detailed_description describes one continuous shot's composition, lens, action, camera speed and lighting, with stable object layout and identity over time. Use h3.summary for a short human-readable shot plan. No duplicated contradictory camera instructions, fabricated dialogue or music; non_diegetic_music is N/A unless requested. Preserve the simple user's original intent rather than adding entertainment events. For a scene revision, update h3 to the FINAL resolved intent, never append obsolete user directions or describe the revision history."""
+SCENE_RULES += """ The phrase 'camera following' or 'follow camera' requires camera.mode=follow, behind the subject travelling in the SAME direction, unless the USER explicitly requests leading/from the front. Do not reinterpret following as a camera retreating ahead of the subject just because the photograph shows the subject's face. Prioritize requested camera behavior over copying the image's exact view. Choose a rear three-quarter framing or rear follow while retaining visible identity details. Camera path and character heading must agree with the h3 description."""
+SCENE_RULES += """ Character/train/building positions are their base on the ground; boxes, signs and canopies use their geometric center. Keep recognized static foreground/background objects present even when no animation is requested for them; lack of a suitable detailed asset permits approximate primitive geometry, not silently omitting them. Record unknown depth and occluded details as uncertainty."""
 
 API_ENV = {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN",
            "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"}
@@ -33,7 +41,7 @@ def safe_environment() -> dict[str, str]:
     # HOME retains the owner's actual value; no new auth home/profile is created.
     allowed = {"PATH", "HOME", "LANG", "LC_ALL", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "SSL_CERT_FILE", "SSL_CERT_DIR"}
     env = {k: v for k, v in os.environ.items() if k in allowed}
-    env.update(CLAUDE_CODE_MAX_OUTPUT_TOKENS="6500", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1")
+    env.update(CLAUDE_CODE_MAX_OUTPUT_TOKENS="10500", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1")
     return env
 
 
@@ -156,16 +164,23 @@ async def plan_with_opus(request: ShotRequest, reference_paths: list[str], asset
             "--system-prompt", SYSTEM_PROMPT + (SCENE_RULES if request.pipeline == "3d" else ""),
             "--json-schema", json.dumps((SceneDecisions if request.pipeline == "3d" else DirectorDecisions).model_json_schema())]
     # Exactly one bounded print invocation; no retry or model/API fallback.
-    result = await run_cli(args, (json.dumps(message) + "\n").encode(), timeout=180 if request.pipeline == "3d" else 80)
+    result = await run_cli(args, (json.dumps(message) + "\n").encode(), timeout=240 if request.pipeline == "3d" else 80)
     structured = result.get("structured_output")
     if not structured:
-        raise RuntimeError("Opus returned no validated planning decisions; deterministic fallback is available.")
+        raise RuntimeError("Opus returned no validated planning decisions (" + str(result.get('subtype','unstructured'))[:60] + "); no 3D scene was substituted.")
     full = SceneDecisions.model_validate(structured) if request.pipeline == "3d" else None
-    decisions = DirectorDecisions.model_validate({k:v for k,v in structured.items() if k != "scene"})
+    decisions = DirectorDecisions.model_validate({k:v for k,v in structured.items() if k not in {"scene", "h3"}})
     shot = apply_director_decisions(base, decisions)
     if full:
-        shot.scene = full.scene.validate_timeline(request.duration).model_dump()
+        full.scene.validate_timeline(request.duration)
+        camera_intent = request.revision or request.prompt
+        requires_follow = re.search(r'\bcamera\s+(?:is\s+)?follow(?:s|ing)?\b|\bfollow\s+camera\b', camera_intent, re.I)
+        if requires_follow and not re.search(r'\b(front|lead|leading)\b', camera_intent, re.I) and full.scene.camera.mode != 'follow':
+            raise ValueError('A requested follow camera must remain behind the moving subject')
+        shot.scene = full.scene.model_dump()
         shot.conditioning = "reference-video"
+        shot.h3 = full.h3
+        shot.renderer_prompt = full.h3.compile()
         shot.notes = ["Editable approximate reconstruction; reusable stylized rig clips. Review Blender motion before AI generation.",
                       "Blender reference-video conditioning guides H3; exact paths, poses and stationary objects are not guaranteed in its output."]
     return shot

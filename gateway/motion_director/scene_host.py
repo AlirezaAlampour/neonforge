@@ -13,6 +13,7 @@ import zipfile
 
 from . import media
 from .scene import SceneSpec
+from shared.motion_quality import minimum_for_size
 
 OUTPUTS = Path(os.getenv('NEONFORGE_HOST_OUTPUTS_DIR',str(Path(__file__).resolve().parents[2]/'.motion-runtime/scene-outputs')))
 BLENDER = Path(os.getenv('NEONFORGE_BLENDER_BIN', str(Path.home()/'opt/blender-5.2.0-arm64/cmake-make/bin/blender')))
@@ -61,7 +62,8 @@ def write_status(folder,state):
 def start(scene_id, scene, duration, width, height, prompt):
     folder=folder_for(scene_id);folder.mkdir(parents=True,exist_ok=True)
     spec=SceneSpec.model_validate(scene).validate_timeline(duration)
-    if (width,height) not in {(384,672),(672,384)} or duration not in {2,3,5,10,15,30}:
+    minimum_for_size(width, height)
+    if duration not in {2,3,5,10,15,30}:
         raise ValueError('Preview dimensions/duration exceed the existing shot limits')
     catalog=asset_catalog();ids={e.asset_id for e in spec.entities if e.geometry=='asset'}
     if ids-set(catalog):
@@ -111,7 +113,7 @@ async def render(folder,data,prompt,catalog,state):
                 except (TimeoutError,asyncio.CancelledError):
                     proc.kill();await proc.wait();raise
             if proc.returncode:raise RuntimeError('Blender could not render this scene; inspect its bounded local log')
-            await media.command('ffmpeg','-v','error','-y','-framerate','24','-i',str(folder/'frames/frame-%04d.png'),'-c:v','libx264','-crf','20','-pix_fmt','yuv420p','-threads','2','-movflags','+faststart',str(folder/'preview.mp4'))
+            await media.command('ffmpeg','-v','error','-y','-framerate','24','-i',str(folder/'frames/frame-%04d.png'),'-c:v','libx264','-crf','16','-preset','medium','-pix_fmt','yuv420p','-threads','2','-movflags','+faststart',str(folder/'preview.mp4'))
             shutil.copy2(folder/'frames/frame-0001.png',folder/'first-frame.png')
             browser_prompt = re.sub(r'<Picture (\d+)> is reference [a-zA-Z0-9_-]+\.', r'Original image \1 supplies identity and style.', prompt)
             (folder/'prompt.txt').write_text(browser_prompt+'\nUse the Blender reference for action, spatial layout and independent camera motion. Preserve the original image identity/style. One continuous shot. Reference motion is approximate, not guaranteed.\n')
