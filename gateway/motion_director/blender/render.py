@@ -13,21 +13,12 @@ from mathutils import Vector
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from blender import mannequin, clips, sets
+from blender.camera import FollowRig
+from blender.paths import sample as path_position
 
 
 def sample(path, t, fallback):
-    if not path:
-        return Vector(fallback)
-    if t >= path[-1]['time']:
-        return Vector(list(path[-1]['position'].values()))
-    i = next(i for i in range(len(path)-1) if path[i]['time'] <= t <= path[i+1]['time'])
-    a,b=path[i],path[i+1]
-    p,q=Vector(list(a['position'].values())),Vector(list(b['position'].values()))
-    span=b['time']-a['time'];u=(t-a['time'])/span
-    before=path[max(0,i-1)];after=path[min(len(path)-1,i+2)]
-    m0=(q-Vector(list(before['position'].values())))/(b['time']-before['time'])
-    m1=(Vector(list(after['position'].values()))-p)/(after['time']-a['time'])
-    return (2*u**3-3*u*u+1)*p+(u**3-2*u*u+u)*span*m0+(-2*u**3+3*u*u)*q+(u**3-u*u)*span*m1
+    return Vector(path_position(path,t,fallback))
 
 
 KEY_DIRECTION = Vector((-.4,-.3,1)).normalized()
@@ -109,43 +100,51 @@ def main(data, folder):
     camera_data=bpy.data.cameras.new('DirectorCamera');camera_data.lens=spec['camera']['lens'];camera_data.clip_end=400
     camera_data.sensor_fit='VERTICAL';camera_data.sensor_height=24
     camera=bpy.data.objects.new('DirectorCamera',camera_data);scene.collection.objects.link(camera);scene.camera=camera
-    camera.rotation_mode='QUATERNION';previous_q=None;travel={k:0 for k in objects};last={};measurements=[]
+    dolly=bpy.data.objects.new('CameraFollowRig',None);scene.collection.objects.link(dolly);camera.parent=dolly
+    focus=bpy.data.objects.new('CameraAim',None);scene.collection.objects.link(focus)
+    track=camera.constraints.new('TRACK_TO');track.target=focus;track.track_axis='TRACK_NEGATIVE_Z';track.up_axis='UP_Y'
+    solver=FollowRig(spec['camera']);headings={};velocities={}
+    travel={k:0 for k in objects};last={};measurements=[]
     for f in range(1,frames+1):
         t=(f-1)/fps
         for e in spec['entities']:
             obj=objects[e['id']];pos=sample(e['path'],t,list(e['position'].values()))
-            delta=sample(e['path'],min(duration,t+.12),pos)-sample(e['path'],max(0,t-.12),pos)
+            ta,tb=max(0,t-.12),min(duration,t+.12)
+            delta=sample(e['path'],tb,pos)-sample(e['path'],ta,pos)
+            velocities[e['id']]=delta/max(.001,tb-ta)
             travel[e['id']]+= (pos-last[e['id']]).length if e['id'] in last else 0;last[e['id']]=pos.copy()
-            yaw=math.atan2(delta.x,-delta.y) if delta.length>.00001 else math.radians(e['yaw'])
+            yaw=math.atan2(delta.x,-delta.y) if delta.length>.00001 else headings.get(e['id'],math.radians(e['yaw']))
+            headings[e['id']]=yaw
             obj.location=pos;obj.rotation_euler=(0,0,yaw)
             if e['geometry']=='mannequin':
                 pose,phase=clips.evaluate(e['clip'],travel[e['id']]);mannequin.apply_pose(obj,pose,frame=f)
                 obj.scale=(e['size']['x']*(e.get('character') or {}).get('height_m',1.8)/1.8,)*3
             obj.keyframe_insert('location',frame=f);obj.keyframe_insert('rotation_euler',frame=f)
-        c=spec['camera'];target=objects[c['target']];aim=target.location+Vector((0,0,c['aim_height']))
-        if c['mode']=='follow':
-            # Local mannequin faces -Y. Camera remains behind its travel heading.
-            yaw=target.rotation_euler.z
-            behind=Vector((-math.sin(yaw),math.cos(yaw),0))
-            camera.location=target.location+behind*c['distance']+Vector((0,0,c['height']))
-        elif c['mode']=='orbit':
-            angle=math.radians(c['orbit_start']+(c['orbit_end']-c['orbit_start'])*t/duration)
-            camera.location=target.location+Vector((math.sin(angle)*c['distance'],math.cos(angle)*c['distance'],c['height']))
-        else:
-            camera.location=sample(c['path'],t,(0,-4,2))
-        q=(aim-camera.location).to_track_quat('-Z','Y')
-        if previous_q:q.make_compatible(previous_q)
-        camera.rotation_quaternion=q;previous_q=q.copy();camera.keyframe_insert('location',frame=f);camera.keyframe_insert('rotation_quaternion',frame=f)
+        c=spec['camera'];target=objects[c['target']]
+        explicit=sample(c['path'],t,(0,-4,2)) if c['path'] else None
+        angle=math.radians(c['orbit_start']+(c['orbit_end']-c['orbit_start'])*t/duration) if c['mode']=='orbit' else None
+        position,aim=solver.step(target.location,velocities[c['target']],target.rotation_euler.z,1/fps,explicit,angle)
+        dolly.location=position;focus.location=aim
+        dolly.keyframe_insert('location',frame=f);focus.keyframe_insert('location',frame=f)
         scene.frame_set(f);bpy.context.view_layer.update()
-        measurements.append({'frame':f,'time':t,'camera':list(camera.matrix_world.translation),'aim':list(aim),
-          'forward':list(camera.matrix_world.to_quaternion() @ Vector((0,0,-1))),
+        evaluated=camera.evaluated_get(bpy.context.evaluated_depsgraph_get()).matrix_world
+        measurements.append({'frame':f,'time':t,'camera':list(evaluated.translation),'aim':list(aim),
+          'forward':list(evaluated.to_quaternion() @ Vector((0,0,-1))),
           'entities':{e['id']:{'position':list(objects[e['id']].matrix_world.translation),'yaw':objects[e['id']].rotation_euler.z,
              'distance':travel[e['id']], 'phase':travel[e['id']]/clips.STRIDE.get(e['clip'],1),
              'shin':list(objects[e['id']].pose.bones['shin.L'].rotation_quaternion) if e['geometry']=='mannequin' else None} for e in spec['entities']}})
+    for obj in (dolly,focus):
+        if obj.animation_data and obj.animation_data.action:
+            for layer in obj.animation_data.action.layers:
+                for strip in layer.strips:
+                    for bag in strip.channelbags:
+                        for curve in bag.fcurves:
+                            for key in curve.keyframe_points:key.interpolation='LINEAR'
     scene.frame_set(1);bpy.ops.wm.save_as_mainfile(filepath=str(folder/'scene.blend'))
     (folder/'transforms.json').write_text(json.dumps({'blender':bpy.app.version_string,'device':'CPU','fps':fps,'frames':measurements}))
-    (folder/'frames').mkdir(exist_ok=True);scene.render.filepath=str(folder/'frames'/'frame-')
-    bpy.ops.render.render(animation=True)
+    if data.get('render_images',True):
+        (folder/'frames').mkdir(exist_ok=True);scene.render.filepath=str(folder/'frames'/'frame-')
+        bpy.ops.render.render(animation=True)
 
 
 if __name__=='__main__':

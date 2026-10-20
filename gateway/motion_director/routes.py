@@ -5,6 +5,7 @@ import asyncio
 import json
 import hashlib
 import uuid
+import time
 from datetime import datetime
 from typing import Literal
 from shared.motion_quality import PROFILES
@@ -22,6 +23,10 @@ from .host_client import host_request
 from .scene import SceneSpec
 from .planner import StrictModel
 from pydantic import Field
+from .usage import PlanningUsage
+from .editing import camera_revision
+
+PRODUCTION_VERSION='iteration-v1'
 
 tasks: dict[str, asyncio.Task] = {}
 planning_lock = asyncio.Lock()
@@ -93,20 +98,43 @@ def create_router(runtime):
 
     async def planned_shot(request, reuse_cache=True):
         async with planning_lock:
+            started=time.monotonic()
             key = fingerprint(request)
             with runtime.SessionLocal() as db:
                 saved = db.execute(select(MotionPlan).where(MotionPlan.request_hash == key).order_by(desc(MotionPlan.created_at))).scalars().first()
             if saved and reuse_cache:
-                return ShotSpec.model_validate_json(saved.shot_json)
+                cached=ShotSpec.model_validate_json(saved.shot_json)
+                if cached.production_version==PRODUCTION_VERSION or not cached.scene:
+                    cached.planning_usage=PlanningUsage(source='saved-plan',new_claude_invocations=0,
+                        elapsed_seconds=round(time.monotonic()-started,3),original=cached.planning_usage.original if cached.planning_usage else None)
+                    return cached
             shot = LocalDirector().plan(request)
             previous = None
+            reused=False
             if request.parent_plan_id:
                 with runtime.SessionLocal() as db:
                     parent = db.get(MotionPlan, request.parent_plan_id)
                 if not parent:
                     raise HTTPException(404, "The scene to revise is missing")
-                previous = ShotSpec.model_validate_json(parent.shot_json).scene
-            if request.director == "opus" or (request.director == "auto" and getattr(runtime, "HOST_CONTROL_SOCKET", "")):
+                parent_shot=ShotSpec.model_validate_json(parent.shot_json)
+                previous = parent_shot.scene
+                edited=camera_revision(parent_shot,request.revision)
+                if edited:
+                    shot=edited;reused=True
+            if not reused and request.pipeline=='3d' and reuse_cache:
+                def scene_key(value):
+                    return value.model_dump(exclude={'plan_id','seed','quality'})
+                with runtime.SessionLocal() as db:
+                    recent=db.execute(select(MotionPlan).order_by(desc(MotionPlan.created_at)).limit(100)).scalars().all()
+                for row in recent:
+                    candidate=ShotSpec.model_validate_json(row.shot_json)
+                    if candidate.scene and scene_key(candidate.request)==scene_key(request):
+                        canvas=(shot.width,shot.height)
+                        shot=candidate.model_copy(deep=True);shot.width,shot.height=canvas
+                        shot.planning_usage=PlanningUsage(source='scene-reuse',new_claude_invocations=0,
+                            elapsed_seconds=round(time.monotonic()-started,3),original=candidate.planning_usage.original if candidate.planning_usage else None)
+                        reused=True;break
+            if not reused and (request.director == "opus" or (request.director == "auto" and getattr(runtime, "HOST_CONTROL_SOCKET", ""))):
                 try:
                     payload = {"shot": request.model_dump(), "references": [asset.relative_path for asset in assets_for(request)]}
                     if previous:
@@ -129,6 +157,7 @@ def create_router(runtime):
                     raise HTTPException(422, "Invalid 3D geometry or timeline; no render was started") from exc
             plan_id = str(uuid.uuid4())
             shot.request = request.model_copy(update={"plan_id": plan_id})
+            shot.production_version=PRODUCTION_VERSION
             with runtime.SessionLocal() as db:
                 db.add(MotionPlan(id=plan_id, request_hash=key, shot_json=shot.model_dump_json(), created_at=runtime._now_utc()))
                 db.commit()
@@ -157,6 +186,7 @@ def create_router(runtime):
             clips = db.execute(select(MotionSegment).where(MotionSegment.job_id == row.id).order_by(MotionSegment.position)).scalars().all()
         scene_plan = json.loads(row.shot_json).get("request", {}).get("plan_id") if json.loads(row.shot_json).get("scene") else None
         return {"job_id": row.id, "service": json.loads(row.shot_json).get("request", {}).get("engine", "h3"), "status": row.status, "message": row.message,
+                "generation_claude_invocations":0,
                 "blender_preview_url": f"/api/v1/outputs/motion_director/scenes/{scene_plan}/preview.mp4" if scene_plan else None,
                 "segments": [{"index": c.position, "status": c.status, "prompt_id": c.prompt_id} for c in clips],
                 "completed_segments": sum(c.status == "completed" for c in clips), "total_segments": len(clips),

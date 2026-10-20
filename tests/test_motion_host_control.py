@@ -83,7 +83,7 @@ def test_api_environment_disables_opus_before_any_execution(monkeypatch):
     assert not status["available"] and "API/provider" in status["reason"]
 
 
-def test_claude_stream_parser_keeps_only_terminal_structured_output(monkeypatch):
+def test_claude_stream_parser_keeps_only_terminal_structured_output(monkeypatch,tmp_path):
     class Process:
         returncode = 0
         async def communicate(self, data):
@@ -94,7 +94,11 @@ def test_claude_stream_parser_keeps_only_terminal_structured_output(monkeypatch)
         assert "ANTHROPIC_API_KEY" not in kwargs["env"]
         return Process()
     monkeypatch.setattr(claude_host.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setenv('NEONFORGE_MOTION_USAGE_LOG',str(tmp_path/'usage.jsonl'))
     result = asyncio.run(claude_host.run_cli(["-p"]))
+    usage=result.pop('_motion_usage')
+    assert usage['input_tokens'] is None and usage['provider_requests'] is None
+    assert usage['cli_invocations']==1 and usage['application_retries']==0
     assert result == {"type": "result", "structured_output": {"camera_movement": "slow push"}}
 
 

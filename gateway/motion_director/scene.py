@@ -76,6 +76,7 @@ class SceneCamera(StrictModel):
     height: float = Field(default=2.2, ge=.5, le=12)
     aim_height: float = Field(default=1.1, ge=0, le=6)
     lens: float = Field(default=35, ge=18, le=85)
+    damping: float = Field(default=.2, ge=0, le=1)
     orbit_start: float = Field(default=180, ge=-720, le=720)
     orbit_end: float = Field(default=270, ge=-720, le=720)
     path: list[Key] = Field(default_factory=list, max_length=12)

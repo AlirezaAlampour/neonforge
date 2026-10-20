@@ -19,6 +19,18 @@ const selectClass = 'min-h-11 w-full rounded-md border border-white/15 bg-card p
 const terminal = (job: MotionJob) => ['completed', 'failed'].includes(job.status)
 const payload = ({ references, ...rest }: Draft): ShotRequest => ({ ...rest, reference_ids: references.map(r => r.id) })
 
+function Usage({shot, rendering=false}: {shot: ShotSpec; rendering?: boolean}) {
+  const usage=shot.planning_usage, original=usage?.original
+  const tokens=(value: number | null | undefined)=>value==null?'not exposed':value.toLocaleString()
+  return <details className="text-xs text-muted-foreground"><summary className="min-h-11 cursor-pointer py-3">Usage · optional</summary>
+    {rendering && <p className="my-2">Rendering reuses the saved plan · 0 new Opus invocations.</p>}
+    {usage ? <p className="my-2">{rendering ? 'Saved planning record' : 'Planning action'}: {usage.source} · {usage.new_claude_invocations} Opus invocations during that planning action · {usage.elapsed_seconds.toFixed(2)}s.</p> : <p className="my-2">Planning usage was not recorded for this saved plan.</p>}
+    {original && <><p className="my-2">Original Opus invocation: {original.cli_seconds.toFixed(2)}s · {original.application_retries} application retries.</p>
+      <p className="my-2">Recorded tokens: {tokens(original.input_tokens)} uncached input · {tokens(original.cache_read_input_tokens)} cache read · {tokens(original.cache_creation_input_tokens)} cache creation · {tokens(original.output_tokens)} output.</p></>}
+    <p className="my-2">Existing subscription · API cost not applicable. Internal provider request/retry totals are not exposed.</p>
+  </details>
+}
+
 export default function MotionDirectorPage() {
   const [draft, setDraft] = useState<Draft>(initial)
   const [restored, setRestored] = useState(false)
@@ -162,8 +174,9 @@ export default function MotionDirectorPage() {
       {preview && <div className="space-y-3" aria-live="polite"><p className="text-sm text-sky-200">{preview.message}</p>{['queued','rendering'].includes(preview.status) && <div className="h-1 animate-pulse rounded bg-sky-400/40" />}
         {preview.preview_url && <><video aria-label="Blender 3D preview" className="max-h-[55vh] w-full rounded-lg bg-black" src={preview.preview_url} controls playsInline loop preload="metadata" />
           <p className="text-xs text-muted-foreground">Blender motion preview · approximate geometry and stylized animation. H3 may change poses, paths and object behavior.</p>
+          {preview.preview_width && <p className="text-xs text-muted-foreground">Motion preview {preview.preview_width} × {preview.preview_height}{preview.cache_hit ? ' · cached' : ''}. Final generation {plan?.width} × {plan?.height}.</p>}
           <label className="grid gap-2 text-sm">Correct the scene<Textarea value={correction} maxLength={1200} rows={2} onChange={e=>setCorrection(e.target.value)} placeholder="Move the camera farther back, turn the path left, keep the train still…" /></label>
-          <Button variant="outline" className="min-h-11 w-full" disabled={Boolean(busy) || !correction.trim()} onClick={()=>void reviseScene()}>{busy==='revise'?'Opus is revising your scene…':'Apply correction & preview'}</Button>
+          <Button variant="outline" className="min-h-11 w-full" disabled={Boolean(busy) || !correction.trim()} onClick={()=>void reviseScene()}>{busy==='revise'?'Updating your scene…':'Apply correction & preview'}</Button>
           <a className="inline-flex min-h-11 items-center text-sm text-sky-300" href={preview.export_url} download>Export for Grok · MP4, PNG & prompt</a>
         </>}
       </div>}
@@ -194,6 +207,7 @@ export default function MotionDirectorPage() {
       <p className="text-xs text-muted-foreground">{plan.width} × {plan.height} · {plan.frames} frames at {plan.fps} fps · {(plan.frames / plan.fps).toFixed(2)}s rendered · {plan.request.workflow === 'image' ? 8 : 4}-step H3 · native generation canvas</p>
       {plan.notes.map(note => <p key={note} className="text-xs text-amber-200/80">{note}</p>)}
       <Button variant="outline" className="min-h-11" onClick={() => downloadMotionJSON(plan, 'motion-director-shot.json')}>Download shot plan</Button>
+      <Usage shot={plan} />
       {capabilities?.h3.workflows?.[plan.request.workflow]?.reason && <p className="text-xs text-amber-200">{capabilities.h3.workflows[plan.request.workflow].reason}</p>}
     </section>}
       </details>
@@ -215,6 +229,7 @@ export default function MotionDirectorPage() {
         {!terminal(job) && <div className="h-1 overflow-hidden rounded bg-white/10"><div className="h-full w-1/3 animate-pulse rounded bg-sky-400" /></div>}
         {Boolean(job.total_segments) && <p className="text-xs text-muted-foreground">{job.completed_segments}/{job.total_segments} clips saved</p>}
         {job.error && <p className="break-words text-xs text-red-300">{job.error}</p>}
+        <Usage shot={job.shot} rendering />
         {job.preview_url && <video className="max-h-[55vh] w-full rounded-lg bg-black" src={job.preview_url} controls playsInline preload="metadata" />}
         <div className="flex flex-wrap gap-2">{job.download_url && <a className="flex min-h-11 items-center rounded-md border border-white/15 px-3 text-sm" href={job.download_url}>Download video</a>}
           {job.blender_preview_url && job.status==='completed' && <Button variant="outline" className="min-h-11" onClick={()=>setSceneCompare(job.job_id)}>Compare with Blender</Button>}

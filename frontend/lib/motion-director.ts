@@ -21,14 +21,19 @@ export type ShotSpec = {
   renderer_prompt: string; conditioning: 'prompt-guidance' | 'reference-video'; notes: string[]
   scene?: { description: string; reference_analysis: string; limitations: string[]; entities: {id: string; label: string; geometry: string; clip: string}[]; camera: {mode: string; distance: number} } | null
   h3?: {summary: string; subject_definitions: string[]; retention_analysis: string[]; detailed_description: string; inferred_details: string[]} | null
+  planning_usage?: {
+    source: string; new_claude_invocations: number; elapsed_seconds: number
+    original?: {cli_invocations: number; application_retries: number; input_tokens: number | null; output_tokens: number | null; cache_read_input_tokens: number | null; cache_creation_input_tokens: number | null; cli_seconds: number; assistant_messages: number | null; provider_requests: number | null} | null
+  } | null
 }
 export type MotionJob = {
   job_id: string; service?: string; status: string; message: string; error?: string; created_at: string
   preview_url?: string; download_url?: string; shot: ShotSpec; prompt_id?: string
   completed_segments?: number; total_segments?: number
   blender_preview_url?: string | null
+  generation_claude_invocations?: number
 }
-export type ScenePreview = { id: string; status: string; message?: string; error?: string; preview_url?: string; first_frame_url?: string; export_url?: string; prompt_url?: string; script_url?: string }
+export type ScenePreview = { id: string; status: string; message?: string; error?: string; preview_url?: string; first_frame_url?: string; export_url?: string; prompt_url?: string; script_url?: string; preview_width?: number; preview_height?: number; cache_hit?: boolean; elapsed_seconds?: number }
 export type Capabilities = {
   h3: { available: boolean; render_ready: boolean; can_recover_memory?: boolean; reason?: string; busy?: boolean; available_gb: number; minimum_gb: number; workflows?: Record<string, { available: boolean; reason?: string }> }
   grok: { available: boolean; reason: string; authorization_url?: string | null; authorization_required?: boolean; manual_import?: boolean }

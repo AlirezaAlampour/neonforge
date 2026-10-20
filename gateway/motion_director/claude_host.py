@@ -9,11 +9,13 @@ from pathlib import Path
 import shutil
 import time
 import re
+import uuid
 
 import httpx
 
 from .planner import DirectorDecisions, H3Direction, LocalDirector, ShotRequest, apply_director_decisions
 from .scene import SceneSpec
+from .usage import observe, record, PlanningUsage
 
 
 class SceneDecisions(DirectorDecisions):
@@ -46,6 +48,7 @@ def safe_environment() -> dict[str, str]:
 
 
 async def run_cli(args: list[str], data: bytes | None = None, timeout: float = 80) -> dict:
+    started=time.monotonic();invocation=str(uuid.uuid4());model_call='-p' in args
     executable = shutil.which("claude") or str(Path.home() / ".local/bin/claude")
     process = await asyncio.create_subprocess_exec(executable, *args, env=safe_environment(),
                                                   stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
@@ -58,25 +61,22 @@ async def run_cli(args: list[str], data: bytes | None = None, timeout: float = 8
             await asyncio.wait_for(process.wait(), 5)
         except TimeoutError:
             process.kill(); await process.wait()
+        if model_call:
+            record(observe(b'',invocation,time.monotonic()-started,'interrupted; token usage unavailable')[1])
         raise
     if len(stdout) > 256000:
+        if model_call:
+            record(observe(b'',invocation,time.monotonic()-started,'output bound exceeded; usage unavailable')[1])
         raise RuntimeError("Claude output exceeded the planning bound")
     # Never return raw stderr, account identifiers, auth output or debug logs.
-    try:
-        result = json.loads(stdout)
-    except ValueError:
-        # This installed CLI requires stream output for image-bearing stream
-        # input. Keep only the terminal result; never expose verbose/auth events.
-        result = None
-        for line in stdout.splitlines():
-            try:
-                item = json.loads(line)
-                if isinstance(item, dict) and item.get("type") == "result":
-                    result = item
-            except ValueError:
-                continue
-        if result is None:
-            raise RuntimeError(f"Claude Code returned no terminal planning result (exit {process.returncode})")
+    result,usage=observe(stdout,invocation,time.monotonic()-started,
+                         'completed' if process.returncode==0 else 'CLI failed')
+    if model_call:
+        record(usage)
+    if result is None:
+        raise RuntimeError(f"Claude Code returned no terminal planning result (exit {process.returncode})")
+    if model_call:
+        result['_motion_usage']=usage.model_dump()
     return result
 
 
@@ -128,6 +128,7 @@ async def _subscription_status() -> dict:
 
 
 async def plan_with_opus(request: ShotRequest, reference_paths: list[str], assets_root: Path, previous_scene=None):
+    started=time.monotonic()
     status = await subscription_status()
     if not status["available"]:
         raise RuntimeError(status["reason"])
@@ -171,6 +172,8 @@ async def plan_with_opus(request: ShotRequest, reference_paths: list[str], asset
     full = SceneDecisions.model_validate(structured) if request.pipeline == "3d" else None
     decisions = DirectorDecisions.model_validate({k:v for k,v in structured.items() if k not in {"scene", "h3"}})
     shot = apply_director_decisions(base, decisions)
+    shot.planning_usage=PlanningUsage(source='opus',new_claude_invocations=1,
+        elapsed_seconds=round(time.monotonic()-started,3),original=result.get('_motion_usage'))
     if full:
         full.scene.validate_timeline(request.duration)
         camera_intent = request.revision or request.prompt

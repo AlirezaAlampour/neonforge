@@ -46,7 +46,7 @@ async def gpu_sample():
     return dict(zip(['gpu_percent','temperature_c','clock_mhz','power_w'],values))
 
 
-async def render_case(name,shot,preview,folder,assets,resume=None):
+async def render_case(name,shot,preview,folder,assets,resume=None,cool_start_c=50):
     # Policy is checked with the real canvas; never declare a draft while
     # actually submitting a larger graph. The host owns the exclusive claim.
     minimum=workload_minimum_gb('h3','motion-h3',frames=124,width=shot.width,height=shot.height)
@@ -69,11 +69,19 @@ async def render_case(name,shot,preview,folder,assets,resume=None):
                     await host('h3/free-idle',{'claim_id':claim,'service':'h3','minimum_gb':minimum})
                     if memory()<minimum:raise RuntimeError('Next clip did not recover its native admission headroom')
                 if shot.request.quality=='native':
+                    if not 40<=cool_start_c<=50:raise ValueError('Benchmark cooling may only tighten the existing 50°C admission')
                     async def read_gpu():
                         sample=await gpu_sample()
                         return {**sample,'utilization_pct':sample['gpu_percent']}
+                    cooling=time.monotonic()
+                    while cool_start_c<50:
+                        sample=await read_gpu()
+                        if sample['utilization_pct']>10 or sample['clock_mhz']>2000:raise RuntimeError('Competing activity or clock cap prevents conservative cooling')
+                        if sample['temperature_c']<=cool_start_c:break
+                        if time.monotonic()-cooling>180:raise RuntimeError('Conservative benchmark start temperature not reached; no prompt submitted')
+                        await asyncio.sleep(2)
                     waited=await wait_native_cooldown(read_gpu)
-                    record.setdefault('cooling_waits',[]).append({'clip':i,'seconds':waited,'maximum_start_c':50})
+                    record.setdefault('cooling_waits',[]).append({'clip':i,'seconds':round(time.monotonic()-cooling,2),'maximum_start_c':cool_start_c})
                 bounded=segment_shot(shot,i)
                 window=await media.scene_window(preview,folder/name,i,shot.width,shot.height,shot.request.quality)
                 context=await media.continuation(outputs[-1],folder/name,i,shot.width,shot.height) if outputs else None

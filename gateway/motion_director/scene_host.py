@@ -10,6 +10,7 @@ import shutil
 import sysconfig
 import uuid
 import zipfile
+import time
 
 from . import media
 from .scene import SceneSpec
@@ -20,6 +21,31 @@ BLENDER = Path(os.getenv('NEONFORGE_BLENDER_BIN', str(Path.home()/'opt/blender-5
 FORGE = Path(os.getenv('NEONFORGE_FORGE_ASSETS', str(Path.home()/'3d-generator/data/outputs')))
 render_lock = asyncio.Semaphore(1)
 tasks = {}
+
+
+def digest_file(path):
+    result=hashlib.sha256()
+    with path.open('rb') as stream:
+        for chunk in iter(lambda:stream.read(1024**2),b''):result.update(chunk)
+    return result.hexdigest()
+
+
+def render_key(data,catalog):
+    compiler={p.name:digest_file(p) for p in sorted((Path(__file__).parent/'blender').glob('*.py'))}
+    value={k:data[k] for k in ('scene','duration','width','height','assets')}
+    value.update(compiler=compiler,format_version=2,asset_content={k:digest_file(catalog[k]) for k in data['assets']})
+    return hashlib.sha256(json.dumps(value,sort_keys=True).encode()).hexdigest()
+
+
+def cache_source(key):
+    path=OUTPUTS/'motion_director/.preview-cache'/f'{key}.json'
+    try:
+        source=folder_for(json.loads(path.read_text())['id'])
+        state=read_status(source.name)
+        if state.get('status')=='completed' and state.get('render_key')==key and all((source/name).is_file() for name in ('preview.mp4','first-frame.png','scene.blend','transforms.json')):
+            return source
+    except (OSError,ValueError,KeyError):pass
+    return None
 
 
 def asset_catalog():
@@ -60,6 +86,7 @@ def write_status(folder,state):
 
 
 def start(scene_id, scene, duration, width, height, prompt):
+    started=time.monotonic()
     folder=folder_for(scene_id);folder.mkdir(parents=True,exist_ok=True)
     spec=SceneSpec.model_validate(scene).validate_timeline(duration)
     minimum_for_size(width, height)
@@ -70,16 +97,28 @@ def start(scene_id, scene, duration, width, height, prompt):
         raise ValueError('A selected Forge3D asset is no longer available')
     if sum(catalog[k].stat().st_size for k in ids) > 256*1024**2:
         raise ValueError('Preview assets exceed the 256 MiB scene budget')
-    data={'scene':spec.model_dump(),'duration':duration,'width':width,'height':height,'assets':{k:f'assets/{k}.glb' for k in ids}}
+    # H3 consumes this bounded motion canvas even when generating native detail.
+    # Final generation stays at the requested resolution; this is not an upscale.
+    pw,ph=(384,672) if height>width else (672,384)
+    data={'scene':spec.model_dump(),'duration':duration,'width':pw,'height':ph,
+          'generation_width':width,'generation_height':height,'assets':{k:f'assets/{k}.glb' for k in ids}}
     digest=hashlib.sha256(json.dumps(data,sort_keys=True).encode()).hexdigest()
     if (folder/'status.json').exists():
         old=read_status(scene_id)
+        if not old.get('render_key') and old.get('status')=='completed':
+            # Preserve legacy immutable artifacts; a new plan gets the new rig.
+            previous=json.loads((folder/'scene.json').read_text())
+            if (SceneSpec.model_validate(previous['scene']).model_dump()==spec.model_dump()
+                and (previous['duration'],previous['width'],previous['height'])==(duration,width,height)):
+                return {**old,'cache_hit':True,'blender_invocations':0,'elapsed_seconds':round(time.monotonic()-started,3)}
         if old.get('digest')!=digest:
             raise ValueError('Saved preview differs from the scene plan; create a revision')
-        if old['status']!='failed':return old
+        if old['status']!='failed':return {**old,'cache_hit':old['status']=='completed','blender_invocations':0,'elapsed_seconds':round(time.monotonic()-started,3)}
     if len(tasks) >= 4:
         raise ValueError('Four Blender previews are already waiting')
-    state={'id':scene_id,'status':'queued','digest':digest,'message':'Waiting for the Blender CPU preview…'}
+    state={'id':scene_id,'status':'queued','digest':digest,'render_key':render_key(data,catalog),
+           'preview_width':pw,'preview_height':ph,'generation_width':width,'generation_height':height,
+           'message':'Waiting for the Blender CPU preview…'}
     write_status(folder,state)
     task=asyncio.create_task(render(folder,data,prompt,catalog,state))
     tasks[scene_id]=task;task.add_done_callback(lambda done:tasks.pop(scene_id,None))
@@ -88,6 +127,7 @@ def start(scene_id, scene, duration, width, height, prompt):
 
 async def render(folder,data,prompt,catalog,state):
     async with render_lock:
+        started=time.monotonic()
         try:
             available=next(int(line.split()[1])/1048576 for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemAvailable:'))
             if available<40:raise RuntimeError('Blender preview needs at least 40 GiB available shared memory')
@@ -107,22 +147,33 @@ async def render(folder,data,prompt,catalog,state):
             libraries=[str(BLENDER.parent.parent/'libExt'), str(Path(sysconfig.get_path('purelib'))/'numpy.libs')]
             env['LD_LIBRARY_PATH']=':'.join(libraries)+(':'+env['LD_LIBRARY_PATH'] if env.get('LD_LIBRARY_PATH') else '')
             env.update(OMP_NUM_THREADS='2',OPENBLAS_NUM_THREADS='1',CUDA_VISIBLE_DEVICES='')
-            with (folder/'blender.log').open('wb') as log:
-                proc=await asyncio.create_subprocess_exec(str(BLENDER),'--background','--factory-startup','--disable-autoexec','--threads','2','--python-exit-code','1','--python',str(folder/'scene.py'),env=env,cwd=folder,stdout=log,stderr=log)
-                try:await asyncio.wait_for(proc.wait(),1800)
-                except (TimeoutError,asyncio.CancelledError):
-                    proc.kill();await proc.wait();raise
-            if proc.returncode:raise RuntimeError('Blender could not render this scene; inspect its bounded local log')
-            await media.command('ffmpeg','-v','error','-y','-framerate','24','-i',str(folder/'frames/frame-%04d.png'),'-c:v','libx264','-crf','16','-preset','medium','-pix_fmt','yuv420p','-threads','2','-movflags','+faststart',str(folder/'preview.mp4'))
-            shutil.copy2(folder/'frames/frame-0001.png',folder/'first-frame.png')
+            source=cache_source(state['render_key'])
+            state.update(cache_hit=bool(source),blender_invocations=0 if source else 1)
+            rendering=time.monotonic()
+            if source:
+                for name in ('preview.mp4','first-frame.png','scene.blend','transforms.json'):shutil.copy2(source/name,folder/name)
+                state['cached_from']=source.name
+            else:
+                with (folder/'blender.log').open('wb') as log:
+                    proc=await asyncio.create_subprocess_exec(str(BLENDER),'--background','--factory-startup','--disable-autoexec','--threads','2','--python-exit-code','1','--python',str(folder/'scene.py'),env=env,cwd=folder,stdout=log,stderr=log)
+                    try:await asyncio.wait_for(proc.wait(),1800)
+                    except (TimeoutError,asyncio.CancelledError):
+                        proc.kill();await proc.wait();raise
+                if proc.returncode:raise RuntimeError('Blender could not render this scene; inspect its bounded local log')
+                await media.command('ffmpeg','-v','error','-y','-framerate','24','-i',str(folder/'frames/frame-%04d.png'),'-c:v','libx264','-crf','16','-preset','medium','-pix_fmt','yuv420p','-threads','2','-movflags','+faststart',str(folder/'preview.mp4'))
+                shutil.copy2(folder/'frames/frame-0001.png',folder/'first-frame.png')
+            state['render_seconds']=round(time.monotonic()-rendering,3)
             browser_prompt = re.sub(r'<Picture (\d+)> is reference [a-zA-Z0-9_-]+\.', r'Original image \1 supplies identity and style.', prompt)
             (folder/'prompt.txt').write_text(browser_prompt+'\nUse the Blender reference for action, spatial layout and independent camera motion. Preserve the original image identity/style. One continuous shot. Reference motion is approximate, not guaranteed.\n')
             with zipfile.ZipFile(folder/'grok-export.zip','w',zipfile.ZIP_DEFLATED) as bundle:
                 for path in [folder/'preview.mp4',folder/'first-frame.png',folder/'prompt.txt',folder/'scene.py',folder/'scene.json',folder/'scene.blend',folder/'transforms.json',*sorted((folder/'blender').glob('*.py')),*sorted((folder/'assets').glob('*.glb'))]:
                     bundle.write(path,str(path.relative_to(folder)))
             # Keep the compact video and edit sources; per-frame PNGs are temporary.
-            shutil.rmtree(folder/'frames')
-            state.update(status='completed',message='Blender preview ready',conditioning='reference-video; not exact motion control')
+            if (folder/'frames').exists():shutil.rmtree(folder/'frames')
+            state.update(status='completed',message='Reused existing Blender motion preview' if source else 'Blender preview ready',
+                         elapsed_seconds=round(time.monotonic()-started,3),conditioning='reference-video; not exact motion control')
+            index=OUTPUTS/'motion_director/.preview-cache';index.mkdir(exist_ok=True)
+            (index/(state['render_key']+'.json')).write_text(json.dumps({'id':folder.name}))
         except (Exception,asyncio.CancelledError) as exc:
             state.update(status='failed',message='Blender preview stopped',error=str(exc)[:400] or 'Preview interrupted')
         finally:write_status(folder,state)

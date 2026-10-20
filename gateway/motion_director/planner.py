@@ -7,6 +7,7 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from shared.motion_quality import dimensions
+from .usage import PlanningUsage
 
 
 class StrictModel(BaseModel):
@@ -174,6 +175,8 @@ class ShotSpec(StrictModel):
     # mandatory boundary before persistence, rendering and inference.
     scene: dict | None = None
     h3: H3Direction | None = None
+    planning_usage: PlanningUsage | None = None
+    production_version: str | None = None
 
 
 def segment_shot(scene: ShotSpec, index: int) -> ShotSpec:
