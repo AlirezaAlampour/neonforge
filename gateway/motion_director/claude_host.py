@@ -184,8 +184,14 @@ async def _subscription_status() -> dict:
                         "http_status": 429, "_retry_after": retry_delay(response.headers.get('Retry-After')),
                         "retry_after_provided": 'Retry-After' in response.headers,
                         "reason": "Claude's subscription verification endpoint returned HTTP 429. Model usage is unknown. Retry verification after the displayed time; saved scenes remain usable."}
+            if response.status_code != 200:
+                return {'available':False, 'state':'authentication_failed' if response.status_code in {401,403} else 'verification_failed',
+                        'http_status':response.status_code, 'subscription':result.get('subscriptionType'),
+                        'reason':f'Claude subscription verification returned HTTP {response.status_code}. Subscription usage and extra-usage status could not be verified.'}
             response.raise_for_status()
             quota = response.json()
+            if not isinstance(quota,dict) or not isinstance(quota.get('extra_usage'),dict):
+                return {'available':False,'state':'verification_failed','reason':'Claude returned an unrecognized usage response; extra-usage billing cannot be verified.'}
             extra_disabled = quota.get("extra_usage", {}).get("is_enabled") is False
             exhausted = any(isinstance(quota.get(key), dict) and quota[key].get("utilization", 0) >= 100 for key in ("five_hour", "seven_day", "seven_day_opus"))
             ready = extra_disabled and not exhausted
@@ -232,6 +238,12 @@ async def plan_with_opus(request: ShotRequest, reference_paths: list[str], asset
         from .scene_host import status as scene_status
         capabilities = scene_status()
         context.update(previous_scene=previous_scene, asset_library=capabilities['assets'][:30], authored_clips=capabilities['authored_clips'])
+        if re.search(r'\bfight(?:ing)?\b',request.prompt,re.I) and request.duration>=5:
+            from .choreography import fight_study
+            study=fight_study().model_dump()
+            context['validated_choreography_example']={'duration':5, 'entities':[{k:e[k] for k in ('id','rig','position','path','facing','actions')} for e in study['entities'] if e.get('actions')],
+                                                     'interactions':study['interactions'], 'camera':study['camera'],
+                                                     'instruction':'Reuse validated relative timing/reach where appropriate; adapt identities, environment, camera and placement to the actual supplied image. Extend the final hold for longer scenes. Do not copy unrelated environment geometry.'}
     content.append({"type": "text", "text": json.dumps(context)})
     message = {"type": "user", "message": {"role": "user", "content": content}, "parent_tool_use_id": None}
     args = ["-p", "--safe-mode", "--restricted", "--tools", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',

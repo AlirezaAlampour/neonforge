@@ -1,7 +1,8 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
-import { Clapperboard, Upload } from 'lucide-react'
+import { Clapperboard, Upload, Film } from 'lucide-react'
+import { DaidyraMark } from '@/components/sidebar'
 import { AnnotationCanvas } from '@/components/motion-annotations'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -11,7 +12,7 @@ import { motionApi, annotationId, downloadMotionJSON, type Annotation, type Capa
 type Reference = { id: string; name: string }
 type Draft = Omit<ShotRequest, 'reference_ids'> & { references: Reference[] }
 const KEY = 'neonforge-motion-director-v0.1'
-const initial: Draft = { references: [], annotations: [], prompt: '', mode: 'auto', preset: 'professional', duration: 5, orientation: 'vertical', workflow: 'reference', seed: 42, director: 'opus', engine: 'h3', pipeline: '3d', quality: 'native' }
+const initial: Draft = { references: [], annotations: [], prompt: '', mode: 'auto', preset: 'professional', duration: 5, orientation: 'vertical', workflow: 'reference', seed: 42, director: 'opus', engine: 'h3', pipeline: '3d', quality: 'draft' }
 const tools: Tool[] = ['arrow', 'path', 'orbit', 'waypoint', 'subject', 'entry', 'exit']
 const toolNames: Record<Tool, string> = { arrow: 'Camera arrow', path: 'Camera path', orbit: 'Orbit around', waypoint: 'Camera stop', subject: 'Mark subject', entry: 'Enters here', exit: 'Exits here' }
 const toolHelp: Record<Tool, string> = { arrow: 'Drag from the camera’s starting point toward its destination.', path: 'Draw the path you want the camera to follow.', orbit: 'Drag from the subject outwards to draw an orbit.', waypoint: 'Tap each camera stop in order.', subject: 'Tap the person or object to keep in focus.', entry: 'Tap where the subject enters the scene.', exit: 'Tap where the subject leaves the scene.' }
@@ -50,6 +51,8 @@ export default function MotionDirectorPage() {
   const [compare, setCompare] = useState<string[]>([])
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
+  const [errorArea, setErrorArea] = useState('preview')
+  const rebuildAttempt = useRef('')
   const [takeFilter, setTakeFilter] = useState('all')
   const pendingSubmission = useRef<{body: string; key: string; job_id?: string} | null>(null)
   const submitting = useRef(false)
@@ -93,7 +96,7 @@ export default function MotionDirectorPage() {
     let cancelled = false
     const load = async () => {
       try { const data = await motionApi.jobs(); if (!cancelled) setJobs(data.items) }
-      catch { if (!cancelled) setError('Could not load shots. Check the gateway connection.') }
+      catch { if (!cancelled) {setErrorArea('takes');setError('Could not load shots. Check the gateway connection.')} }
     }
     const check = async () => {
       const quality = qualityRef.current
@@ -118,6 +121,11 @@ export default function MotionDirectorPage() {
     void check()
     return()=>{cancelled=true}
   },[restored,generationKey,preview?.status,validationAttempt])
+  useEffect(()=>{
+    if(!validation?.can_rebuild || !plan?.scene || busy || alreadySubmitted || rebuildAttempt.current===generationKey)return
+    rebuildAttempt.current=generationKey
+    void rebuild()
+  },[validation?.can_rebuild,generationKey,busy,alreadySubmitted])
   useEffect(() => {
     if (restored) { try { localStorage.setItem(KEY, JSON.stringify(draft)) } catch { /* Storage is optional. */ } }
   }, [draft, restored])
@@ -125,7 +133,7 @@ export default function MotionDirectorPage() {
   useEffect(() => {
     if(!plan?.request.plan_id || !preview || !['queued','rendering'].includes(preview.status)) return
     let cancelled=false
-    const poll=setInterval(async()=>{try {const state=await motionApi.preview(plan.request.plan_id!);if(!cancelled) {setPreview(state);if(state.error)setError(state.error)}} catch(e) {if(!cancelled)setError(String(e))}},1800)
+    const poll=setInterval(async()=>{try {const state=await motionApi.preview(plan.request.plan_id!);if(!cancelled) {setPreview(state);if(state.error){setErrorArea('preview');setError(state.error)}}} catch(e) {if(!cancelled){setErrorArea('preview');setError(String(e))}}},1800)
     return()=>{cancelled=true;clearInterval(poll)}
   },[plan?.request.plan_id,preview?.status])
 
@@ -134,7 +142,7 @@ export default function MotionDirectorPage() {
 
   const upload = async (files: FileList | null) => {
     if (!files?.length) return
-    setBusy('upload'); setError('')
+    setBusy('upload'); setErrorArea('reference');setError('')
     const references = [...draft.references]
     try {
       if (references.length + files.length > 4) throw new Error('Use up to four references per shot.')
@@ -144,18 +152,18 @@ export default function MotionDirectorPage() {
         references.push({ id: asset.id, name: asset.original_filename })
       }
     } catch (e) { setError(e instanceof Error ? e.message : 'Image upload failed') }
-    finally { patch({ references, workflow: references.length > 1 ? 'reference' : draft.workflow }); setSelected(references.at(-1)?.id || ''); setBusy('') }
+    finally { if(references.length!==draft.references.length)patch({ references, workflow: references.length > 1 ? 'reference' : draft.workflow }); setSelected(references.at(-1)?.id || ''); setBusy('') }
   }
   const planShot = async () => {
-    setBusy('plan'); setError('')
+    setBusy('plan'); setErrorArea('preview');setError('')
     const current = revision.current
     try { const planned = await motionApi.plan(payload(draft)); if (revision.current === current) {adoptPlan(planned); if(planned.scene) setPreview(await motionApi.buildPreview(planned.request.plan_id!))} }
-    catch (e) { const message=e instanceof Error ? e.message : 'Planning failed';setError(message);setSubmissionError(message) }
-    finally { setBusy('') }
+    catch (e) { const message=e instanceof Error ? e.message : 'Planning failed';setError(message) }
+    finally { setBusy('');void motionApi.capabilities(qualityRef.current).then(setCapabilities).catch(()=>{}) }
   }
   const reviseScene = async (instruction=correction) => {
     if(!plan?.request.plan_id || !instruction.trim()) return
-    setBusy('revise');setError('');const current=revision.current
+    setBusy('revise');setErrorArea('correction');setError('');const current=revision.current
     try {const planned=await motionApi.revise(plan.request.plan_id,instruction);if(revision.current===current){adoptPlan(planned);setPreview(await motionApi.buildPreview(planned.request.plan_id!));setCorrection('')}}
     catch(e){setError(e instanceof Error?e.message:'Scene correction failed')}
     finally{setBusy('')}
@@ -196,14 +204,14 @@ export default function MotionDirectorPage() {
   const comparison = completed.filter(j => compare.includes(j.job_id))
   const visibleJobs = jobs.filter(j=>takeFilter==='all' || (takeFilter==='active' && !terminal(j)) || (takeFilter==='attention' && attention(j)) || (takeFilter==='ready' && j.status==='completed'))
   const jobAction = async (job: MotionJob, action: 'retry'|'cancel'|'reconcile') => {
-    setBusy(job.job_id);setError('')
+    setBusy(job.job_id);setErrorArea(job.job_id);setError('')
     try {const updated=await motionApi[action](job.job_id);setJobs(prev=>prev.map(j=>j.job_id===updated.job_id?updated:j))}
     catch(e){const message=e instanceof Error?e.message:'Could not update this take';setError(message);setSubmissionError(message)}
     finally{setBusy('')}
   }
   const reuse = async (job: MotionJob) => {
     let reused: ShotSpec, reusedPreview: ScenePreview | null=null
-    setBusy(job.job_id);setError('')
+    setBusy(job.job_id);setErrorArea(job.job_id);setError('')
     try {
       const check=await motionApi.validate(job.shot.request)
       if(check.can_rebuild){const result=await motionApi.rebuild(job.shot.request.plan_id!,job.shot.request);reused=result.plan;reusedPreview=result.preview}
@@ -216,18 +224,25 @@ export default function MotionDirectorPage() {
     setSelected(reference_ids[0]);setPlan(reused);setPreview(reusedPreview);setChecked(null);setSubmitted(null);setSubmissionError('');pendingSubmission.current=null;try{localStorage.removeItem(KEY+'-submission')}catch{}
     window.scrollTo({top:0,behavior:'smooth'})
   }
-  return <div className="space-y-6 pb-12">
-    <div className="flex items-start gap-3"><Clapperboard className="mt-1 h-7 w-7 shrink-0 text-sky-300" /><div><h1 className="text-2xl font-semibold">Motion Director <span className="text-sm text-muted-foreground">v0.1</span></h1><p className="mt-1 text-sm text-muted-foreground">Set the scene. Preview the motion. Make the film.</p></div></div>
-    <div className="flex flex-wrap gap-2 text-xs text-sky-200"><span className="rounded-full bg-sky-400/10 px-3 py-2">1 · Reference & direction</span><span className="rounded-full bg-sky-400/10 px-3 py-2">2 · 3D preview & corrections</span><span className="rounded-full bg-sky-400/10 px-3 py-2">3 · Final clip</span></div>
-    {error && <p role="alert" className="break-words rounded-xl border border-red-300/20 bg-red-400/5 p-3 text-sm text-red-200">{error}</p>}
-    <section className="space-y-4 rounded-xl border border-white/10 bg-card/40 p-3 sm:p-5">
-      <h2 className="font-semibold">1 · Your scene</h2>
+  return <div className="daidyra-studio space-y-6 pb-12">
+    <header className="daidyra-hero relative overflow-hidden rounded-2xl border border-white/10 p-5 sm:p-8">
+      <DaidyraMark className="pointer-events-none absolute -right-3 -top-6 h-56 w-56 text-amber-100/[.035]" />
+      <p className="mb-4 text-[10px] font-medium uppercase tracking-[.26em] text-amber-200/70">Daidyra · Motion studio</p>
+      <h1 className="relative text-3xl font-medium tracking-tight sm:text-4xl">Motion Director</h1>
+      <p className="relative mt-3 max-w-lg text-sm leading-relaxed text-muted-foreground">Find the movement in your image.<br />Shape the scene, then bring it to life.</p>
+      <div className="relative mt-5 flex flex-wrap gap-2 text-xs"><span className="rounded-full border border-white/10 bg-black/20 px-3 py-2"><span className={capabilities?.planner.opus_available?'text-emerald-300':'text-amber-200'}>●</span> Claude planning · {capabilities?.planner.opus_available?'Ready':'Needs verification'}</span><span className="rounded-full border border-white/10 bg-black/20 px-3 py-2"><span className={capabilities?.h3.render_ready?'text-emerald-300':'text-amber-200'}>●</span> H3 rendering · {capabilities?.h3.render_ready?'Ready':capabilities?'Unavailable':'Checking'}</span></div>
+    </header>
+    <ol className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-4" aria-label="Creation workflow">{['Upload reference','Describe action','Preview scene','Generate video'].map((step,i)=><li key={step} className="flex min-h-11 items-center gap-2 rounded-lg border border-white/[.06] px-3 text-muted-foreground"><span className="font-mono text-amber-200/70">0{i+1}</span>{step}</li>)}</ol>
+    <div className="grid items-start gap-5 lg:grid-cols-[minmax(0,.85fr)_minmax(0,1.15fr)]">
+    <section className="min-w-0 space-y-4 rounded-2xl border border-white/10 bg-card/60 p-4 sm:p-5">
+      <h2 className="flex items-center gap-2 font-medium"><Upload className="h-4 w-4 text-amber-200/70" />Your reference & action</h2>
       <label className="flex min-h-14 cursor-pointer items-center justify-center gap-2 rounded-lg border border-dashed border-sky-300/40 p-3 text-sm">
         <Upload className="h-5 w-5" />{busy === 'upload' ? 'Uploading references…' : 'Choose reference images'}
         <input aria-label="Upload reference images" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" multiple disabled={Boolean(busy)} className="sr-only" onChange={e => { void upload(e.target.files); e.target.value = '' }} />
       </label>
+      {error && errorArea==='reference' && <p role="alert" className="break-words text-sm text-red-200">{error}</p>}
       <p className="text-xs text-muted-foreground">Up to four reference images, 20 MB each. Your originals are preserved.</p>
-      <label className="grid gap-2 text-sm">Cinematic prompt<Textarea rows={4} maxLength={4000} value={draft.prompt} placeholder="Describe the scene, what happens and how you want the camera to move…" onChange={e => patch({ prompt: e.target.value })} /></label>
+      <label className="grid gap-2 text-sm">Describe action<Textarea rows={4} maxLength={4000} value={draft.prompt} placeholder="The characters start fighting. Keep both in view…" onChange={e => patch({ prompt: e.target.value })} /></label>
       {draft.references.length > 0 && <>
         {selected && <img className="max-h-64 w-full rounded-lg bg-black/30 object-contain" src={`/api/v1/motion-director/references/${selected}`} alt="Selected scene reference" />}
         <div className="flex flex-wrap gap-2">{draft.references.map((ref, i) => <Button key={ref.id} variant={selected === ref.id ? 'default' : 'outline'} className="min-h-11 max-w-full truncate" onClick={() => setSelected(ref.id)}>Picture {i + 1} · {ref.name.slice(0, 25)}</Button>)}</div>
@@ -244,14 +259,16 @@ export default function MotionDirectorPage() {
         </details>
       </>}
     </section>
-    <section className="space-y-4 rounded-xl border border-white/10 bg-card/40 p-3 sm:p-5">
-      <h2 className="font-semibold">2 · Direct & preview</h2>
+    <section className="min-w-0 space-y-4 rounded-2xl border border-white/10 bg-card/60 p-4 sm:p-5">
+      <h2 className="flex items-center gap-2 font-medium"><Clapperboard className="h-4 w-4 text-amber-200/70" />Preview scene</h2>
       <div className="grid gap-3 sm:grid-cols-2">
         <label className="grid gap-1 text-sm">Duration<select aria-label="Duration" className={selectClass} value={draft.duration} onChange={e => patch({ duration: Number(e.target.value) as Draft['duration'] })}>{(draft.duration<5?[draft.duration,5,10,15,30]:[5,10,15,30]).map(n => <option key={n} value={n}>{n} seconds</option>)}</select></label>
         {draft.pipeline === '3d' ? <div className="grid gap-1 text-sm"><span>Director</span><div className="flex min-h-11 items-center rounded-md border border-white/10 px-3 text-sky-200">Claude Opus + Blender</div></div> : (<label className="grid gap-1 text-sm">Engine<select aria-label="Engine" className={selectClass} value={draft.engine === 'grok' ? 'grok' : draft.director || 'auto'} onChange={e => patch(e.target.value === 'grok' ? { engine: 'grok' } : { engine: 'h3', director: e.target.value as Draft['director'] })}><option value="auto">H3 · automatic cinematic director</option><option value="local">H3 · local cinematic director</option><option value="opus" disabled={!capabilities?.planner.opus_available}>H3 · Claude Code Opus {capabilities?.planner.opus_available ? '(Pro subscription)' : '(unavailable)'}</option><option value="grok" disabled={!capabilities?.grok.available}>Grok via Hermes · {capabilities?.grok.available ? 'OAuth' : 'manual import below'}</option></select></label>)}
       </div>
       <p className="text-xs text-muted-foreground">{draft.pipeline === '3d' ? 'Claude Opus + Blender turn your reference into an editable approximation. Review the movement before making the AI clip.' : 'Classic prompt direction. Switch to 3D in Advanced for a Blender preview.'}</p>
-      {draft.pipeline === '3d' && <Button className="min-h-12 w-full" disabled={Boolean(busy) || !draft.prompt.trim() || !draft.references.length || !capabilities?.blender?.available || ['queued','rendering'].includes(preview?.status || '')} onClick={() => void (plan?.scene && (validation?.ready||validation?.can_rebuild)?rebuild():planShot())}>{busy === 'plan' ? 'Opus is directing your scene…' : busy==='rebuild'?'Rebuilding saved scene…':plan?.scene ? 'Rebuild 3D preview' : 'Build 3D preview'}</Button>}
+      {draft.pipeline === '3d' && <Button className="min-h-12 w-full" disabled={Boolean(busy) || !draft.prompt.trim() || !draft.references.length || !capabilities?.blender?.available || ['queued','rendering'].includes(preview?.status || '') || (!plan?.scene && !capabilities?.planner.opus_available && Boolean(capabilities?.planner.next_check_at && Date.parse(capabilities.planner.next_check_at)>now))} onClick={() => void (plan?.scene && (validation?.ready||validation?.can_rebuild)?rebuild():planShot())}>{busy === 'plan' ? 'Directing your scene…' : busy==='rebuild'?'Restoring saved scene…':plan?.scene ? 'Refresh scene preview' : 'Preview scene'}</Button>}
+      {error && errorArea==='preview' && <p role="alert" className="break-words rounded-lg bg-red-400/5 p-3 text-sm text-red-200">{error}</p>}
+      {validation && !validation.ready && !validation.can_rebuild && validation.code!=='plan_required' && <p className="text-sm text-amber-200">{validation.reason}</p>}
       {draft.pipeline === '3d' && capabilities && <div className="rounded-lg border border-white/10 p-3 text-sm" aria-label="Claude planning availability">
         <p role="status">Claude planning · {capabilities.planner.opus_available ? 'Available' : capabilities.planner.verification_state?.replaceAll('_',' ') || 'Unavailable'}</p>
         {!capabilities.planner.opus_available && <p className="mt-2 text-amber-200">{capabilities.planner.reason}</p>}
@@ -270,9 +287,12 @@ export default function MotionDirectorPage() {
           {preview.preview_width && <p className="text-xs text-muted-foreground">Motion preview {preview.preview_width} × {preview.preview_height}{preview.cache_hit ? ' · cached' : ''}. Final generation {plan?.width} × {plan?.height}.</p>}
           <label className="grid gap-2 text-sm">Correct the scene<Textarea value={correction} maxLength={1200} rows={2} onChange={e=>setCorrection(e.target.value)} placeholder="Move the camera farther back, turn the path left, keep the train still…" /></label>
           <Button variant="outline" className="min-h-11 w-full" disabled={Boolean(busy) || !correction.trim()} onClick={()=>void reviseScene()}>{busy==='revise'?'Updating your scene…':'Apply correction & preview'}</Button>
+          {error && errorArea==='correction' && <p role="alert" className="break-words text-sm text-red-200">{error}</p>}
           <a className="inline-flex min-h-11 items-center text-sm text-sky-300" href={preview.export_url} download>Export for Grok · MP4, PNG & prompt</a>
         </>}
       </div>}
+      {!preview && <div className="daidyra-preview-empty flex min-h-52 flex-col items-center justify-center rounded-xl border border-dashed border-white/10 p-6 text-center"><Film className="mb-4 h-8 w-8 text-amber-100/40" /><p className="text-sm">Your scene, before the render.</p><p className="mt-2 max-w-xs text-xs leading-relaxed text-muted-foreground">Add a reference and describe an action to preview the movement and camera here.</p></div>}
+      {!!plan?.scene?.interactions?.length && <details className="rounded-lg border border-white/10 p-3"><summary className="min-h-11 cursor-pointer text-sm">Character timeline · {preview?.timeline_verified?'contact & framing checked':'awaiting Blender validation'}</summary><div className="mt-3 space-y-2">{plan.scene.entities.flatMap(e=>(e.actions||[]).map((a,i)=><p key={e.id+i} className="grid grid-cols-[6rem_1fr] gap-2 text-xs"><span className="font-mono text-amber-100/60">{a.start.toFixed(2)}–{a.end.toFixed(2)}s</span><span>{e.label} · {a.clip.replaceAll('_',' ')}</span></p>))}</div>{preview?.timeline_url&&<a href={preview.timeline_url} className="mt-3 inline-flex min-h-11 items-center text-xs text-sky-200">View evaluated contact report</a>}</details>}
       {plan?.h3 && <details className="space-y-3 rounded-lg border border-white/10 p-3"><summary className="min-h-11 cursor-pointer py-2 text-sm font-medium">AI Shot Plan · optional review & edit</summary>
         <p className="my-3 text-sm">{plan.h3.summary}</p><p className="text-xs text-muted-foreground">Your original prompt stays unchanged. Opus inferred these production details from the reference.</p>
         <ul className="my-3 list-disc space-y-1 pl-4 text-sm">{plan.h3.subject_definitions.map(s=><li key={s}>{s}</li>)}</ul>
@@ -305,7 +325,8 @@ export default function MotionDirectorPage() {
     </section>}
       </details>
     </section>
-    <section aria-label="Final generation" className="space-y-3 rounded-xl border border-sky-300/20 bg-sky-300/5 p-3 sm:p-5"><h2 className="font-semibold">3 · Make the final clip</h2><p className="text-sm text-muted-foreground">{draft.pipeline === '3d' ? 'Happy with the preview? Use its motion as a reference for H3, or export it for Grok.' : 'Generate a clip using your reference and direction.'}</p>
+    </div>
+    <section aria-label="Final generation" className="space-y-3 rounded-2xl border border-amber-100/15 bg-card/60 p-4 sm:p-5"><h2 className="font-medium">Generate video</h2><p className="text-sm text-muted-foreground">{draft.pipeline === '3d' ? 'Happy with the preview? Use its motion as a reference for H3, or export it for Grok.' : 'Generate a clip using your reference and direction.'}</p>
       <Button className="min-h-12 w-full" disabled={Boolean(busy) || !draft.prompt.trim() || !draft.references.length || !validation?.ready || alreadySubmitted || (!capabilities?.h3.render_ready && !capabilities?.h3.can_recover_memory)} onClick={() => void generate()}>{busy === 'render' ? 'Preparing your final clip…' : 'Generate video'}</Button>
       {submissionError && <p role="alert" className="break-words rounded-lg border border-red-300/20 bg-red-400/5 p-3 text-sm text-red-200">{submissionError}</p>}
       {alreadySubmitted ? <p role="status" className="text-sm text-sky-200">Video submitted. Follow its progress in Your takes; repeated clicks will not submit another job.</p> : draft.references.length>0 && <p role="status" className={`text-sm ${validation?.ready?'text-sky-200':'text-amber-200'}`}>{validation?.reason||'Checking this saved plan and preview on the server…'}</p>}
@@ -319,7 +340,7 @@ export default function MotionDirectorPage() {
     {!capabilities ? <p role="status" className="text-sm text-muted-foreground">Checking local H3 availability…</p> : !capabilities.h3.render_ready && <p role="status" className="rounded-lg border border-amber-400/20 p-3 text-sm text-amber-200">{capabilities.h3.reason || 'H3 is unavailable.'} Planning and drawings remain available.</p>}
     {capabilities?.h3.can_recover_memory && <Button variant="outline" className="min-h-11" disabled={Boolean(busy)} onClick={async () => { setBusy('memory'); try { await motionApi.recoverMemory(); setCapabilities(await motionApi.capabilities(qualityRef.current)) } catch(e) { setError(String(e)) } finally { setBusy('') } }}>Release idle H3 memory</Button>}
     <details className="rounded-xl border border-white/10 p-3"><summary className="min-h-11 cursor-pointer py-3">Grok · export, import & compare</summary><p className="my-3 text-sm text-muted-foreground">Export the Blender reference above, open Grok, and use its PNG and prompt to create your clip. If your Grok browser supports video references, use the MP4 too. Download the result and import it here.</p><p className="my-3 text-xs text-muted-foreground">{capabilities?.grok.reason}</p><a href="https://grok.com/imagine" target="_blank" rel="noreferrer" className="inline-flex min-h-11 items-center text-sky-300">Open Grok on your phone</a><label className="mt-3 flex min-h-12 cursor-pointer items-center justify-center rounded-lg border border-dashed p-3 text-sm">{busy === 'import' ? 'Preparing imported video…' : 'Import Grok MP4'}<input aria-label="Import Grok MP4" type="file" accept="video/mp4" className="sr-only" disabled={Boolean(busy)} onChange={async e => { const file=e.target.files?.[0]; e.target.value=''; if(!file) return; setBusy('import'); try { const reference=completed.find(j => j.service !== 'grok'); const job=await motionApi.importGrok(file,plan?.scene?undefined:reference?.job_id,plan?.scene?plan.request.plan_id||undefined:undefined); setJobs(prev=>[job,...prev]); if(job.blender_preview_url)setSceneCompare(job.job_id);else if(reference) setCompare([reference.job_id,job.job_id]) } catch(err) { setError(String(err)) } finally { setBusy('') } }} /></label><p className="mt-2 text-xs text-muted-foreground">Your original MP4 is preserved. Automatic Grok generation stays disabled.</p></details>
-    <section className="space-y-4"><h2 className="font-semibold">Your takes</h2>
+    <section className="space-y-4"><h2 className="font-semibold">Your takes</h2>{error && errorArea==='takes' && <p role="alert" className="text-sm text-red-200">{error}</p>}
       <div className="flex flex-wrap gap-2" role="group" aria-label="Filter takes">{[['all','All'],['active','Active'],['attention','Needs attention'],['ready','Ready']].map(([value,label])=><Button key={value} variant={takeFilter===value?'default':'outline'} className="min-h-11" aria-pressed={takeFilter===value} onClick={()=>setTakeFilter(value)}>{label} · {jobs.filter(j=>value==='all'||(value==='active'&&!terminal(j))||(value==='attention'&&attention(j))||(value==='ready'&&j.status==='completed')).length}</Button>)}</div>
       {!jobs.length && <p className="text-sm text-muted-foreground">Completed videos appear here for preview, download and comparison.</p>}
       {completed.filter(j=>j.job_id===sceneCompare && j.blender_preview_url).map(job=><div key={job.job_id} className="space-y-3 rounded-xl border border-sky-400/30 p-3"><div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-medium">Blender vs final clip</h3><Button variant="outline" className="min-h-11" onClick={()=>['blender-'+job.job_id,'final-'+job.job_id].forEach(id=>{const v=videos.current[id];if(v){v.currentTime=0;void v.play().catch(()=>{})}})}>Play reference & final</Button></div><div className="grid gap-3 md:grid-cols-2">{[{label:'Blender · planned motion',src:job.blender_preview_url!,key:'blender-'},{label:job.service==='grok'?'Grok · imported result':'H3 · generated result',src:job.preview_url!,key:'final-'}].map(v=><div key={v.key}><p className="mb-2 text-sm">{v.label}</p><video ref={node=>{videos.current[v.key+job.job_id]=node}} className="max-h-[55vh] w-full rounded-lg bg-black" src={v.src} controls playsInline preload="metadata" /></div>)}</div><p className="text-xs text-amber-200">Compare travel direction, camera distance, turns and stationary objects. Reference conditioning cannot guarantee exact movement or appearance.</p></div>)}
@@ -330,6 +351,7 @@ export default function MotionDirectorPage() {
         <p className="line-clamp-2 text-sm">{job.shot.request.prompt}</p><p className="text-xs text-muted-foreground">{job.shot.width} × {job.shot.height} {job.shot.planner === 'manual-import' ? 'imported' : job.recovery_hint ? 'saved canvas · review needed' : job.shot.request.quality === 'native' ? 'native detail' : 'draft'} · {job.shot.fps} fps</p><p role="status" className="text-xs text-sky-200">{job.message}</p>
         {job.elapsed_seconds != null && <p className="text-xs text-muted-foreground">{elapsed(job.elapsed_seconds)} elapsed{job.queue_position ? ` · Queue position ${job.queue_position}` : ''}{job.cancel_requested?' · Cancellation requested':''}</p>}
         {Boolean(job.total_segments) && <p className="text-xs text-muted-foreground">{job.completed_segments}/{job.total_segments} clips saved</p>}
+        {error && errorArea===job.job_id && <p role="alert" className="text-sm text-red-200">{error}</p>}
         {job.error && <p className="break-words text-xs text-red-300">{job.error}</p>}
         {job.recovery_hint && <p className="text-xs text-amber-200">{job.recovery_hint}</p>}
         <Usage shot={job.shot} rendering />

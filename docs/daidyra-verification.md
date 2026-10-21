@@ -71,3 +71,23 @@ choreography. Authored interactions now supply the full real-time 124-frame
 window at a bounded 384x672 motion canvas, plus original image identity inputs
 and a first-frame appearance guide. Existing non-interaction draft settings stay
 unchanged for comparison. No resolution or UMA/temperature floor was reduced.
+
+## Daidyra creation interface
+
+Visible branding/metadata now use Daidyra; Motion Director remains the workflow
+name. Existing repository, deployment, storage and localStorage identifiers stay
+unchanged. A restrained gold labyrinth mark and thread/grid accents frame the
+workspace. Desktop uses reference/action and preview columns; phone uses a full
+width workspace with horizontal navigation. Advanced tools remain optional.
+Compatible saved scenes reconstruct automatically after restore or quality/canvas
+changes, with a bounded one-attempt guard and an explicit retry on failure.
+Incompatible prompt/reference changes explain the new-planning requirement.
+Upload, scene corrections and take actions display errors beside their controls.
+Claude planning/next verification time and H3 resource readiness are separate.
+The character timeline lists each actor's timed clips and links the evaluated
+contact report. New sessions start with a five-second fast draft.
+
+Staging Playwright inspected real desktop (1440x1000) and phone (390x844) views:
+Daidyra title/navigation, no browser errors, no document overflow, usable controls,
+and full-width mobile content. Screenshots: `staging-desktop.png` / `staging-phone.png`.
+Optimized Next build, TypeScript and Python checks passed before activation.

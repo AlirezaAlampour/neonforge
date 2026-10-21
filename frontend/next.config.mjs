@@ -1,6 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: 'standalone',
+  agentRules: false,
   async rewrites() {
     const gateway = process.env.GATEWAY_INTERNAL_URL || 'http://gateway:8000'
     return [
