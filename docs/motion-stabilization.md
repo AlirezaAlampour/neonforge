@@ -22,7 +22,9 @@ best-effort status cache; reads of Motion status use SQLite. A supervised dispat
 loop revisits committed outbox work. The deployment remains one gateway worker;
 it must not be scaled to multiple replicas without a distributed execution lease.
 
-Legacy unsubmitted jobs become interrupted, individually retryable takes.
+Legacy unsubmitted jobs become interrupted, individually recoverable takes.
+A valid plan can be retried directly; inconsistent/stale plans show a reuse-and-
+review instruction before generation.
 Restart recovery only retrieves acknowledged work and pauses before unsubmitted
 sequence tails. A submission intent with no acknowledgement is matched against
 H3 queue/history client IDs; missing/ambiguous evidence retains the reservation
@@ -68,3 +70,19 @@ Redis AOF was enabled against the live keyspace before container recreation,
 preserving the existing RDB-only keys. The release helper performs this migration
 before activation. Gateway/frontend only were redeployed; supervisor and external
 H3 were not replaced. Earlier service images and the feature branch are retained.
+
+Final local acceptance: 228 Python regressions pass, including safe retrieval of
+an already-accepted legacy canvas that would now be refused for new submission.
+TypeScript, production Next.js build and both Compose files validate. The
+mobile/desktop deployed checks cover real CPU Blender rendering/decoding,
+zero-new-call cached planning, saved takes, recovery controls, comparison playback,
+reuse, all seven current routes and legacy-route 404s. Browser observations use
+America/Los_Angeles for timestamps; serialized job timestamps now include UTC.
+
+The integrated deployment uses `motion-stability-final` gateway/frontend images;
+Redis is healthy with AOF and noeviction. Supervisor keeps its original image and
+container; external H3 keeps its original process. Unrelated container IDs and
+running/stopped states match the pre-session inventory. No volumes or artifacts
+were pruned. The live draft's frame samples are evidence of playback/recovery,
+not a new identity-quality claim. Fresh Claude planning was not required for this
+acceptance; its existing subscription check may still report quota/rate limiting.

@@ -6,7 +6,11 @@ NeonForge is a single-host media studio for DGX Spark. It deliberately uses the 
 flowchart TD
     Browser --> Frontend[Next.js creator UI]
     Frontend --> Gateway[FastAPI gateway]
-    Gateway <--> Redis[(Redis job/activity state)]
+    Gateway <--> Redis[(Redis status cache)]
+    Gateway <--> SQLite[(SQLite durable Motion jobs/plans/history)]
+    Gateway --> Host[Private Opus/CPU Blender adapter]
+    Gateway --> H3[Existing external H3]
+    Supervisor --> Lease[Shared Forge3D GPU lease]
     Gateway --> Supervisor[Internal resource manager]
     Supervisor --> Compose[Targeted Docker Compose start/stop]
 
@@ -56,7 +60,7 @@ The gateway does not have the Docker socket. The supervisor is internal-only and
 | Avatar | EchoMimicV3-Flash target | Disabled until ARM64 real render passes |
 | Lip Sync | LatentSync 1.6 service | 32 GiB cold-start floor, 5-minute warm window |
 | System Info | Gateway and supervisor inspection | Always-on control plane |
-| Motion Director (unmerged, privately active) | Existing Opus Pro → CPU Blender scene/preview → H3 reference-video; manual Grok export/import | 90 GiB before each bounded clip, shared exclusive lease, verified-idle cache cleanup; H3 never started/stopped |
+| Motion Director (privately active) | Existing Opus Pro → CPU Blender scene/preview → H3 reference-video; manual Grok export/import | 90 GiB draft / 105 GiB native before each bounded clip, shared exclusive lease, verified-idle cache cleanup; H3 never started/stopped |
 
 ComfyUI is intentionally shared by the two managed graph workflows. The gateway supplies the managed workflow identity and bounded frame/resolution inputs. The supervisor applies small measured admission rules, checks warm containers too, and rejects competing active heavy claims.
 
@@ -121,3 +125,10 @@ admission and per-clip rechecks require 105 GiB; draft keeps the 90 GiB floor.
 No arbitrary model-generated code is executed, and strict ControlNet/trajectory
 control is not claimed. See [3D execution and limits](docs/motion-3d/WORKFLOW.md)
 and the [quality comparison](docs/motion-quality/RESULTS.md).
+
+Motion submission and segment intent commit together in SQLite; Redis failure
+cannot prevent acknowledgement or dispatch. Restart recovery tracks accepted H3
+work without submitting another clip; legacy or ambiguous jobs receive explicit
+recovery states. The gateway remains a single worker. See
+[stabilization](docs/motion-stabilization.md) and the
+[non-destructive modernization proposal](docs/modernization-proposal.md).

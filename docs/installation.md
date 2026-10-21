@@ -5,7 +5,7 @@ NeonForge targets NVIDIA DGX Spark/GB10 on Linux ARM64. Docker Engine, Compose v
 ## Base stack
 
 ```bash
-git clone --branch neonforge-v0.2 https://github.com/AlirezaAlampour/neonforge.git
+git clone --branch main https://github.com/AlirezaAlampour/neonforge.git
 cd neonforge
 cp .env.example .env
 
@@ -74,12 +74,17 @@ uv lock --check
 uv sync --locked --dev
 uv run --locked pytest
 
-cd frontend
-npm run lint
-npm run build
+uv run --locked --no-sync node frontend/node_modules/typescript/bin/tsc --noEmit -p frontend/tsconfig.json
+(cd frontend && uv run --locked --no-sync node node_modules/next/dist/bin/next build --webpack)
 ```
 
-Rebuild only affected services:
+For the privately activated Motion deployment, verify `uv.lock`, prepare images with
+`scripts/build_motion_images.sh RELEASE_ID`, then activate with
+`scripts/deploy_motion_release.sh RELEASE_ID`. It recovers Redis first and updates
+only gateway/frontend. Keep the existing Motion overlay, role keys and host socket.
+Do not use `compose down` or remove orphan services. See [recovery](motion-stabilization.md).
+
+For separately scoped base-stack changes, rebuild only affected services:
 
 ```bash
 docker compose build supervisor gateway frontend

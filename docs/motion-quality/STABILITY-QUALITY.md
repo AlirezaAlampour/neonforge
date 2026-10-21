@@ -13,7 +13,7 @@ Two concrete plan-reuse defects were found in the live ledger and code:
   stored **384×672**. Local camera revision copied a draft parent's canvas
   over the requested native profile. Planning/revision now retains the requested
   768×1344 native or 384×672 draft dimensions. Bad caches are rebuilt from
-  eligible saved scenes; submission/execution refuses inconsistent canvases.
+  eligible saved scenes; changed story intent requires fresh planning; submission/execution refuses inconsistent canvases.
 - A camera-only revision could retain a parent after the user changed the main
   story prompt, silently reusing the wrong action. The live fighting request
   inherited a running scene. Local edits now require unchanged scene semantics;

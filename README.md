@@ -54,9 +54,11 @@ docker compose up -d
 
 Open the frontend at the configured address (loopback port 3000 by default). Follow [installation](docs/installation.md) to provision storage, images and weights. Models start when needed; the base stack is frontend, gateway, Redis, supervisor and Whisper.
 
+See [Motion reliability and deployment](docs/motion-stabilization.md), [quality findings](docs/motion-quality/STABILITY-QUALITY.md), [modernization proposal](docs/modernization-proposal.md), and [naming proposal](docs/product-identity-proposal.md).
+
 ## Models
 
-Voiceover preserves Breeze, F5, Fish, VoxCPM2 and Miso pending capability comparisons. Video uses HunyuanVideo 1.5; the unmerged Motion Director feature now has a verified local H3 reference-video workflow (see its audit and acceptance notes). Character uses Wan2.2 Animate Replace; Lip Sync uses LatentSync 1.6.
+Voiceover preserves Breeze, F5, Fish, VoxCPM2 and Miso pending capability comparisons. Video uses HunyuanVideo 1.5; Motion Director has a verified local H3 reference-video workflow (see its audit and acceptance notes). Character uses Wan2.2 Animate Replace; Lip Sync uses LatentSync 1.6.
 
 See the dated [model matrix and licenses](docs/models.md), [pivot audit](docs/pivot-audit.md), and [real acceptance evidence](docs/acceptance-v0.2.md). Tests and health endpoints alone do not establish generation support.
 
@@ -76,12 +78,11 @@ See [architecture](ARCHITECTURE.md) and [troubleshooting](docs/troubleshooting.m
 uv lock --check
 uv sync --locked --dev
 uv run --locked pytest -p no:cacheprovider
-cd frontend
-npm run lint
-npm run build
+uv run --locked --no-sync node frontend/node_modules/typescript/bin/tsc --noEmit -p frontend/tsconfig.json
+(cd frontend && uv run --locked --no-sync node node_modules/next/dist/bin/next build --webpack)
 ```
 
-Frontend commands above use existing locked dependencies. Python package management uses uv. See [acceptance procedures](ACCEPTANCE_TESTS.md) for actual DGX renders.
+Commands above use the existing frontend dependencies and verified uv environment; they do not install Node packages. Package changes in this workspace use uv. See [acceptance procedures](ACCEPTANCE_TESTS.md) for actual DGX renders.
 
 ## License
 
