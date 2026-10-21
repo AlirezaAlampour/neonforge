@@ -93,6 +93,7 @@ const folder='.motion-runtime/stabilization', key='neonforge-motion-director-v0.
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true)
   await page.screenshot({path:folder+'/after-desktop.png',fullPage:true})
   await take.getByRole('button',{name:'Reuse shot'}).click()
+  await page.waitForFunction(prompt=>JSON.parse(localStorage.getItem('neonforge-motion-director-v0.1')||'{}').prompt===prompt,final.shot.request.prompt)
   assert.equal(await page.getByLabel('Cinematic prompt').inputValue(),final.shot.request.prompt)
   await page.getByLabel('Blender 3D preview',{exact:true}).waitFor({timeout:120000})
   // Read-only compatibility checks against every current creator route.
