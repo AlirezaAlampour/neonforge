@@ -174,7 +174,7 @@ def upload(client):
 def await_job(client, job_id):
     for _ in range(100):
         result = client.get(f"/api/v1/motion-director/jobs/{job_id}").json()
-        if result["status"] in {"completed", "failed"}:
+        if result["status"] in routes.TERMINAL:
             return result
         time.sleep(.02)
     raise AssertionError("Mock inference did not terminate")
@@ -239,7 +239,7 @@ def test_render_errors_release_only_confirmed_terminal_jobs(studio, error):
     ref = upload(client)
     accepted = client.post("/api/v1/motion-director/jobs", json={"prompt": "scene", "reference_ids": [ref]})
     result = await_job(client, accepted.json()["job_id"])
-    assert result["status"] == "failed" and result["error"]
+    assert result["status"] == ("needs_inspection" if error == "ambiguous" else "failed") and result["error"]
     assert len(fake.releases) == (0 if error == "ambiguous" else 1)
     assert not result["preview_url"]
 

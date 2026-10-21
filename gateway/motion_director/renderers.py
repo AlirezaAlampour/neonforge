@@ -19,6 +19,10 @@ class SubmissionUncertain(RuntimeError):
     """A prompt may have been accepted; its reservation must not be released."""
 
 
+class SubmissionRejected(RuntimeError):
+    """Failure before /prompt was sent; no inference could have been accepted."""
+
+
 class Renderer(Protocol):
     async def available(self) -> dict: ...
     async def submit(self, shot: ShotSpec, assets: list, job_id: str) -> str: ...
@@ -125,7 +129,32 @@ class H3Renderer:
         response.raise_for_status()
         return response.json()
 
+    async def interrupt(self, prompt_id: str):
+        response = await self.client.post(f'{self.url}/interrupt', json={'prompt_id': prompt_id}, timeout=15)
+        response.raise_for_status()
+
+    async def find_submission(self, client_id: str) -> str | None:
+        """Read-only acknowledgement recovery; client IDs never authorize a POST."""
+        queue = await self.queue()
+        entries = queue.get('queue_running', []) + queue.get('queue_pending', [])
+        response = await self.client.get(f'{self.url}/history', params={'max_items': 1000}, timeout=30)
+        response.raise_for_status()
+        entries += [entry.get('prompt', []) for entry in response.json().values()]
+        matches = {entry[1] for entry in entries if len(entry) > 3 and isinstance(entry[3], dict)
+                   and entry[3].get('client_id') == client_id}
+        if len(matches) > 1:
+            raise SubmissionUncertain('Multiple H3 prompts match the submission ID. Inspect before proceeding.')
+        return next(iter(matches), None)
+
     async def submit(self, shot: ShotSpec, assets: list, job_id: str, context_paths: tuple[Path, Path] | None = None, scene_path: Path | None = None) -> str:
+        try:
+            return await self._submit(shot, assets, job_id, context_paths, scene_path)
+        except (SubmissionUncertain, httpx.HTTPStatusError):
+            raise
+        except Exception as exc:
+            raise SubmissionRejected(str(exc)) from exc
+
+    async def _submit(self, shot: ShotSpec, assets: list, job_id: str, context_paths=None, scene_path=None) -> str:
         queue = await self.queue()
         if queue.get("queue_running") or queue.get("queue_pending"):
             raise RuntimeError("H3 already has a workload. Wait for it to finish.")
@@ -166,9 +195,12 @@ class H3Renderer:
         if response.status_code >= 500:
             raise SubmissionUncertain("H3 returned an ambiguous submission error. Reservation retained; inspect its queue before retrying.")
         response.raise_for_status()
-        result = response.json()
-        if result.get("node_errors") or not result.get("prompt_id"):
-            raise RuntimeError("H3 rejected the workflow: " + str(result.get("node_errors", "missing prompt ID"))[:1200])
+        try:
+            result = response.json()
+        except ValueError as exc:
+            raise SubmissionUncertain('H3 returned an unreadable acknowledgement. Check the accepted shot before retrying.') from exc
+        if not result.get('prompt_id'):
+            raise SubmissionUncertain('H3 returned no prompt ID. Check the accepted shot before retrying.')
         return result["prompt_id"]
 
     async def history(self, prompt_id: str) -> dict | None:

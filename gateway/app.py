@@ -246,6 +246,12 @@ def run_sqlite_schema_migrations():
         "comfyui_jobs": {
             "artifacts_json": "TEXT",
         },
+        "motion_director_jobs": {
+            "request_key": "VARCHAR(64)", "dispatch_version": "INTEGER",
+            "started_at": "DATETIME", "updated_at": "DATETIME",
+            "queue_position": "INTEGER", "cancel_requested": "BOOLEAN NOT NULL DEFAULT 0",
+        },
+        "motion_director_segments": {"attempts_json": "TEXT"},
     }
     for table_name, columns in required_columns.items():
         existing = _sqlite_table_columns(table_name)
@@ -258,6 +264,9 @@ def run_sqlite_schema_migrations():
                 conn.exec_driver_sql(
                     f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"
                 )
+    if _sqlite_table_columns('motion_director_jobs'):
+        with db_engine.begin() as conn:
+            conn.exec_driver_sql('CREATE UNIQUE INDEX IF NOT EXISTS motion_request_key ON motion_director_jobs(request_key)')
 
 
 # ---------------------------------------------------------------------------
@@ -666,6 +675,10 @@ class JobStatus(str, Enum):
     FINALIZING = "finalizing"
     COMPLETED = "completed"
     FAILED = "failed"
+    INTERRUPTED = "interrupted"
+    BLOCKED = "blocked"
+    NEEDS_INSPECTION = "needs_inspection"
+    CANCELLED = "cancelled"
 
 
 class JobRecord(BaseModel):
@@ -1620,8 +1633,20 @@ async def store_job(job: JobRecord):
 
 
 async def get_job(job_id: str) -> Optional[JobRecord]:
+    # Motion status always comes from the durable ledger, including during a
+    # Redis outage or when an older cache entry disagrees with a recovery state.
+    with SessionLocal() as db:
+        motion = db.get(MotionJob, job_id)
+    if motion:
+        return JobRecord(job_id=motion.id, service='h3', status=motion.status,
+            created_at=motion.created_at.isoformat(), message=motion.message,
+            error=motion.error, result_path=motion.output_path,
+            completed_at=motion.completed_at.isoformat() if motion.completed_at else None)
     if rdb:
-        data = await rdb.get(f"job:{job_id}")
+        try:
+            data = await rdb.get(f"job:{job_id}")
+        except aioredis.RedisError:
+            data = None
         if data:
             return JobRecord.model_validate_json(data)
     with SessionLocal() as db:
@@ -2252,9 +2277,9 @@ async def prepare_workload(
     return response.json()
 
 
-async def release_workload(service: str, claim_id: str | None) -> None:
+async def release_workload(service: str, claim_id: str | None) -> bool:
     if not claim_id:
-        return
+        return True
     try:
         response = await http_client.post(
             f"{SUPERVISOR_URL.rstrip('/')}/release/{service}",
@@ -2263,8 +2288,11 @@ async def release_workload(service: str, claim_id: str | None) -> None:
         )
         if response.status_code != 200:
             log.warning("Supervisor release failed for %s/%s: HTTP %s", service, claim_id, response.status_code)
+            return False
+        return True
     except Exception as exc:
         log.warning("Supervisor release failed for %s/%s: %s", service, claim_id, exc)
+        return False
 
 
 async def ensure_service_running(service: str) -> bool:
@@ -2293,7 +2321,7 @@ async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=db_engine)
     run_sqlite_schema_migrations()
 
-    rdb = aioredis.from_url(REDIS_URL, decode_responses=True)
+    rdb = aioredis.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=1, socket_timeout=1)
     http_client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0))
     await resume_incomplete_comfyui_jobs()
     await resume_motion_jobs(sys.modules[__name__])
