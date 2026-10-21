@@ -21,7 +21,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from .planner import LocalDirector, ShotRequest, ShotSpec, segment_shot
 from . import media
 from .renderers import SubmissionRejected, SubmissionUncertain, get_renderer
-from .host_client import host_request
+from .host_client import host_request, PlanningRefused
 from .scene import SceneSpec
 from .planner import StrictModel
 from pydantic import Field
@@ -172,8 +172,9 @@ def create_router(runtime):
                     if fingerprint(candidate.request) != key or candidate.reference_ids != shot.reference_ids or (candidate.width, candidate.height, candidate.frames) != (shot.width, shot.height, shot.frames):
                         raise ValueError("Director changed protected request or hardware bounds")
                     shot = candidate
-                except (RuntimeError, httpx.HTTPError, ValueError, OSError):
+                except (RuntimeError, httpx.HTTPError, ValueError, OSError) as exc:
                     if request.pipeline == "3d":
+                        if isinstance(exc,PlanningRefused):raise HTTPException(exc.status_code,str(exc)) from exc
                         raise HTTPException(503, "Claude Opus could not produce a valid 3D scene. Check subscription availability and try planning again; no simulated scene or paid fallback was used.")
                     shot.notes.append("Opus unavailable or invalid. This shot uses the deterministic cinematic fallback; no retry occurs during rendering.")
             if request.pipeline == "3d":
@@ -526,8 +527,7 @@ def create_router(runtime):
                                 raise HTTPException(409, response.json().get('detail', 'H3 resource recheck failed'))
                         bounded = segment_shot(shot, i) if shot.request.duration >= 5 else shot
                         context = await media.continuation(previous, runtime.resolve_output_path(f'motion_director/{job_id}'), i, shot.width, shot.height) if previous else None
-                        scene_path = await media.scene_window(runtime.resolve_output_path(f'motion_director/scenes/{shot.request.plan_id}/preview.mp4'), runtime.resolve_output_path(f'motion_director/{job_id}'), i, shot.width, shot.height, shot.request.quality,
-                                                             full_motion=bool(shot.scene.get('interactions'))) if shot.scene else None
+                        scene_path = await media.scene_window(runtime.resolve_output_path(f'motion_director/scenes/{shot.request.plan_id}/preview.mp4'), runtime.resolve_output_path(f'motion_director/{job_id}'), i, shot.width, shot.height, shot.request.quality) if shot.scene else None
                         if load(job_id).cancel_requested:
                             await update(job_id, status='cancelled', message='Cancelled before H3 submission', completed_at=runtime._now_utc())
                             return
@@ -623,6 +623,8 @@ def create_router(runtime):
             await update(job_id, status='running', completed_at=None, message='Checking accepted H3 work; no new clips will be submitted…')
             start(job_id, recovery_only=True)
         else:
+            if row.status == 'interrupted':
+                return row  # repeated startup reconciliation preserves history
             await update(job_id, status='interrupted', message='Submission was interrupted before H3 acknowledgement. Retry this take when ready.',
                          error='No automatic retry. Existing references, plan and outputs are preserved.', completed_at=runtime._now_utc())
         return load(job_id)

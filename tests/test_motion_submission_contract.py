@@ -130,3 +130,15 @@ def test_recovery_retry_is_not_advertised_until_worker_cleanup_finishes(studio,m
         if row['can_retry']:break
         time.sleep(.01)
     assert row['can_retry'] and row['completed_segments']==1 and not fake.submissions
+
+
+def test_rejected_scene_reports_the_actual_actionable_correction(studio,monkeypatch):
+    client,fake=studio
+    from motion_director.host_client import PlanningRefused
+    async def rejected(runtime,route,payload=None):
+        raise PlanningRefused('Scene plan needs correction: Fight camera must frame both characters',422)
+    monkeypatch.setattr(routes,'host_request',rejected)
+    result=client.post(BASE+'/plan',json={'prompt':'fight','reference_ids':[upload(client)],'pipeline':'3d','director':'opus'})
+    assert result.status_code==422
+    assert 'Fight camera must frame both characters' in result.json()['detail']
+    assert not fake.claims and not fake.submissions

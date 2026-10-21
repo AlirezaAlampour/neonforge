@@ -10,6 +10,7 @@ import shutil
 import time
 import re
 import uuid
+import copy
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
@@ -23,6 +24,20 @@ from .usage import observe, record, PlanningUsage
 class SceneDecisions(DirectorDecisions):
     scene: SceneSpec
     h3: H3Direction
+
+
+def planning_schema(scene=False):
+    schema=(SceneDecisions if scene else DirectorDecisions).model_json_schema()
+    if scene:
+        entity=schema['$defs']['Entity']
+        character=copy.deepcopy(entity);prop=copy.deepcopy(entity)
+        character['properties']['geometry']={'type':'string','const':'mannequin'}
+        character['properties']['size']={'type':'object','properties':{axis:{'type':'number','const':1} for axis in 'xyz'},
+                                          'required':list('xyz'),'additionalProperties':False,
+                                          'description':'Uniform rig scale. Character height is character.height_m; never put body dimensions here.'}
+        prop['properties']['geometry']['enum']=[g for g in prop['properties']['geometry']['enum'] if g!='mannequin']
+        schema['$defs']['Entity']={'anyOf':[character,prop]}
+    return schema
 
 
 SCENE_RULES = """Also generate a complete editable metric 3D blockout scene. Z is up; x right, y depth. Infer approximate relative depth, scale and simple geometry from the images, never exact reconstruction. Describe the visual evidence and uncertainty in reference_analysis. Use reusable mannequin rigs only for people. Procedural-v1 supports only idle, walk and run. For fighting select quaternius-v1 and an explicit actions timeline from the supplied authored_clips catalog, with clip=idle. Static props have empty paths and idle clips. Every moving path starts at time 0 at the initial position, ends at the exact requested duration, and uses increasing times. Use realistic travel speed (run about 3m/s), size x=1 for a 1.8m mannequin. Set boxes/spheres/cylinders with dimensions in metres. Avoid overlapping paths/obstacles. You may select asset IDs ONLY from the supplied existing Forge3D library; these assets are unrigged props. Camera targets must name an entity ID. Follow camera stays behind travel heading at the selected distance and height, aiming at aim_height. Use a follow camera when the user asks third-person/behind. Orbit uses orbit_start/end degrees; track/static need explicit timed camera positions. Use only a few props and 2-5 path points. No added character/object motion unless requested. Arbitrary character retargeting, grappling, kicks and unarmed blocks are unavailable; disclose missing motion assets. For revisions preserve all unspecified geometry, paths and settings from previous_scene. The validated specification will be compiled into Blender Python; do not output freeform executable code."""
@@ -112,7 +127,7 @@ def _cached_status():
     # Only a refusal/cooldown survives a restart, never a billing authorization.
     try:
         data = json.loads(VERIFICATION_STATE.read_text())
-        if data.get('state') == 'verification_rate_limited' and data.get('next_check_epoch', 0) > time.time():
+        if data.get('state') == 'verification_rate_limited':
             return data
     except (OSError, ValueError, TypeError):
         pass
@@ -177,6 +192,10 @@ async def _subscription_status() -> dict:
             token = oauth.get("accessToken")
             if not token:
                 return {"available": False, "reason": "Existing OAuth quota verification is unavailable."}
+            expires = oauth.get('expiresAt')
+            if isinstance(expires,(int,float)) and expires/1000 <= time.time():
+                return {'available':False, 'state':'authentication_expired', 'subscription':result.get('subscriptionType'),
+                        'reason':'The saved Claude Code sign-in has expired. On the DGX, run claude auth login --claudeai, then verify again. Saved scenes and local camera edits remain available.'}
             async with httpx.AsyncClient(timeout=15) as client:
                 response = await client.get("https://api.anthropic.com/api/oauth/usage", headers={"Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20"})
             if response.status_code == 429:
@@ -241,7 +260,7 @@ async def plan_with_opus(request: ShotRequest, reference_paths: list[str], asset
         if re.search(r'\bfight(?:ing)?\b',request.prompt,re.I) and request.duration>=5:
             from .choreography import fight_study
             study=fight_study().model_dump()
-            context['validated_choreography_example']={'duration':5, 'entities':[{k:e[k] for k in ('id','rig','position','path','facing','actions')} for e in study['entities'] if e.get('actions')],
+            context['validated_choreography_example']={'duration':5, 'entities':[{k:e[k] for k in ('id','geometry','rig','size','clip','character','position','path','facing','actions')} for e in study['entities'] if e.get('actions')],
                                                      'interactions':study['interactions'], 'camera':study['camera'],
                                                      'instruction':'Reuse validated relative timing/reach where appropriate; adapt identities, environment, camera and placement to the actual supplied image. Extend the final hold for longer scenes. Do not copy unrelated environment geometry.'}
     content.append({"type": "text", "text": json.dumps(context)})
@@ -250,9 +269,23 @@ async def plan_with_opus(request: ShotRequest, reference_paths: list[str], asset
             "--setting-sources", "", "--no-session-persistence", "--model", "opus", "--effort", "low",
             "--max-turns", "1", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
             "--system-prompt", SYSTEM_PROMPT + (SCENE_RULES if request.pipeline == "3d" else ""),
-            "--json-schema", json.dumps((SceneDecisions if request.pipeline == "3d" else DirectorDecisions).model_json_schema())]
+            "--json-schema", json.dumps(planning_schema(request.pipeline == '3d'))]
     # Exactly one bounded print invocation; no retry or model/API fallback.
     result = await run_cli(args, (json.dumps(message) + "\n").encode(), timeout=240 if request.pipeline == "3d" else 80)
+    try:
+        return finish_plan(result,request,base,started)
+    except (ValueError,RuntimeError) as exc:
+        path=Path(os.getenv('NEONFORGE_MOTION_PLAN_DIAGNOSTICS',str(Path(__file__).resolve().parents[2]/'.motion-runtime/plan-validation.jsonl')))
+        path.parent.mkdir(parents=True,exist_ok=True)
+        # Only model-authored scene data and our validation error, never auth,
+        # account metadata, raw CLI events or stderr.
+        with os.fdopen(os.open(path,os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600),'a') as stream:
+            stream.write(json.dumps({'time':_stamp(time.time()),'error':str(exc)[:1800],
+                'subtype':result.get('subtype'),'structured_output':result.get('structured_output')})+'\n')
+        raise
+
+
+def finish_plan(result,request,base,started):
     structured = result.get("structured_output")
     if not structured:
         raise RuntimeError("Opus returned no validated planning decisions (" + str(result.get('subtype','unstructured'))[:60] + "); no 3D scene was substituted.")

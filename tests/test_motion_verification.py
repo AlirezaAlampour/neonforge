@@ -67,3 +67,24 @@ def test_expired_success_is_unavailable_to_passive_poll(monkeypatch):
     monkeypatch.setattr(host, 'status_cache', (0, {'available':True, 'next_check_epoch':0, 'reason':''}))
     result=asyncio.run(host.subscription_status(check=False))
     assert not result['available'] and result['state']=='verification_due'
+
+
+def test_restart_retains_actual_last_status_after_cooldown():
+    host.VERIFICATION_STATE.write_text(json.dumps({'available':False,'state':'verification_rate_limited','http_status':429,'next_check_epoch':0,'next_check_at':'2026-01-01T00:00:00+00:00','reason':'HTTP 429; model usage unknown'}))
+    result=asyncio.run(host.subscription_status(check=False))
+    assert not result['available'] and result['http_status']==429
+    assert result['next_check_at']=='2026-01-01T00:00:00+00:00'
+
+
+def test_expired_saved_token_requires_official_login_without_usage_probe(tmp_path,monkeypatch):
+    directory=tmp_path/'.claude';directory.mkdir()
+    (directory/'.credentials.json').write_text(json.dumps({'claudeAiOauth':{'accessToken':'test-token-not-a-credential','expiresAt':1}}))
+    monkeypatch.setattr(host.Path,'home',lambda:tmp_path)
+    async def auth(args,**kwargs):
+        return {'loggedIn':True,'authMethod':'claude.ai','apiProvider':'firstParty','subscriptionType':'pro','configDirectory':str(directory)}
+    monkeypatch.setattr(host,'run_cli',auth)
+    def refused(**kwargs):raise AssertionError('Expired credentials must not hit the usage endpoint')
+    monkeypatch.setattr(host.httpx,'AsyncClient',refused)
+    result=asyncio.run(host.subscription_status())
+    assert result['state']=='authentication_expired' and not result['available']
+    assert 'claude auth login --claudeai' in result['reason']

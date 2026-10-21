@@ -94,6 +94,7 @@ def test_native_capability_does_not_promise_readiness_at_draft_memory(studio):
     ('The character follows a commuter while the camera orbits.', '', False),
 ])
 def test_opus_follow_guard_preserves_camera_revisions_and_subject_intent(monkeypatch,tmp_path,prompt,revision,rejected):
+    monkeypatch.setenv('NEONFORGE_MOTION_PLAN_DIAGNOSTICS',str(tmp_path/'plan-validation.jsonl'))
     from gateway.motion_director import claude_host
     from test_motion_scene import blockout
     scene=blockout(5);scene['camera']['mode']='orbit'

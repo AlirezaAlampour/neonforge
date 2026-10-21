@@ -397,7 +397,16 @@ async def claude_plan(request: PlanRequest):
     async with planning_lock:
         try:
             return await plan_with_opus(request.shot, request.references, ASSETS, request.previous_scene.model_dump() if request.previous_scene else None)
-        except (RuntimeError, TimeoutError, ValueError, OSError) as exc:
+        except ValueError as exc:
+            # Validation messages only; exclude Pydantic's raw model inputs.
+            messages=[e['msg'] for e in exc.errors()] if hasattr(exc,'errors') else [str(exc)]
+            raise HTTPException(422,'Scene plan needs correction: '+'; '.join(messages)[:400]) from exc
+        except (RuntimeError, TimeoutError, OSError) as exc:
+            status=await subscription_status(check=False)
+            if not status.get('available'):
+                reason=status['reason']
+                if status.get('next_check_at'):reason+=' Next verification: '+status['next_check_at']
+                raise HTTPException(503,reason) from exc
             # Only static error types are reported; no CLI stderr/account/token.
             raise HTTPException(503, f"Opus planning unavailable ({type(exc).__name__}); use the local cinematic fallback") from exc
 

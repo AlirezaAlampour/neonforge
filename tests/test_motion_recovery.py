@@ -263,3 +263,22 @@ def test_accepted_legacy_canvas_is_recovered_even_when_new_submission_would_be_r
     client.portal.call(routes.resume_motion_jobs,gateway)
     row=wait_status(client,job_id,'completed')
     assert row['preview_url'] and not fake.submissions and len(fake.releases)==1
+
+
+def test_reconciling_an_unacknowledged_interrupted_take_preserves_history(studio):
+    client,fake=studio
+    job_id=seed_job(client)
+    from datetime import timedelta
+    old=gateway._now_utc()-timedelta(days=2)
+    with gateway.SessionLocal() as db:
+        row=db.get(gateway.MotionJob,job_id)
+        row.status='interrupted';row.completed_at=old;row.updated_at=old
+        row.message='Historical interrupted take';db.commit()
+    response=client.post(f'/api/v1/motion-director/jobs/{job_id}/reconcile')
+    assert response.status_code==202
+    with gateway.SessionLocal() as db:
+        row=db.get(gateway.MotionJob,job_id)
+        assert row.completed_at.replace(tzinfo=None)==old.replace(tzinfo=None)
+        assert row.updated_at.replace(tzinfo=None)==old.replace(tzinfo=None)
+        assert row.message=='Historical interrupted take'
+    assert not fake.claims and not fake.submissions

@@ -168,7 +168,12 @@ async def render(folder,data,prompt,catalog,state):
                     try:await asyncio.wait_for(proc.wait(),1800)
                     except (TimeoutError,asyncio.CancelledError):
                         proc.kill();await proc.wait();raise
-                if proc.returncode:raise RuntimeError('Blender could not render this scene; inspect its bounded local log')
+                if proc.returncode:
+                    report=folder/'timeline-validation.json'
+                    if report.is_file():
+                        errors=json.loads(report.read_text()).get('errors',[])
+                        raise RuntimeError('Adjust scene timing, spacing or camera framing: '+'; '.join(errors)[:300])
+                    raise RuntimeError('Blender could not render this scene; inspect its bounded local log')
                 await media.command('ffmpeg','-v','error','-y','-framerate','24','-i',str(folder/'frames/frame-%04d.png'),'-c:v','libx264','-crf','16','-preset','medium','-pix_fmt','yuv420p','-threads','2','-movflags','+faststart',str(folder/'preview.mp4'))
                 shutil.copy2(folder/'frames/frame-0001.png',folder/'first-frame.png')
             if data['scene'].get('interactions'):

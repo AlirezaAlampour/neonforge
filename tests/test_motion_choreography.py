@@ -40,7 +40,7 @@ def test_choreography_rejects_unexecutable_sequences(defect):
     with pytest.raises(ValueError):SceneSpec.model_validate(scene).validate_timeline(5)
 
 
-def test_draft_choreography_keeps_full_motion_and_original_appearance(tmp_path,monkeypatch):
+def test_full_motion_export_and_verified_draft_appearance_recipe(tmp_path,monkeypatch):
     calls=[]
     async def command(*args,**kwargs):calls.append(args)
     monkeypatch.setattr(media,'command',command)
@@ -52,8 +52,9 @@ def test_draft_choreography_keeps_full_motion_and_original_appearance(tmp_path,m
     graph=build_h3_graph(shot,['original.png'],'study',scene_video='full-motion.mp4')
     assert graph['136']['inputs']['ref_images.ref_image_0']==['scale_0',0]
     assert graph['136']['inputs']['ref_videos.ref_video_0']==['blender_frames',0]
-    assert graph['126']['inputs']['conditioning']==['appearance_guide',0]
-    assert '22 frames' not in graph['138']['inputs']['value']
+    assert 'appearance_guide' not in graph
+    assert graph['126']['inputs']['conditioning']==['136',0]
+    assert '22 frames' in graph['138']['inputs']['value']
 
 
 def test_evaluated_contact_failure_is_a_real_generation_blocker():
@@ -64,3 +65,18 @@ def test_evaluated_contact_failure_is_a_real_generation_blocker():
            'entities':{'hero':{'joints':copy.deepcopy(joints)},'alien':{'joints':copy.deepcopy(joints)}}}
     frame['entities']['hero']['joints']['hand_l']=[10,0,1]
     assert not validate(scene,[frame,copy.deepcopy(frame)])['valid']
+
+
+def test_short_authored_guard_hold_does_not_require_two_unused_crossfades():
+    scene=fight_study().model_dump()
+    scene['entities'][0]['actions'].insert(1,{'clip':'guard','start':.7,'end':.85,'blend':.1})
+    assert SceneSpec.model_validate(scene).validate_timeline(5)
+
+
+def test_planning_schema_separates_rig_scale_from_prop_dimensions():
+    from gateway.motion_director.claude_host import planning_schema
+    character,prop=planning_schema(True)['$defs']['Entity']['anyOf']
+    assert character['properties']['geometry']['const']=='mannequin'
+    assert all(character['properties']['size']['properties'][axis]['const']==1 for axis in 'xyz')
+    assert 'mannequin' not in prop['properties']['geometry']['enum']
+    assert prop['properties']['size']=={'$ref':'#/$defs/Vec3'}

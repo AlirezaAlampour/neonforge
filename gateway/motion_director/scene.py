@@ -135,7 +135,7 @@ class SceneSpec(StrictModel):
             if e.facing and (e.facing not in ids or e.facing == e.id):
                 raise ValueError('Character facing target must name a different scene entity')
             for i, cue in enumerate(e.actions):
-                if cue.end > duration or cue.end <= cue.start or cue.end-cue.start < 2*cue.blend:
+                if cue.end > duration or cue.end <= cue.start or (cue.clip!='guard' and cue.end-cue.start < 2*cue.blend):
                     raise ValueError('Action duration must fit the scene and both blend transitions')
                 if i and cue.start < e.actions[i-1].end:
                     raise ValueError('Character actions must be ordered and cannot overlap')
