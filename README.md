@@ -1,4 +1,4 @@
-# NeonForge
+# Daidyra
 
 A local AI creative studio for NVIDIA DGX Spark. Create voices, videos and character performances with automatic model loading and shared-memory management.
 
@@ -6,7 +6,7 @@ A local AI creative studio for NVIDIA DGX Spark. Create voices, videos and chara
 ![Platform](https://img.shields.io/badge/NVIDIA-DGX_Spark-76B900?logo=nvidia&logoColor=white)
 ![Local](https://img.shields.io/badge/inference-local-555)
 
-![NeonForge Voiceover](docs/images/voiceover-studio.png)
+![Daidyra Voiceover](docs/images/voiceover-studio.png)
 
 ## Workflows
 
@@ -20,7 +20,7 @@ A local AI creative studio for NVIDIA DGX Spark. Create voices, videos and chara
 
 Character Animate remains unavailable until a distinct workflow passes local testing. System Info provides service health, model readiness, UMA, swap, claims and memory recovery.
 
-## Why NeonForge
+## Why Daidyra
 
 - Local inference with private inputs and outputs.
 - Automatic memory preparation, model loading and idle unload.
