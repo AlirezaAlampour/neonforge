@@ -197,7 +197,7 @@ def create_router(runtime):
         if request.plan_id:
             with runtime.SessionLocal() as db:
                 saved = db.get(MotionPlan, request.plan_id)
-            if not saved or saved.request_hash != fingerprint(request):
+            if not saved or fingerprint(ShotSpec.model_validate_json(saved.shot_json).request) != fingerprint(request):
                 raise HTTPException(409, "The shot changed or its plan is missing. Plan it again before rendering.")
             shot = ShotSpec.model_validate_json(saved.shot_json)
             if (shot.width,shot.height) != dimensions(request.quality,request.orientation) or not reusable_scene(shot):
@@ -206,6 +206,49 @@ def create_router(runtime):
         if request.director == "opus":
             raise HTTPException(409, "Plan an Opus-directed shot first; rendering never calls the planner.")
         return LocalDirector().plan(request)
+
+    async def validation(request):
+        """The same saved-plan/preview checks used by Generate, without dispatch."""
+        result = {'ready': False, 'code': 'plan_required', 'reason': 'Build and review a scene preview before generating.', 'can_rebuild': False}
+        if not request.plan_id:
+            if request.pipeline == 'prompt':
+                return dict(result, ready=True, code='ready', reason='Ready to generate')
+            return result
+        with runtime.SessionLocal() as db:
+            saved = db.get(MotionPlan, request.plan_id)
+        if not saved:
+            return dict(result, code='plan_missing', reason='This saved plan is missing on the server. Build a new scene plan.')
+        try:
+            shot = ShotSpec.model_validate_json(saved.shot_json)
+            if shot.scene:
+                SceneSpec.model_validate(shot.scene).validate_timeline(request.duration)
+        except ValueError:
+            return dict(result, code='schema_changed', reason='This saved scene no longer passes validation. Build a new scene plan.')
+        if not reusable_scene(shot):
+            return dict(result, code='scene_mismatch', reason='This old camera edit belongs to a different prompt or reference set. Build a new AI scene plan for the changed direction; the existing take and preview are preserved.')
+        # Hashes from older schemas omitted fields that now have defaults.
+        # Compare parsed requests instead of treating their old hashes as edits.
+        if fingerprint(shot.request) != fingerprint(request):
+            excluded = {'plan_id', 'quality', 'seed', 'orientation'}
+            repairable = bool(shot.scene and shot.request.model_dump(exclude=excluded) == request.model_dump(exclude=excluded))
+            return dict(result, code='request_changed', reason='The generation settings changed. Rebuild the saved scene preview before generating.' if repairable else 'The scene direction changed. Build and review a new scene plan.', can_rebuild=repairable)
+        if (shot.width, shot.height) != dimensions(request.quality, request.orientation) or (shot.scene and shot.production_version != PRODUCTION_VERSION) or shot.request.plan_id != request.plan_id:
+            return dict(result, code='plan_upgrade', reason='This saved plan needs a canvas or compatibility update. Rebuild its preview using the saved scene; no Claude call is needed.', can_rebuild=bool(shot.scene))
+        if request.pipeline == '3d':
+            if not shot.scene:
+                return dict(result, code='scene_missing', reason='This plan has no Blender scene. Build a new scene plan.')
+            try:
+                state = preview_response(await host_request(runtime, 'scene/status', {'id': request.plan_id}))
+            except (RuntimeError, httpx.HTTPError, OSError):
+                return dict(result, code='preview_unavailable', reason='The Blender service cannot verify this preview. Check the connection and try again.')
+            result['preview'] = state
+            if state.get('status') in {'queued', 'rendering'}:
+                return dict(result, code='preview_pending', reason='Wait for this scene\'s Blender preview to finish.')
+            if state.get('status') != 'completed' or not runtime.resolve_output_path(f'motion_director/scenes/{request.plan_id}/preview.mp4').is_file():
+                return dict(result, code='preview_missing', reason='The saved browser preview is missing or interrupted on the server. Rebuild the saved scene preview; no Claude call is needed.', can_rebuild=True)
+            if (state.get('generation_width', shot.width), state.get('generation_height', shot.height)) != (shot.width, shot.height):
+                return dict(result, code='preview_mismatch', reason='This preview was prepared for different output dimensions. Rebuild the saved scene preview.', can_rebuild=True)
+        return dict(result, ready=True, code='ready', reason='Saved scene and preview verified. Ready to generate.')
 
     def load(job_id):
         with runtime.SessionLocal() as db:
@@ -233,7 +276,7 @@ def create_router(runtime):
                 "updated_at": stamp(row.updated_at),
                 "cancel_requested": row.cancel_requested,
                 "can_cancel": row.status not in TERMINAL and not row.cancel_requested,
-                "can_retry": row.status in {'failed','blocked','interrupted','cancelled'} and not needs_plan and not uncertain and all(not c.prompt_id or c.status in {'completed','failed'} for c in clips),
+                "can_retry": row.id not in tasks and row.status in {'failed','blocked','interrupted','cancelled'} and not needs_plan and not uncertain and all(not c.prompt_id or c.status in {'completed','failed'} for c in clips),
                 "recovery_hint": 'Reuse this shot to update its scene/canvas, review the Blender preview, then generate.' if needs_plan else None,
                 "can_reconcile": bool(row.prompt_id or uncertain or any(c.prompt_id for c in clips)) and row.status != 'completed',
                 "blender_preview_url": f"/api/v1/outputs/motion_director/scenes/{scene_plan}/preview.mp4" if scene_plan else None,
@@ -665,6 +708,33 @@ def create_router(runtime):
         assets_for(request)
         return await planned_shot(request)
 
+    @router.post('/validate')
+    async def validate_submission(request: ShotRequest):
+        assets_for(request)
+        return await validation(request)
+
+    @router.post('/plans/{plan_id}/rebuild')
+    async def rebuild_saved_scene(plan_id: str, request: ShotRequest):
+        """Clone a compatible saved scene; never replan or overwrite artifacts."""
+        base = load_plan(plan_id)
+        assets_for(request)
+        excluded = {'plan_id', 'quality', 'seed', 'orientation'}
+        if not base.scene or not reusable_scene(base) or base.request.model_dump(exclude=excluded) != request.model_dump(exclude=excluded):
+            raise HTTPException(409, 'The prompt, references or scene direction changed. Build a new AI scene plan; rebuilding cannot reinterpret an old scene.')
+        shot = base.model_copy(deep=True)
+        shot.scene = SceneSpec.model_validate(base.scene).validate_timeline(request.duration).model_dump()
+        defaults = LocalDirector().plan(request)
+        shot.width, shot.height, shot.frames = defaults.width, defaults.height, defaults.frames
+        new_id = str(uuid.uuid4())
+        shot.request = request.model_copy(update={'plan_id': new_id})
+        shot.production_version = PRODUCTION_VERSION
+        shot.planning_usage = PlanningUsage(source='scene-reuse', new_claude_invocations=0, elapsed_seconds=0,
+                                           original=base.planning_usage.original if base.planning_usage else None)
+        with runtime.SessionLocal() as db:
+            db.add(MotionPlan(id=new_id, request_hash=fingerprint(shot.request), shot_json=shot.model_dump_json(), created_at=runtime._now_utc()))
+            db.commit()
+        return {'plan': shot, 'preview': await build_preview(new_id)}
+
     @router.post('/plans/{plan_id}/preview', status_code=202)
     async def build_preview(plan_id: str):
         shot = load_plan(plan_id)
@@ -707,15 +777,15 @@ def create_router(runtime):
         assets_for(request)
         if request.engine != "h3":
             raise HTTPException(503, "Hermes Grok OAuth video access is unverified; use manual import/compare. No paid fallback is allowed.")
+        checked = await validation(request)
+        if not checked['ready']:
+            raise HTTPException(409, checked['reason'])
         if request.pipeline == '3d':
             if not request.plan_id:
                 raise HTTPException(409, 'Build and review the Blender preview before generating the final video')
             shot = submitted_plan(request)
             if not shot.scene:
                 raise HTTPException(409, 'A validated 3D scene is required')
-            state = await host_request(runtime, 'scene/status', {'id':request.plan_id})
-            if state.get('status') != 'completed' or not runtime.resolve_output_path(f'motion_director/scenes/{request.plan_id}/preview.mp4').is_file():
-                raise HTTPException(409, 'Wait for the Blender preview to finish before generating H3')
         ready = await capabilities(request.quality)
         if ready["h3"].get("can_recover_memory"):
             await recover_memory()

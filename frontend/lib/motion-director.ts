@@ -37,6 +37,7 @@ export type MotionJob = {
   recovery_hint?: string | null
 }
 export type ScenePreview = { id: string; status: string; message?: string; error?: string; preview_url?: string; first_frame_url?: string; export_url?: string; prompt_url?: string; script_url?: string; preview_width?: number; preview_height?: number; cache_hit?: boolean; elapsed_seconds?: number }
+export type SubmissionValidation = { ready: boolean; code: string; reason: string; can_rebuild: boolean; preview?: ScenePreview }
 export type Capabilities = {
   h3: { available: boolean; render_ready: boolean; can_recover_memory?: boolean; reason?: string; busy?: boolean; available_gb: number; minimum_gb: number; workflows?: Record<string, { available: boolean; reason?: string }> }
   grok: { available: boolean; reason: string; authorization_url?: string | null; authorization_required?: boolean; manual_import?: boolean }
@@ -45,6 +46,8 @@ export type Capabilities = {
   resources?: HostResourceStatus | null
 }
 export const motionApi = {
+  validate: (body: ShotRequest) => request<SubmissionValidation>('/api/v1/motion-director/validate', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),
+  rebuild: (id: string, body: ShotRequest) => request<{plan: ShotSpec; preview: ScenePreview}>(`/api/v1/motion-director/plans/${id}/rebuild`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),
   capabilities: (quality: 'draft' | 'native' = 'draft') => request<Capabilities>(`/api/v1/motion-director/capabilities?quality=${quality}`),
   plan: (body: ShotRequest) => request<ShotSpec>('/api/v1/motion-director/plan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
   buildPreview: (id: string) => request<ScenePreview>(`/api/v1/motion-director/plans/${id}/preview`, { method: 'POST' }),

@@ -6,7 +6,7 @@ import { AnnotationCanvas } from '@/components/motion-annotations'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
-import { motionApi, annotationId, downloadMotionJSON, type Annotation, type Capabilities, type MotionJob, type ShotRequest, type ShotSpec, type ScenePreview, type Tool } from '@/lib/motion-director'
+import { motionApi, annotationId, downloadMotionJSON, type Annotation, type Capabilities, type MotionJob, type ShotRequest, type ShotSpec, type ScenePreview, type SubmissionValidation, type Tool } from '@/lib/motion-director'
 
 type Reference = { id: string; name: string }
 type Draft = Omit<ShotRequest, 'reference_ids'> & { references: Reference[] }
@@ -20,6 +20,7 @@ const terminal = (job: MotionJob) => ['completed', 'failed', 'interrupted', 'blo
 const attention = (job: MotionJob) => terminal(job) && !['completed','cancelled'].includes(job.status)
 const elapsed = (seconds: number) => `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`
 const payload = ({ references, ...rest }: Draft): ShotRequest => ({ ...rest, reference_ids: references.map(r => r.id) })
+const requestKey = (request: ShotRequest) => JSON.stringify(Object.fromEntries(Object.entries(request).sort(([a],[b])=>a.localeCompare(b))))
 
 function Usage({shot, rendering=false}: {shot: ShotSpec; rendering?: boolean}) {
   const usage=shot.planning_usage, original=usage?.original
@@ -50,20 +51,41 @@ export default function MotionDirectorPage() {
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const [takeFilter, setTakeFilter] = useState('all')
-  const pendingSubmission = useRef<{body: string; key: string} | null>(null)
+  const pendingSubmission = useRef<{body: string; key: string; job_id?: string} | null>(null)
+  const submitting = useRef(false)
+  const [submissionError, setSubmissionError] = useState('')
+  const [checked, setChecked] = useState<{key: string; result: SubmissionValidation} | null>(null)
+  const [submitted, setSubmitted] = useState<{key: string; job_id: string} | null>(null)
+  const [validationAttempt, setValidationAttempt] = useState(0)
   const videos = useRef<Record<string, HTMLVideoElement | null>>({})
   const revision = useRef(0)
   const qualityRef = useRef<'draft'|'native'>('native')
   qualityRef.current = draft.quality || 'native'
-  const patch = (change: Partial<Draft>) => { revision.current += 1; setDraft(prev => ({ ...prev, plan_id: undefined, ...('prompt' in change || 'references' in change ? {parent_plan_id:undefined,revision:''} : {}), ...change })); setPlan(null); setPreview(null) }
+  const patch = (change: Partial<Draft>) => {
+    revision.current += 1;setChecked(null);setSubmissionError('');setSubmitted(null)
+    const settingsOnly=Boolean(plan?.scene) && Object.keys(change).every(k=>['quality','seed','orientation'].includes(k))
+    setDraft(prev => ({ ...prev, plan_id: undefined, ...('prompt' in change || 'references' in change ? {parent_plan_id:undefined,revision:''} : {}), ...change }))
+    if(!settingsOnly){setPlan(null);setPreview(null)}
+  }
+  const generationRequest: ShotRequest = plan ? {...plan.request,...payload(draft),plan_id:plan.request.plan_id,parent_plan_id:plan.request.parent_plan_id,revision:plan.request.revision} : payload(draft)
+  const generationKey=requestKey(generationRequest)
+  const validation=checked?.key===generationKey?checked.result:null
+  const alreadySubmitted=submitted?.key===generationKey
+  const adoptPlan = (planned: ShotSpec) => {
+    const {reference_ids,...request}=planned.request
+    setDraft(current=>({...current,...request,references:reference_ids.map((id,i)=>({id,name:current.references.find(r=>r.id===id)?.name||`Picture ${i+1}`}))}))
+    setPlan(planned);setChecked(null);setSubmitted(null);setSubmissionError('')
+  }
 
   useEffect(() => {
     try {
       const saved = JSON.parse(localStorage.getItem(KEY) || 'null')
       if (saved && Array.isArray(saved.references) && Array.isArray(saved.annotations)) {
-        setDraft({ ...initial, ...saved, pipeline: saved.pipeline || '3d', director: saved.pipeline ? saved.director : 'opus', workflow: saved.pipeline ? saved.workflow : 'reference', duration: [5, 10, 15, 30].includes(saved.duration) ? saved.duration : 5 }); setSelected(saved.references[0]?.id || '')
         const previous = JSON.parse(localStorage.getItem(KEY+'-preview') || 'null')
-        if(previous?.plan?.scene && previous.plan.request.quality) { setPlan(previous.plan); setPreview(previous.preview) }
+        setDraft({ ...initial, ...saved, director:saved.director||previous?.plan?.request?.director||'local', quality:saved.quality||previous?.plan?.request?.quality||'draft', pipeline: saved.pipeline || (previous?.plan?.scene?'3d':'prompt'), duration: [2,3,5,10,15,30].includes(saved.duration) ? saved.duration : 5 }); setSelected(saved.references[0]?.id || '')
+        if(previous?.plan?.request?.plan_id) { setPlan(previous.plan); setPreview(previous.preview) }
+        const receipt=JSON.parse(localStorage.getItem(KEY+'-submission')||'null')
+        if(receipt?.job_id)setSubmitted({key:receipt.body,job_id:receipt.job_id})
       }
     } catch { /* A private browser can still create shots. */ }
     setRestored(true)
@@ -82,6 +104,18 @@ export default function MotionDirectorPage() {
     const availability = setInterval(() => void check(), 20000)
     return () => { cancelled = true; clearInterval(poll); clearInterval(availability) }
   }, [])
+  useEffect(()=>{
+    if(!restored || !draft.prompt.trim() || !draft.references.length)return
+    let cancelled=false
+    const check=async()=>{
+      try {
+        const result=await motionApi.validate(generationRequest)
+        if(!cancelled){setChecked({key:generationKey,result});if(result.preview)setPreview(result.preview)}
+      }catch(e){if(!cancelled)setChecked({key:generationKey,result:{ready:false,code:'verification_failed',reason:e instanceof Error?e.message:'Cannot verify the saved plan. Check the gateway connection.',can_rebuild:false}})}
+    }
+    void check()
+    return()=>{cancelled=true}
+  },[restored,generationKey,preview?.status,validationAttempt])
   useEffect(() => {
     if (restored) { try { localStorage.setItem(KEY, JSON.stringify(draft)) } catch { /* Storage is optional. */ } }
   }, [draft, restored])
@@ -113,30 +147,42 @@ export default function MotionDirectorPage() {
   const planShot = async () => {
     setBusy('plan'); setError('')
     const current = revision.current
-    try { const planned = await motionApi.plan(payload(draft)); if (revision.current === current) {setPlan(planned); if(planned.scene) setPreview(await motionApi.buildPreview(planned.request.plan_id!))} }
-    catch (e) { setError(e instanceof Error ? e.message : 'Planning failed') }
+    try { const planned = await motionApi.plan(payload(draft)); if (revision.current === current) {adoptPlan(planned); if(planned.scene) setPreview(await motionApi.buildPreview(planned.request.plan_id!))} }
+    catch (e) { const message=e instanceof Error ? e.message : 'Planning failed';setError(message);setSubmissionError(message) }
     finally { setBusy('') }
   }
   const reviseScene = async (instruction=correction) => {
     if(!plan?.request.plan_id || !instruction.trim()) return
     setBusy('revise');setError('');const current=revision.current
-    try {const planned=await motionApi.revise(plan.request.plan_id,instruction);if(revision.current===current){setPlan(planned);setPreview(await motionApi.buildPreview(planned.request.plan_id!));setCorrection('')}}
+    try {const planned=await motionApi.revise(plan.request.plan_id,instruction);if(revision.current===current){adoptPlan(planned);setPreview(await motionApi.buildPreview(planned.request.plan_id!));setCorrection('')}}
     catch(e){setError(e instanceof Error?e.message:'Scene correction failed')}
     finally{setBusy('')}
   }
   const generate = async () => {
-    setBusy('render'); setError('')
+    if(submitting.current || !validation?.ready || alreadySubmitted)return
+    submitting.current=true;setBusy('render');setSubmissionError('')
     try {
-      const request = plan?.request || payload(draft), body = JSON.stringify(request)
+      const request = generationRequest, body = generationKey
+      const result=await motionApi.validate(request)
+      setChecked({key:body,result})
+      if(!result.ready){setSubmissionError(result.reason);return}
       try { pendingSubmission.current = JSON.parse(localStorage.getItem(KEY+'-submission') || 'null') } catch {}
       if(pendingSubmission.current?.body !== body) pendingSubmission.current = {body, key:annotationId()}
       try { localStorage.setItem(KEY+'-submission',JSON.stringify(pendingSubmission.current)) } catch {}
       const job = await motionApi.submit(request, pendingSubmission.current!.key)
-      setPlan(job.shot); setJobs(prev => [job, ...prev.filter(j=>j.job_id!==job.job_id)])
-      pendingSubmission.current=null; try {localStorage.removeItem(KEY+'-submission')} catch {}
+      setJobs(prev => [job, ...prev.filter(j=>j.job_id!==job.job_id)])
+      setSubmitted({key:body,job_id:job.job_id});pendingSubmission.current!.job_id=job.job_id
+      try {localStorage.setItem(KEY+'-submission',JSON.stringify(pendingSubmission.current))} catch {}
     }
-    catch (e) { setError(e instanceof Error ? e.message : 'Could not submit H3 shot') }
-    finally { setBusy('') }
+    catch (e) { setSubmissionError(e instanceof Error ? e.message : 'Could not submit H3 shot');setChecked(null);setValidationAttempt(n=>n+1) }
+    finally { submitting.current=false;setBusy('') }
+  }
+  const rebuild = async () => {
+    if(!generationRequest.plan_id || busy)return
+    const current=revision.current;setBusy('rebuild');setSubmissionError('')
+    try {const result=await motionApi.rebuild(generationRequest.plan_id,generationRequest);if(current===revision.current){adoptPlan(result.plan);setPreview(result.preview)}}
+    catch(e){setSubmissionError(e instanceof Error?e.message:'Could not rebuild this saved scene')}
+    finally{setBusy('')}
   }
   const add = (annotation: Annotation) => patch({ annotations: [...draft.annotations, annotation],
     mode: ['arrow', 'path', 'orbit', 'waypoint'].includes(annotation.kind) ? 'manual' : draft.mode })
@@ -150,18 +196,22 @@ export default function MotionDirectorPage() {
   const jobAction = async (job: MotionJob, action: 'retry'|'cancel'|'reconcile') => {
     setBusy(job.job_id);setError('')
     try {const updated=await motionApi[action](job.job_id);setJobs(prev=>prev.map(j=>j.job_id===updated.job_id?updated:j))}
-    catch(e){setError(e instanceof Error?e.message:'Could not update this take')}
+    catch(e){const message=e instanceof Error?e.message:'Could not update this take';setError(message);setSubmissionError(message)}
     finally{setBusy('')}
   }
   const reuse = async (job: MotionJob) => {
-    let reused: ShotSpec
+    let reused: ShotSpec, reusedPreview: ScenePreview | null=null
     setBusy(job.job_id);setError('')
-    try {reused=await motionApi.plan(job.shot.request)}catch(e){setError(String(e));return}finally{setBusy('')}
+    try {
+      const check=await motionApi.validate(job.shot.request)
+      if(check.can_rebuild){const result=await motionApi.rebuild(job.shot.request.plan_id!,job.shot.request);reused=result.plan;reusedPreview=result.preview}
+      else if(!check.ready){setSubmissionError(check.reason);setError(check.reason);return}
+      else {reused=job.shot;reusedPreview=check.preview||null}
+    }catch(e){setError(String(e));setSubmissionError(String(e));return}finally{setBusy('')}
     const { reference_ids, ...request } = reused.request
     revision.current+=1
-    setDraft({...initial,...request,quality:request.quality||'draft',pipeline:request.pipeline||'prompt',duration:[5,10,15,30].includes(request.duration)?request.duration:5,references:reference_ids.map((id,i)=>({id,name:`Picture ${i+1}`}))})
-    setSelected(reference_ids[0]);setPlan(reused);setPreview(null)
-    if(reused.scene && request.plan_id) {try{setPreview(await motionApi.buildPreview(request.plan_id))}catch(e){setError(String(e))}}
+    setDraft({...initial,...request,quality:request.quality||'draft',pipeline:request.pipeline||'prompt',references:reference_ids.map((id,i)=>({id,name:`Picture ${i+1}`}))})
+    setSelected(reference_ids[0]);setPlan(reused);setPreview(reusedPreview);setChecked(null);setSubmitted(null);setSubmissionError('');pendingSubmission.current=null;try{localStorage.removeItem(KEY+'-submission')}catch{}
     window.scrollTo({top:0,behavior:'smooth'})
   }
   return <div className="space-y-6 pb-12">
@@ -195,11 +245,11 @@ export default function MotionDirectorPage() {
     <section className="space-y-4 rounded-xl border border-white/10 bg-card/40 p-3 sm:p-5">
       <h2 className="font-semibold">2 · Direct & preview</h2>
       <div className="grid gap-3 sm:grid-cols-2">
-        <label className="grid gap-1 text-sm">Duration<select aria-label="Duration" className={selectClass} value={draft.duration} onChange={e => patch({ duration: Number(e.target.value) as Draft['duration'] })}>{[5, 10, 15, 30].map(n => <option key={n} value={n}>{n} seconds</option>)}</select></label>
+        <label className="grid gap-1 text-sm">Duration<select aria-label="Duration" className={selectClass} value={draft.duration} onChange={e => patch({ duration: Number(e.target.value) as Draft['duration'] })}>{(draft.duration<5?[draft.duration,5,10,15,30]:[5,10,15,30]).map(n => <option key={n} value={n}>{n} seconds</option>)}</select></label>
         {draft.pipeline === '3d' ? <div className="grid gap-1 text-sm"><span>Director</span><div className="flex min-h-11 items-center rounded-md border border-white/10 px-3 text-sky-200">Claude Opus + Blender</div></div> : (<label className="grid gap-1 text-sm">Engine<select aria-label="Engine" className={selectClass} value={draft.engine === 'grok' ? 'grok' : draft.director || 'auto'} onChange={e => patch(e.target.value === 'grok' ? { engine: 'grok' } : { engine: 'h3', director: e.target.value as Draft['director'] })}><option value="auto">H3 · automatic cinematic director</option><option value="local">H3 · local cinematic director</option><option value="opus" disabled={!capabilities?.planner.opus_available}>H3 · Claude Code Opus {capabilities?.planner.opus_available ? '(Pro subscription)' : '(unavailable)'}</option><option value="grok" disabled={!capabilities?.grok.available}>Grok via Hermes · {capabilities?.grok.available ? 'OAuth' : 'manual import below'}</option></select></label>)}
       </div>
       <p className="text-xs text-muted-foreground">{draft.pipeline === '3d' ? 'Claude Opus + Blender turn your reference into an editable approximation. Review the movement before making the AI clip.' : 'Classic prompt direction. Switch to 3D in Advanced for a Blender preview.'}</p>
-      {draft.pipeline === '3d' && <Button className="min-h-12 w-full" disabled={Boolean(busy) || !draft.prompt.trim() || !draft.references.length || !capabilities?.blender?.available || ['queued','rendering'].includes(preview?.status || '')} onClick={() => void planShot()}>{busy === 'plan' ? 'Opus is directing your scene…' : plan?.scene ? 'Rebuild 3D preview' : 'Build 3D preview'}</Button>}
+      {draft.pipeline === '3d' && <Button className="min-h-12 w-full" disabled={Boolean(busy) || !draft.prompt.trim() || !draft.references.length || !capabilities?.blender?.available || ['queued','rendering'].includes(preview?.status || '')} onClick={() => void (plan?.scene && (validation?.ready||validation?.can_rebuild)?rebuild():planShot())}>{busy === 'plan' ? 'Opus is directing your scene…' : busy==='rebuild'?'Rebuilding saved scene…':plan?.scene ? 'Rebuild 3D preview' : 'Build 3D preview'}</Button>}
       {draft.pipeline === '3d' && !capabilities?.blender?.available && <p className="text-sm text-amber-200">{capabilities?.blender?.reason || 'Checking Blender availability…'}</p>}
       {preview && <div className="space-y-3" aria-live="polite"><p className="text-sm text-sky-200">Blender preview · {preview.status} · {preview.message}{preview.elapsed_seconds != null ? ` · ${elapsed(preview.elapsed_seconds)}` : ''}</p>
         {preview.preview_url && <><video aria-label="Blender 3D preview" className="max-h-[55vh] w-full rounded-lg bg-black" src={preview.preview_url} controls playsInline loop preload="metadata" />
@@ -242,8 +292,14 @@ export default function MotionDirectorPage() {
     </section>}
       </details>
     </section>
-    <section className="space-y-3 rounded-xl border border-sky-300/20 bg-sky-300/5 p-3 sm:p-5"><h2 className="font-semibold">3 · Make the final clip</h2><p className="text-sm text-muted-foreground">{draft.pipeline === '3d' ? 'Happy with the preview? Use its motion as a reference for H3, or export it for Grok.' : 'Generate a clip using your reference and direction.'}</p>
-      <Button className="min-h-12 w-full" disabled={Boolean(busy) || !draft.prompt.trim() || !draft.references.length || (draft.pipeline === '3d' && preview?.status !== 'completed') || (!capabilities?.h3.render_ready && !capabilities?.h3.can_recover_memory)} onClick={() => void generate()}>{busy === 'render' ? 'Preparing your final clip…' : 'Generate video'}</Button>
+    <section aria-label="Final generation" className="space-y-3 rounded-xl border border-sky-300/20 bg-sky-300/5 p-3 sm:p-5"><h2 className="font-semibold">3 · Make the final clip</h2><p className="text-sm text-muted-foreground">{draft.pipeline === '3d' ? 'Happy with the preview? Use its motion as a reference for H3, or export it for Grok.' : 'Generate a clip using your reference and direction.'}</p>
+      <Button className="min-h-12 w-full" disabled={Boolean(busy) || !draft.prompt.trim() || !draft.references.length || !validation?.ready || alreadySubmitted || (!capabilities?.h3.render_ready && !capabilities?.h3.can_recover_memory)} onClick={() => void generate()}>{busy === 'render' ? 'Preparing your final clip…' : 'Generate video'}</Button>
+      {submissionError && <p role="alert" className="break-words rounded-lg border border-red-300/20 bg-red-400/5 p-3 text-sm text-red-200">{submissionError}</p>}
+      {alreadySubmitted ? <p role="status" className="text-sm text-sky-200">Video submitted. Follow its progress in Your takes; repeated clicks will not submit another job.</p> : draft.references.length>0 && <p role="status" className={`text-sm ${validation?.ready?'text-sky-200':'text-amber-200'}`}>{validation?.reason||'Checking this saved plan and preview on the server…'}</p>}
+      {validation?.can_rebuild && <Button variant="outline" className="min-h-11 w-full" disabled={Boolean(busy)} onClick={()=>void rebuild()}>{busy==='rebuild'?'Rebuilding saved scene…':'Rebuild saved scene preview'}</Button>}
+      {['verification_failed','preview_unavailable'].includes(validation?.code||'') && <Button variant="outline" className="min-h-11 w-full" disabled={Boolean(busy)} onClick={()=>setValidationAttempt(n=>n+1)}>Check saved scene again</Button>}
+      {validation?.code==='scene_mismatch' && <><p className="text-sm text-amber-200">{capabilities?.planner.reason}</p><Button variant="outline" className="min-h-11 w-full" disabled={Boolean(busy)||!capabilities?.planner.opus_available} onClick={()=>void planShot()}>Build new AI scene plan</Button></>}
+      {capabilities && !capabilities.h3.render_ready && <p role="status" className="text-sm text-amber-200">{capabilities.h3.reason||'H3 is unavailable. Wait for safe resources before generating.'}</p>}
       {capabilities?.resources && <p className="text-xs text-muted-foreground">{capabilities.resources.memory?.available_gb} GiB available · safe H3 generation needs {capabilities.h3.minimum_gb} GiB</p>}
       {capabilities?.resources && <p className="text-xs text-muted-foreground">GPU {capabilities.resources.gpu.temperature_c ?? '—'}°C · {capabilities.resources.gpu.utilization_pct ?? '—'}% busy · {capabilities.resources.gpu.cap_active ? 'Safety cap active' : 'Safety coordination unverified'}</p>}
     </section>

@@ -38,6 +38,7 @@ jobs:
           tests/test_motion_director.py
           tests/test_motion_sequence.py
           tests/test_motion_recovery.py
+          tests/test_motion_submission_contract.py
           tests/test_motion_host_control.py
           tests/test_motion_quality.py
           tests/test_motion_iteration.py
