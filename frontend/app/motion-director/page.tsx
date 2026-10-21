@@ -57,6 +57,7 @@ export default function MotionDirectorPage() {
   const [checked, setChecked] = useState<{key: string; result: SubmissionValidation} | null>(null)
   const [submitted, setSubmitted] = useState<{key: string; job_id: string} | null>(null)
   const [validationAttempt, setValidationAttempt] = useState(0)
+  const [now, setNow] = useState(Date.now())
   const videos = useRef<Record<string, HTMLVideoElement | null>>({})
   const revision = useRef(0)
   const qualityRef = useRef<'draft'|'native'>('native')
@@ -102,7 +103,8 @@ export default function MotionDirectorPage() {
     void load(); void check()
     const poll = setInterval(() => void load(), 2500)
     const availability = setInterval(() => void check(), 20000)
-    return () => { cancelled = true; clearInterval(poll); clearInterval(availability) }
+    const clock = setInterval(() => setNow(Date.now()), 1000)
+    return () => { cancelled = true; clearInterval(poll); clearInterval(availability); clearInterval(clock) }
   }, [])
   useEffect(()=>{
     if(!restored || !draft.prompt.trim() || !draft.references.length)return
@@ -250,6 +252,17 @@ export default function MotionDirectorPage() {
       </div>
       <p className="text-xs text-muted-foreground">{draft.pipeline === '3d' ? 'Claude Opus + Blender turn your reference into an editable approximation. Review the movement before making the AI clip.' : 'Classic prompt direction. Switch to 3D in Advanced for a Blender preview.'}</p>
       {draft.pipeline === '3d' && <Button className="min-h-12 w-full" disabled={Boolean(busy) || !draft.prompt.trim() || !draft.references.length || !capabilities?.blender?.available || ['queued','rendering'].includes(preview?.status || '')} onClick={() => void (plan?.scene && (validation?.ready||validation?.can_rebuild)?rebuild():planShot())}>{busy === 'plan' ? 'Opus is directing your scene…' : busy==='rebuild'?'Rebuilding saved scene…':plan?.scene ? 'Rebuild 3D preview' : 'Build 3D preview'}</Button>}
+      {draft.pipeline === '3d' && capabilities && <div className="rounded-lg border border-white/10 p-3 text-sm" aria-label="Claude planning availability">
+        <p role="status">Claude planning · {capabilities.planner.opus_available ? 'Available' : capabilities.planner.verification_state?.replaceAll('_',' ') || 'Unavailable'}</p>
+        {!capabilities.planner.opus_available && <p className="mt-2 text-amber-200">{capabilities.planner.reason}</p>}
+        {capabilities.planner.next_check_at && <p className="mt-2 text-xs text-muted-foreground">Next verification allowed: {new Date(capabilities.planner.next_check_at).toLocaleString()}. Saved previews and local camera edits remain available.</p>}
+        <Button variant="outline" className="mt-3 min-h-11" disabled={Boolean(busy) || Boolean(capabilities.planner.next_check_at && Date.parse(capabilities.planner.next_check_at)>now)} onClick={async()=>{
+          setBusy('verify');setSubmissionError('')
+          try {await motionApi.verifyPlanner();setCapabilities(await motionApi.capabilities(qualityRef.current))}
+          catch(e){setSubmissionError(e instanceof Error?e.message:'Subscription verification failed')}
+          finally{setBusy('')}
+        }}>{busy==='verify'?'Verifying subscription…':'Verify Claude subscription'}</Button>
+      </div>}
       {draft.pipeline === '3d' && !capabilities?.blender?.available && <p className="text-sm text-amber-200">{capabilities?.blender?.reason || 'Checking Blender availability…'}</p>}
       {preview && <div className="space-y-3" aria-live="polite"><p className="text-sm text-sky-200">Blender preview · {preview.status} · {preview.message}{preview.elapsed_seconds != null ? ` · ${elapsed(preview.elapsed_seconds)}` : ''}</p>
         {preview.preview_url && <><video aria-label="Blender 3D preview" className="max-h-[55vh] w-full rounded-lg bg-black" src={preview.preview_url} controls playsInline loop preload="metadata" />

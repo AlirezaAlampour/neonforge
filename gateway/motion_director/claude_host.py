@@ -10,6 +10,8 @@ import shutil
 import time
 import re
 import uuid
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 import httpx
 
@@ -35,6 +37,9 @@ API_ENV = {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "C
            "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"}
 status_cache = None
 status_lock = asyncio.Lock()
+status_task = None
+rate_failures = 0
+VERIFICATION_STATE = Path(os.getenv('NEONFORGE_CLAUDE_VERIFICATION_STATE', str(Path(__file__).resolve().parents[2] / '.motion-runtime/claude-verification.json')))
 SYSTEM_PROMPT = """You are a Professional Cinematic Director. Return only the requested structured decisions for ONE continuous cinematic shot.
 Use intentional motivated camera movement, coherent geography, readable action and cinematic pacing. User drawings, ordered waypoints and identity constraints take priority. Analyze the supplied reference images. Avoid arbitrary cuts, contradictory movements, identity drift and invented subjects. Divide the exact requested duration into contiguous timed beats. References and hardware dimensions are immutable. No tools, file access, agents, API billing or follow-up calls are permitted."""
 
@@ -80,18 +85,80 @@ async def run_cli(args: list[str], data: bytes | None = None, timeout: float = 8
     return result
 
 
-async def subscription_status() -> dict:
-    global status_cache
-    if any(os.environ.get(k) for k in API_ENV):
-        return {"available": False, "reason": "API/provider environment is present; subscription-only planning is refused."}
+def _stamp(epoch):
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat()
+
+
+def retry_delay(value, now=None):
+    """Retry-After is either seconds or an HTTP date. Never shorten it."""
+    now = time.time() if now is None else now
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        try:
+            seconds = parsedate_to_datetime(value).timestamp() - now
+        except (TypeError, ValueError, OverflowError):
+            return None
+    return max(0, seconds) if seconds < float('inf') else None
+
+
+def _cached_status():
+    if status_cache:
+        data = dict(status_cache[1])
+        if status_cache[0] <= time.monotonic() and data.get('available'):
+            data.update(available=False, state='verification_due', reason='Subscription verification expired. Verify before new Claude planning.')
+        return data
+    # Only a refusal/cooldown survives a restart, never a billing authorization.
+    try:
+        data = json.loads(VERIFICATION_STATE.read_text())
+        if data.get('state') == 'verification_rate_limited' and data.get('next_check_epoch', 0) > time.time():
+            return data
+    except (OSError, ValueError, TypeError):
+        pass
+    return {'available': False, 'state': 'unverified', 'reason': 'Verify the existing Claude subscription before new planning. Saved scenes and local camera edits remain available.', 'next_check_at': None}
+
+
+async def _verify_status():
+    global status_cache, rate_failures
     async with status_lock:
-        if status_cache and status_cache[0] > time.monotonic():
-            return dict(status_cache[1])
+        cached = _cached_status()
+        if cached.get('next_check_epoch', 0) > time.time():
+            return cached
+        try:
+            previous = json.loads(VERIFICATION_STATE.read_text())
+            if previous.get('state') == 'verification_rate_limited':
+                rate_failures = max(rate_failures, previous.get('consecutive_rate_limits', 0))
+        except (OSError, ValueError, TypeError):
+            pass
         result = await _subscription_status()
-        # UI capability polling must not exhaust the read-only quota endpoint.
-        # Failed checks also cool down; they never inherit a prior success.
-        status_cache = (time.monotonic() + 60, dict(result))
-        return result
+        limited = result.get('state') == 'verification_rate_limited'
+        rate_failures = rate_failures + 1 if limited else 0
+        delay = max(300 * 2 ** min(rate_failures - 1, 4), result.pop('_retry_after', 0) or 0) if limited else (300 if result['available'] else 60)
+        now = time.time()
+        result.update(checked_at=_stamp(now), next_check_at=_stamp(now + delay), next_check_epoch=now + delay,
+                      consecutive_rate_limits=rate_failures)
+        result.setdefault('state', 'ready' if result['available'] else 'verification_failed')
+        status_cache = (time.monotonic() + delay, dict(result))
+        # Sanitized operational record, no auth output, account ID or credentials.
+        VERIFICATION_STATE.parent.mkdir(parents=True, exist_ok=True)
+        part = VERIFICATION_STATE.with_suffix('.tmp')
+        part.write_text(json.dumps(result)); part.chmod(0o600); part.replace(VERIFICATION_STATE)
+        with VERIFICATION_STATE.with_suffix('.jsonl').open('a') as audit:
+            audit.write(json.dumps(result) + '\n')
+        return dict(result)
+
+
+async def subscription_status(check=True) -> dict:
+    global status_task
+    if any(os.environ.get(k) for k in API_ENV):
+        return {"available": False, "state": "provider_refused", "reason": "API/provider environment is present; subscription-only planning is refused."}
+    cached = _cached_status()
+    if not check or cached.get('next_check_epoch', 0) > time.time():
+        return {**cached, 'checking': bool(status_task and not status_task.done())}
+    # Cancellation of one disconnected browser must not cancel the shared probe.
+    if status_task is None or status_task.done():
+        status_task = asyncio.create_task(_verify_status())
+    return dict(await asyncio.shield(status_task))
 
 
 async def _subscription_status() -> dict:
@@ -112,15 +179,21 @@ async def _subscription_status() -> dict:
             async with httpx.AsyncClient(timeout=15) as client:
                 response = await client.get("https://api.anthropic.com/api/oauth/usage", headers={"Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20"})
             if response.status_code == 429:
-                return {"available": False, "reason": "Claude subscription verification is rate limited. Wait a minute before planning; no paid fallback is used."}
+                return {"available": False, "state": "verification_rate_limited", "subscription": result.get('subscriptionType'),
+                        "http_status": 429, "_retry_after": retry_delay(response.headers.get('Retry-After')),
+                        "retry_after_provided": 'Retry-After' in response.headers,
+                        "reason": "Claude's subscription verification endpoint returned HTTP 429. Model usage is unknown. Retry verification after the displayed time; saved scenes remain usable."}
             response.raise_for_status()
             quota = response.json()
             extra_disabled = quota.get("extra_usage", {}).get("is_enabled") is False
             exhausted = any(isinstance(quota.get(key), dict) and quota[key].get("utilization", 0) >= 100 for key in ("five_hour", "seven_day", "seven_day_opus"))
             ready = extra_disabled and not exhausted
             if not extra_disabled:
-                return {"available": False, "auth_method": "claude.ai", "subscription": result.get("subscriptionType"),
+                return {"available": False, "state": "extra_usage_not_disabled", "auth_method": "claude.ai", "subscription": result.get("subscriptionType"),
                         "reason": "Paid extra usage is enabled or unverified. Disable Usage credits/Extra usage to enable subscription-only Opus."}
+            if exhausted:
+                return {"available": False, "state": "model_usage_exhausted", "subscription": result.get('subscriptionType'),
+                        "reason": "Claude reports exhausted subscription model usage. Wait for the usage window to reset; no paid fallback is used."}
         return {"available": ready, "auth_method": result.get("authMethod"), "subscription": result.get("subscriptionType"),
                 "reason": "" if ready else "Subscription quota or disabled extra usage could not be verified; no paid fallback is allowed."}
     except (OSError, RuntimeError, TimeoutError, ValueError, httpx.HTTPError):

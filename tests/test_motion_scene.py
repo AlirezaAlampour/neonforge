@@ -103,7 +103,8 @@ def test_host_rejects_unknown_assets_and_shared_memory_shortage(tmp_path,monkeyp
     with pytest.raises(ValueError):scene_host.start('a'*8+'-'+ 'a'*4+'-'+ 'a'*4+'-'+ 'a'*4+'-'+ 'a'*12,scene,10,384,672,'run')
 
 
-def test_subscription_status_caches_bounded_checks_and_refuses_provider_env(monkeypatch):
+def test_subscription_status_caches_bounded_checks_and_refuses_provider_env(monkeypatch,tmp_path):
+    monkeypatch.setattr(claude_host,'VERIFICATION_STATE',tmp_path/'verification.json')
     monkeypatch.setattr(claude_host,'status_cache',None);calls=[]
     async def fresh():calls.append(True);return {'available':True,'subscription':'pro','reason':''}
     monkeypatch.setattr(claude_host,'_subscription_status',fresh)

@@ -62,6 +62,7 @@ def test_host_api_rejects_unsigned_and_wrong_role_calls(tmp_path, monkeypatch):
 @pytest.mark.parametrize("extra,quota,expected", [(True, 0, False), (False, 100, False), (False, 0, True)])
 def test_opus_requires_subscription_quota_and_disabled_paid_extra_usage(tmp_path, monkeypatch, extra, quota, expected):
     monkeypatch.setattr(claude_host, "status_cache", None)
+    monkeypatch.setattr(claude_host, 'VERIFICATION_STATE', tmp_path / 'verification.json')
     directory = tmp_path / ".claude"
     directory.mkdir()
     (directory / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {"accessToken": "test-token-not-a-credential"}}))

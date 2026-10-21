@@ -379,6 +379,11 @@ async def reclaim_idle():
 
 @app.get("/claude/status")
 async def claude_status():
+    return await subscription_status(check=False)
+
+
+@app.post("/claude/verify")
+async def claude_verify():
     return await subscription_status()
 
 

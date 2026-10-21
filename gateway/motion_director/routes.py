@@ -351,7 +351,8 @@ def create_router(runtime):
         if getattr(runtime, "HOST_CONTROL_SOCKET", ""):
             try:
                 status = await host_request(runtime, "claude/status")
-                planner.update(opus_available=status.get("available", False), subscription=status.get("subscription"), reason=status.get("reason"))
+                planner.update(opus_available=status.get("available", False), subscription=status.get("subscription"), reason=status.get("reason"),
+                               verification_state=status.get('state'), checked_at=status.get('checked_at'), next_check_at=status.get('next_check_at'))
                 resources = await host_request(runtime, "resources")
                 shared_gpu = resources.get('shared_gpu') or {}
                 resident_models = [item.get('name', 'another model') for item in (shared_gpu.get('releasable') or {}).get('items', [])
@@ -633,6 +634,13 @@ def create_router(runtime):
     @router.post("/memory/recover")
     async def recover_idle_memory():
         return await recover_memory()
+
+    @router.post('/planner/verify')
+    async def verify_planner():
+        try:
+            return await host_request(runtime, 'claude/verify', {})
+        except (RuntimeError, httpx.HTTPError, OSError) as exc:
+            raise HTTPException(503, 'The private Claude verification connection is unavailable.') from exc
 
     @router.post("/imports/grok")
     async def import_grok(file: UploadFile = File(...), reference_job_id: str | None = Form(default=None), reference_plan_id: str | None = Form(default=None)):
