@@ -32,3 +32,42 @@ Phase 1 validation: 242 Python tests; TypeScript check. New concurrency tests us
 31 simultaneous callers, caller cancellation, passive polls, restart cooldown,
 numeric/date/malformed Retry-After, and expired success. Private evidence lives
 in `.motion-runtime/daidyra/`, including `actual-verification.json` and test logs.
+
+## Authored animation proof
+
+Official free Standard Quaternius Universal Animation Libraries 1 and 2 are
+CC0. The included GLBs retain only selected authored actions and their referenced
+binary data (2.9 MiB combined); `animation_assets/manifest.json` records input/output
+SHA256 and source URLs. `scripts/prepare_character_library.py` reproduces them
+from the original ZIPs. Native matching rest skeletons avoid the distortion risk
+of name-only retargeting; arbitrary user-rig retargeting is not supported.
+Blender uses independent armatures/meshes, source actions in NLA with crossfades,
+opponent facing independent of travel, and source-sampled ankle IK during blends.
+The first render exposed quaternion/euler facing and a crouch transition foot arc;
+both were fixed and visibly re-rendered, not just asserted in schema tests.
+
+The explicit local five-second fight study shows approach, left jab/head reaction,
+right counter/chest reaction, then a right cross/crouch dodge and return to guard.
+This fixture is authored for acceptance, never a disguised Claude fallback.
+120 evaluated frames retain camera margins, ground contact and synchronized
+reaction cues. Hit-joint distances are 0.112/0.283 m and dodge clearance 0.597 m;
+max camera speed is 0.05 m/s. These are approximate joint tests, not simulation
+of body surface collisions or proof of general interaction capability.
+A failed contact/framing report prevents a completed preview and H3 admission.
+New planning must select only catalog clips and explicit ordered action/contact
+cues. No compatible kick or unarmed block asset is bundled; neither is fabricated.
+Library source/actions: https://quaternius.com/packs/universalanimationlibrary.html
+and https://quaternius.com/packs/universalanimationlibrary2.html . NLA workflow:
+https://docs.blender.org/manual/en/latest/editors/nla/properties_modifiers.html .
+
+Phase 2 tests: 252 Python tests. Private CPU preview MP4, editable `.blend`,
+`transforms.json`, contact sheet and `timeline-validation.json` are retained under
+`.motion-runtime/daidyra/` and the scene ID named in `study-result.json`.
+
+## Handoff correction (pending H3 visual acceptance)
+
+Legacy draft passed only the opening 22 frames (0.917s) to H3, omitting later
+choreography. Authored interactions now supply the full real-time 124-frame
+window at a bounded 384x672 motion canvas, plus original image identity inputs
+and a first-frame appearance guide. Existing non-interaction draft settings stay
+unchanged for comparison. No resolution or UMA/temperature floor was reduced.

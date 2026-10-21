@@ -10,9 +10,10 @@ from pathlib import Path
 
 import bpy
 from mathutils import Vector
+from bpy_extras.object_utils import world_to_camera_view
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from blender import mannequin, clips, sets
+from blender import mannequin, clips, sets, authored
 from blender.camera import FollowRig
 from blender.paths import sample as path_position
 
@@ -41,8 +42,10 @@ def material(color, emission=0, metallic=0, roughness=.65):
     return mat
 
 
-def object_for(e, assets):
+def object_for(e, assets, data=None, folder=None):
     if e['geometry']=='mannequin':
+        if e.get('rig')=='quaternius-v1':
+            return authored.build(e,folder,data['animation_library'],24,data['duration'],material)
         look=e.get('character') or {'skin':'#b98a6d','hair':'#3f2c25','top':e['color'],'bottom':e['color'],'shoes':'#927047'}
         return mannequin.build(e['id'], material(e['color']), bpy.context.scene.collection, look, material)
     if e['geometry'] in {'train','building','sign','canopy'}:
@@ -96,7 +99,7 @@ def main(data, folder):
         obj.rotation_euler=(Vector((0,y,0))-obj.location).to_track_quat('-Z','Y').to_euler()
     # All environment geometry is fixed unless the specification gives a path.
     bpy.ops.mesh.primitive_plane_add(size=320,location=(0,0,-.03));ground=bpy.context.object;ground.name='Ground';ground.data.materials.append(material(spec['ground_color'],metallic=.18,roughness=.38))
-    objects={e['id']:object_for(e,data.get('assets',{})) for e in spec['entities']}
+    objects={e['id']:object_for(e,data.get('assets',{}),data,folder) for e in spec['entities']}
     camera_data=bpy.data.cameras.new('DirectorCamera');camera_data.lens=spec['camera']['lens'];camera_data.clip_end=400
     camera_data.sensor_fit='VERTICAL';camera_data.sensor_height=24
     camera=bpy.data.objects.new('DirectorCamera',camera_data);scene.collection.objects.link(camera);scene.camera=camera
@@ -114,25 +117,49 @@ def main(data, folder):
             velocities[e['id']]=delta/max(.001,tb-ta)
             travel[e['id']]+= (pos-last[e['id']]).length if e['id'] in last else 0;last[e['id']]=pos.copy()
             yaw=math.atan2(delta.x,-delta.y) if delta.length>.00001 else headings.get(e['id'],math.radians(e['yaw']))
+            if e.get('facing'):
+                other=next(o for o in spec['entities'] if o['id']==e['facing'])
+                facing=sample(other['path'],t,list(other['position'].values()))-pos
+                if facing.length>.001:yaw=math.atan2(facing.x,-facing.y)
             headings[e['id']]=yaw
             obj.location=pos;obj.rotation_euler=(0,0,yaw)
             if e['geometry']=='mannequin':
-                pose,phase=clips.evaluate(e['clip'],travel[e['id']]);mannequin.apply_pose(obj,pose,frame=f)
+                if e.get('rig')!='quaternius-v1':
+                    pose,phase=clips.evaluate(e['clip'],travel[e['id']]);mannequin.apply_pose(obj,pose,frame=f)
                 obj.scale=(e['size']['x']*(e.get('character') or {}).get('height_m',1.8)/1.8,)*3
             obj.keyframe_insert('location',frame=f);obj.keyframe_insert('rotation_euler',frame=f)
         c=spec['camera'];target=objects[c['target']]
+        framed=[target,*(objects[i] for i in c.get('include',[]) if i!=c['target'])]
+        center=sum((o.location for o in framed),Vector())/len(framed)
         explicit=sample(c['path'],t,(0,-4,2)) if c['path'] else None
         angle=math.radians(c['orbit_start']+(c['orbit_end']-c['orbit_start'])*t/duration) if c['mode']=='orbit' else None
-        position,aim=solver.step(target.location,velocities[c['target']],target.rotation_euler.z,1/fps,explicit,angle)
+        velocity=sum((velocities[o.name] for o in framed),Vector())/len(framed)
+        position,aim=solver.step(center,velocity,target.rotation_euler.z,1/fps,explicit,angle)
         dolly.location=position;focus.location=aim
         dolly.keyframe_insert('location',frame=f);focus.keyframe_insert('location',frame=f)
         scene.frame_set(f);bpy.context.view_layer.update()
+        native=[e for e in spec['entities'] if e.get('rig')=='quaternius-v1']
+        for e in native:authored.plant(objects[e['id']],t,f)
+        bpy.context.view_layer.update()
+        for e in native:
+            obj=objects[e['id']];authored.ground(obj,e['position']['z']);obj.keyframe_insert('location',frame=f)
+        bpy.context.view_layer.update()
         evaluated=camera.evaluated_get(bpy.context.evaluated_depsgraph_get()).matrix_world
+        bounds=[]
+        for e in native:
+            for name,point in authored.joints(objects[e['id']]).items():
+                v=Vector(point)
+                if name=='Head':v.z+=.23*objects[e['id']].scale.z
+                if name.startswith('ball_'):v.z-=.015*objects[e['id']].scale.z
+                screen=world_to_camera_view(scene,camera,v);bounds.append((screen.x,screen.y,screen.z))
         measurements.append({'frame':f,'time':t,'camera':list(evaluated.translation),'aim':list(aim),
+          'framing':{'left':min(p[0] for p in bounds),'right':max(p[0] for p in bounds),'bottom':min(p[1] for p in bounds),'top':max(p[1] for p in bounds),'depth':min(p[2] for p in bounds)} if bounds else None,
           'forward':list(evaluated.to_quaternion() @ Vector((0,0,-1))),
           'entities':{e['id']:{'position':list(objects[e['id']].matrix_world.translation),'yaw':objects[e['id']].rotation_euler.z,
              'distance':travel[e['id']], 'phase':travel[e['id']]/clips.STRIDE.get(e['clip'],1),
-             'shin':list(objects[e['id']].pose.bones['shin.L'].rotation_quaternion) if e['geometry']=='mannequin' else None} for e in spec['entities']}})
+             'shin':list(objects[e['id']].pose.bones['shin.L'].rotation_quaternion) if e['geometry']=='mannequin' and e.get('rig')!='quaternius-v1' else None,
+             'joints':authored.joints(objects[e['id']]) if e.get('rig')=='quaternius-v1' else None,
+             'actions':[a['clip'] for a in e.get('actions',[]) if a['start']<=t<a['end']]} for e in spec['entities']}})
     for obj in (dolly,focus):
         if obj.animation_data and obj.animation_data.action:
             for layer in obj.animation_data.action.layers:
@@ -142,6 +169,11 @@ def main(data, folder):
                             for key in curve.keyframe_points:key.interpolation='LINEAR'
     scene.frame_set(1);bpy.ops.wm.save_as_mainfile(filepath=str(folder/'scene.blend'))
     (folder/'transforms.json').write_text(json.dumps({'blender':bpy.app.version_string,'device':'CPU','fps':fps,'frames':measurements}))
+    if spec.get('interactions'):
+        from blender.validation import validate
+        report=validate(spec,measurements)
+        (folder/'timeline-validation.json').write_text(json.dumps(report,indent=2))
+        if not report['valid']:raise ValueError('Choreography preview failed: '+ '; '.join(report['errors']))
     if data.get('render_images',True):
         (folder/'frames').mkdir(exist_ok=True);scene.render.filepath=str(folder/'frames'/'frame-')
         bpy.ops.render.render(animation=True)

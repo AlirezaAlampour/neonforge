@@ -19,7 +19,7 @@ export type ShotSpec = {
   timing: { start: number; end: number; action: string }[]
   composition: string; subject_constraints: string[]; width: number; height: number; frames: number; fps: number
   renderer_prompt: string; conditioning: 'prompt-guidance' | 'reference-video'; notes: string[]
-  scene?: { description: string; reference_analysis: string; limitations: string[]; entities: {id: string; label: string; geometry: string; clip: string}[]; camera: {mode: string; distance: number} } | null
+  scene?: { description: string; reference_analysis: string; limitations: string[]; entities: {id: string; label: string; geometry: string; clip: string; rig?: string; actions?: {clip:string;start:number;end:number}[]}[]; camera: {mode: string; distance: number}; interactions?: {time:number;actor:string;target:string;outcome:string}[] } | null
   h3?: {summary: string; subject_definitions: string[]; retention_analysis: string[]; detailed_description: string; inferred_details: string[]} | null
   planning_usage?: {
     source: string; new_claude_invocations: number; elapsed_seconds: number
@@ -36,7 +36,7 @@ export type MotionJob = {
   can_retry?: boolean; can_cancel?: boolean; can_reconcile?: boolean; cancel_requested?: boolean
   recovery_hint?: string | null
 }
-export type ScenePreview = { id: string; status: string; message?: string; error?: string; preview_url?: string; first_frame_url?: string; export_url?: string; prompt_url?: string; script_url?: string; preview_width?: number; preview_height?: number; cache_hit?: boolean; elapsed_seconds?: number }
+export type ScenePreview = { id: string; status: string; message?: string; error?: string; preview_url?: string; first_frame_url?: string; export_url?: string; prompt_url?: string; script_url?: string; preview_width?: number; preview_height?: number; cache_hit?: boolean; elapsed_seconds?: number; timeline_verified?:boolean; timeline_url?:string }
 export type SubmissionValidation = { ready: boolean; code: string; reason: string; can_rebuild: boolean; preview?: ScenePreview }
 export type PlannerVerification = { available: boolean; state?: string; reason: string; checked_at?: string; next_check_at?: string | null }
 export type Capabilities = {

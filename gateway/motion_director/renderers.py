@@ -75,9 +75,10 @@ def build_h3_graph(shot: ShotSpec, image_names: list[str], job_id: str, context:
         # guide, with this clip's Blender motion window.
         node["ref_videos.ref_video_0"] = ["blender_frames", 0]
         graph.pop("context_video", None); graph.pop("context_frames", None)
-        graph["138"]["inputs"]["value"] += ("\n<Video 1> supplies motion timing, layout and camera tracking ONLY. Preserve the detailed subject identity, clothing, environment appearance and lighting from <Picture 1>; do not transfer the motion reference's materials or simplified subject shape. "
-            + ("It shows the clip's full motion; hold the same subject framing and camera speed throughout." if shot.request.quality == 'native' else "It shows only the opening 22 frames; continue the specified action for the full clip."))
-        if shot.request.quality == 'native' and not context:
+        full_motion = shot.request.quality == 'native' or bool(shot.scene and shot.scene.get('interactions'))
+        graph["138"]["inputs"]["value"] += ("\n<Video 1> supplies motion timing, layout and camera tracking ONLY. Preserve each subject's identity, clothing, screen side, environment and lighting from the original pictures; do not transfer the motion reference's materials or simplified subject shape. "
+            + ("It shows the clip's full motion; hold the same subject framing and camera speed throughout." if full_motion else "It shows only the opening 22 frames; continue the specified action for the full clip."))
+        if full_motion and not context:
             graph['appearance_guide'] = {'class_type':'MiniMaxH3AddGuide','inputs':{
                 'positive':['136',0], 'latent':['136',1], 'vae':['119',0], 'image':['ref_0',0], 'frame_idx':0}}
             graph['126']['inputs']['conditioning'] = ['appearance_guide',0]

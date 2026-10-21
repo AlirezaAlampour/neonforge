@@ -27,11 +27,11 @@ async def continuation(previous: Path, folder: Path, index: int, width: int, hei
     return image, video
 
 
-async def scene_window(source: Path, folder: Path, index: int, width: int, height: int, quality='draft'):
-    """Real-time motion: draft opening window or native full-clip coverage."""
+async def scene_window(source: Path, folder: Path, index: int, width: int, height: int, quality='draft', full_motion=False):
+    """Real-time motion; authored choreography must retain the full timeline."""
     folder.mkdir(parents=True, exist_ok=True)
     video = folder / f"blender-motion-{index}.mp4"
-    native = quality == 'native'
+    native = quality == 'native' or full_motion
     # Motion geometry needs temporal coverage more than fine texture. Keep its
     # canvas bounded while original-image conditioning uses the native canvas.
     mw,mh = ((384,672) if height>width else (672,384)) if native else (width,height)

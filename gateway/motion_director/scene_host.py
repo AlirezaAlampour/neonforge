@@ -14,6 +14,7 @@ import time
 
 from . import media
 from .scene import SceneSpec
+from .animation_library import CLIPS, ROOT as ANIMATION_ROOT, catalog as animation_catalog
 from shared.motion_quality import minimum_for_size
 
 OUTPUTS = Path(os.getenv('NEONFORGE_HOST_OUTPUTS_DIR',str(Path(__file__).resolve().parents[2]/'.motion-runtime/scene-outputs')))
@@ -33,7 +34,8 @@ def digest_file(path):
 def render_key(data,catalog):
     compiler={p.name:digest_file(p) for p in sorted((Path(__file__).parent/'blender').glob('*.py'))}
     value={k:data[k] for k in ('scene','duration','width','height','assets')}
-    value.update(compiler=compiler,format_version=2,asset_content={k:digest_file(catalog[k]) for k in data['assets']})
+    value.update(compiler=compiler,format_version=3,asset_content={k:digest_file(catalog[k]) for k in data['assets']},
+                 animation_content={p.name:digest_file(p) for p in ANIMATION_ROOT.glob('*') if p.is_file()} if data.get('animation_library') else {})
     return hashlib.sha256(json.dumps(value,sort_keys=True).encode()).hexdigest()
 
 
@@ -64,7 +66,9 @@ def status():
     return {'available':BLENDER.is_file(), 'cpu_preview':True,
             'reason':'' if BLENDER.is_file() else 'The existing Blender binary is unavailable. Configure NEONFORGE_BLENDER_BIN; no installation is performed.',
             'assets':[{'id':k,'label':p.parent.name+' / '+p.stem,'rigged':False} for k,p in asset_catalog().items()],
-            'clips':['idle','walk','run'], 'conditioning':'reference-video; approximate motion, not strict trajectory control'}
+            'clips':['idle','walk','run'], 'authored_clips':animation_catalog(),
+            'animation_limitations':['Native Quaternius humanoid rigs only; no arbitrary mesh retargeting.', 'No licensed compatible kick or unarmed block clip is bundled.'],
+            'conditioning':'reference-video; approximate motion, not strict trajectory control'}
 
 
 def folder_for(scene_id):
@@ -102,6 +106,8 @@ def start(scene_id, scene, duration, width, height, prompt):
     pw,ph=(384,672) if height>width else (672,384)
     data={'scene':spec.model_dump(),'duration':duration,'width':pw,'height':ph,
           'generation_width':width,'generation_height':height,'assets':{k:f'assets/{k}.glb' for k in ids}}
+    if any(e.rig=='quaternius-v1' for e in spec.entities):
+        data['animation_library']=CLIPS
     digest=hashlib.sha256(json.dumps(data,sort_keys=True).encode()).hexdigest()
     if (folder/'status.json').exists():
         old=read_status(scene_id)
@@ -134,6 +140,8 @@ async def render(folder,data,prompt,catalog,state):
             if not BLENDER.is_file():raise RuntimeError('Existing Blender binary is unavailable')
             state.update(status='rendering',message='Building geometry, rig, paths and camera; rendering on CPU…');write_status(folder,state)
             shutil.copytree(Path(__file__).parent/'blender', folder/'blender',dirs_exist_ok=True,ignore=shutil.ignore_patterns('__pycache__'))
+            if data.get('animation_library'):
+                shutil.copytree(ANIMATION_ROOT,folder/'animation_assets',dirs_exist_ok=True)
             (folder/'assets').mkdir(exist_ok=True)
             for key in data['assets']:shutil.copy2(catalog[key],folder/data['assets'][key])
             (folder/'scene.json').write_text(json.dumps(data,indent=2))
@@ -152,6 +160,7 @@ async def render(folder,data,prompt,catalog,state):
             rendering=time.monotonic()
             if source:
                 for name in ('preview.mp4','first-frame.png','scene.blend','transforms.json'):shutil.copy2(source/name,folder/name)
+                if (source/'timeline-validation.json').is_file():shutil.copy2(source/'timeline-validation.json',folder/'timeline-validation.json')
                 state['cached_from']=source.name
             else:
                 with (folder/'blender.log').open('wb') as log:
@@ -162,11 +171,15 @@ async def render(folder,data,prompt,catalog,state):
                 if proc.returncode:raise RuntimeError('Blender could not render this scene; inspect its bounded local log')
                 await media.command('ffmpeg','-v','error','-y','-framerate','24','-i',str(folder/'frames/frame-%04d.png'),'-c:v','libx264','-crf','16','-preset','medium','-pix_fmt','yuv420p','-threads','2','-movflags','+faststart',str(folder/'preview.mp4'))
                 shutil.copy2(folder/'frames/frame-0001.png',folder/'first-frame.png')
+            if data['scene'].get('interactions'):
+                report=json.loads((folder/'timeline-validation.json').read_text())
+                if not report.get('valid'):raise RuntimeError('The rendered choreography did not pass contact/framing validation')
+                state['timeline_verified']=True
             state['render_seconds']=round(time.monotonic()-rendering,3)
             browser_prompt = re.sub(r'<Picture (\d+)> is reference [a-zA-Z0-9_-]+\.', r'Original image \1 supplies identity and style.', prompt)
             (folder/'prompt.txt').write_text(browser_prompt+'\nUse the Blender reference for action, spatial layout and independent camera motion. Preserve the original image identity/style. One continuous shot. Reference motion is approximate, not guaranteed.\n')
             with zipfile.ZipFile(folder/'grok-export.zip','w',zipfile.ZIP_DEFLATED) as bundle:
-                for path in [folder/'preview.mp4',folder/'first-frame.png',folder/'prompt.txt',folder/'scene.py',folder/'scene.json',folder/'scene.blend',folder/'transforms.json',*sorted((folder/'blender').glob('*.py')),*sorted((folder/'assets').glob('*.glb'))]:
+                for path in [folder/'preview.mp4',folder/'first-frame.png',folder/'prompt.txt',folder/'scene.py',folder/'scene.json',folder/'scene.blend',folder/'transforms.json',*folder.glob('timeline-validation.json'),*sorted((folder/'blender').glob('*.py')),*sorted((folder/'assets').glob('*.glb')),*sorted((folder/'animation_assets').glob('*'))]:
                     bundle.write(path,str(path.relative_to(folder)))
             # Keep the compact video and edit sources; per-frame PNGs are temporary.
             if (folder/'frames').exists():shutil.rmtree(folder/'frames')

@@ -102,6 +102,7 @@ def create_router(runtime):
         if state['status'] == 'completed':
             state.update(preview_url=root+'/preview.mp4', first_frame_url=root+'/first-frame.png',
                          export_url=root+'/grok-export.zip', prompt_url=root+'/prompt.txt', script_url=root+'/scene.py')
+            if state.get('timeline_verified'):state['timeline_url']=root+'/timeline-validation.json'
         return state
 
     def fingerprint(request):
@@ -246,6 +247,8 @@ def create_router(runtime):
                 return dict(result, code='preview_pending', reason='Wait for this scene\'s Blender preview to finish.')
             if state.get('status') != 'completed' or not runtime.resolve_output_path(f'motion_director/scenes/{request.plan_id}/preview.mp4').is_file():
                 return dict(result, code='preview_missing', reason='The saved browser preview is missing or interrupted on the server. Rebuild the saved scene preview; no Claude call is needed.', can_rebuild=True)
+            if shot.scene.get('interactions') and not state.get('timeline_verified'):
+                return dict(result, code='choreography_unverified', reason='This fight preview has no evaluated contact and camera validation. Rebuild and review the scene before H3 generation.', can_rebuild=True)
             if (state.get('generation_width', shot.width), state.get('generation_height', shot.height)) != (shot.width, shot.height):
                 return dict(result, code='preview_mismatch', reason='This preview was prepared for different output dimensions. Rebuild the saved scene preview.', can_rebuild=True)
         return dict(result, ready=True, code='ready', reason='Saved scene and preview verified. Ready to generate.')
@@ -523,7 +526,8 @@ def create_router(runtime):
                                 raise HTTPException(409, response.json().get('detail', 'H3 resource recheck failed'))
                         bounded = segment_shot(shot, i) if shot.request.duration >= 5 else shot
                         context = await media.continuation(previous, runtime.resolve_output_path(f'motion_director/{job_id}'), i, shot.width, shot.height) if previous else None
-                        scene_path = await media.scene_window(runtime.resolve_output_path(f'motion_director/scenes/{shot.request.plan_id}/preview.mp4'), runtime.resolve_output_path(f'motion_director/{job_id}'), i, shot.width, shot.height, shot.request.quality) if shot.scene else None
+                        scene_path = await media.scene_window(runtime.resolve_output_path(f'motion_director/scenes/{shot.request.plan_id}/preview.mp4'), runtime.resolve_output_path(f'motion_director/{job_id}'), i, shot.width, shot.height, shot.request.quality,
+                                                             full_motion=bool(shot.scene.get('interactions'))) if shot.scene else None
                         if load(job_id).cancel_requested:
                             await update(job_id, status='cancelled', message='Cancelled before H3 submission', completed_at=runtime._now_utc())
                             return

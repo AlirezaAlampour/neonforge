@@ -1,0 +1,35 @@
+{
+  "UAL1_Standard": {
+    "clips": [
+      "Idle_Loop",
+      "Walk_Loop",
+      "Jog_Fwd_Loop",
+      "Punch_Jab",
+      "Punch_Cross",
+      "Hit_Chest",
+      "Hit_Head",
+      "Crouch_Idle_Loop",
+      "Roll"
+    ],
+    "source_zip_sha256": "cc73fc4e495b82958207316596317a3f40b9fa38065bde1027937452da537724",
+    "source_glb_sha256": "69591853d817488edaa8fd9bf8fc1d821eaeaf789f8627b3cd23b41c4ed67997",
+    "sha256": "9b7879425291dee52082e84a176f1f64e2e6b81321882ac2b8035808d36b2a49",
+    "source": "https://quaternius.itch.io/universal-animation-library",
+    "license": "CC0-1.0",
+    "modification": "Retain named animation clips and referenced binary data; source rig, mesh and keyframes unchanged."
+  },
+  "UAL2_Standard": {
+    "clips": [
+      "Melee_Hook",
+      "Melee_Hook_Rec",
+      "Hit_Knockback",
+      "Sword_Block"
+    ],
+    "source_zip_sha256": "4008ea208a604773a2b2177d965f0f5d3195498b5bf838c3f5785d68e95f2a68",
+    "source_glb_sha256": "8cee20ab1bc55130092447e810e26df22dd2803eccc54f52137a7d54d7ab88a8",
+    "sha256": "c3681b80a1ba7d90d1ce751f52c5de69bf6dcefa0b2b72633ca80f44dd9d864a",
+    "source": "https://quaternius.itch.io/universal-animation-library-2",
+    "license": "CC0-1.0",
+    "modification": "Retain named animation clips and referenced binary data; source rig, mesh and keyframes unchanged."
+  }
+}
