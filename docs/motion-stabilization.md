@@ -79,10 +79,16 @@ zero-new-call cached planning, saved takes, recovery controls, comparison playba
 reuse, all seven current routes and legacy-route 404s. Browser observations use
 America/Los_Angeles for timestamps; serialized job timestamps now include UTC.
 
-The integrated deployment uses `motion-stability-final` gateway/frontend images;
+The integrated deployment uses `motion-stability-final-ui` gateway/frontend images;
 Redis is healthy with AOF and noeviction. Supervisor keeps its original image and
 container; external H3 keeps its original process. Unrelated container IDs and
 running/stopped states match the pre-session inventory. No volumes or artifacts
 were pruned. The live draft's frame samples are evidence of playback/recovery,
 not a new identity-quality claim. Fresh Claude planning was not required for this
 acceptance; its existing subscription check may still report quota/rate limiting.
+
+GitHub CI initially exposed absent external FFmpeg tools on its runner. The media
+integration test now declares that requirement, matching the existing optional
+assembly test. Both still run and pass on this DGX. GitHub rerun passed both
+control-plane and frontend jobs; its two media integrations are skipped without
+those external tools. Local acceptance remains 228 passing tests.
