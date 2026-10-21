@@ -3,6 +3,7 @@ import asyncio
 import copy
 import json
 import math
+import shutil
 from pathlib import Path
 
 import pytest
@@ -144,6 +145,7 @@ def test_offline_trellis_blocks_when_container_is_running_or_unknown(monkeypatch
     asyncio.run(scenario())
 
 
+@pytest.mark.skipif(not shutil.which('ffmpeg') or not shutil.which('ffprobe'), reason='External FFmpeg/ffprobe required; exercised in DGX acceptance')
 def test_manual_video_import_keeps_selected_blender_plan_for_comparison(studio,monkeypatch,tmp_path):
     import subprocess
     client,fake=studio;ref=upload(client)
