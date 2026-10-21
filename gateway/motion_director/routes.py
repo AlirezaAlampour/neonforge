@@ -117,7 +117,7 @@ def create_router(runtime):
     def reusable_scene(shot):
         # Earlier camera edits could retain a parent after the user changed the
         # main prompt. Do not propagate that stale scene through the cache.
-        if shot.request.parent_plan_id and shot.planning_usage and shot.planning_usage.source in {'local-camera','scene-reuse'}:
+        if shot.request.parent_plan_id and shot.planning_usage and shot.planning_usage.source == 'local-camera':
             with runtime.SessionLocal() as db:
                 parent = db.get(MotionPlan, shot.request.parent_plan_id)
             return bool(parent and same_scene_request(shot.request, ShotSpec.model_validate_json(parent.shot_json).request))
@@ -200,8 +200,8 @@ def create_router(runtime):
             if not saved or saved.request_hash != fingerprint(request):
                 raise HTTPException(409, "The shot changed or its plan is missing. Plan it again before rendering.")
             shot = ShotSpec.model_validate_json(saved.shot_json)
-            if (shot.width,shot.height) != dimensions(request.quality,request.orientation):
-                raise HTTPException(409, 'This saved plan has inconsistent generation dimensions. Reuse the shot and rebuild its preview before generating.')
+            if (shot.width,shot.height) != dimensions(request.quality,request.orientation) or not reusable_scene(shot):
+                raise HTTPException(409, 'This saved plan needs a scene or canvas correction. Reuse the shot and rebuild its preview before generating.')
             return shot
         if request.director == "opus":
             raise HTTPException(409, "Plan an Opus-directed shot first; rendering never calls the planner.")
@@ -223,6 +223,8 @@ def create_router(runtime):
         now = runtime._now_utc().replace(tzinfo=None)
         elapsed = max(0, ((row.completed_at or now).replace(tzinfo=None) - (row.started_at or row.created_at).replace(tzinfo=None)).total_seconds())
         uncertain = any(c.status == 'submitting' for c in clips)
+        shot = ShotSpec.model_validate_json(row.shot_json)
+        needs_plan = (shot.width,shot.height) != dimensions(shot.request.quality,shot.request.orientation) or not reusable_scene(shot)
         scene_plan = json.loads(row.shot_json).get("request", {}).get("plan_id") if json.loads(row.shot_json).get("scene") else None
         return {"job_id": row.id, "service": json.loads(row.shot_json).get("request", {}).get("engine", "h3"), "status": row.status, "message": row.message,
                 "generation_claude_invocations":0,
@@ -231,7 +233,8 @@ def create_router(runtime):
                 "updated_at": stamp(row.updated_at),
                 "cancel_requested": row.cancel_requested,
                 "can_cancel": row.status not in TERMINAL and not row.cancel_requested,
-                "can_retry": row.status in {'failed','blocked','interrupted','cancelled'} and not uncertain and all(not c.prompt_id or c.status in {'completed','failed'} for c in clips),
+                "can_retry": row.status in {'failed','blocked','interrupted','cancelled'} and not needs_plan and not uncertain and all(not c.prompt_id or c.status in {'completed','failed'} for c in clips),
+                "recovery_hint": 'Reuse this shot to update its scene/canvas, review the Blender preview, then generate.' if needs_plan else None,
                 "can_reconcile": bool(row.prompt_id or uncertain or any(c.prompt_id for c in clips)) and row.status != 'completed',
                 "blender_preview_url": f"/api/v1/outputs/motion_director/scenes/{scene_plan}/preview.mp4" if scene_plan else None,
                 "segments": [{"index": c.position, "status": c.status, "prompt_id": c.prompt_id} for c in clips],
@@ -408,9 +411,12 @@ def create_router(runtime):
         row = load(job_id)
         shot = ShotSpec.model_validate_json(row.shot_json)
         renderer = get_renderer('h3', runtime)
-        if (shot.width,shot.height) != dimensions(shot.request.quality,shot.request.orientation):
+        with runtime.SessionLocal() as db:
+            has_submission = bool(row.prompt_id or db.query(MotionSegment).filter(MotionSegment.job_id == job_id,
+                (MotionSegment.prompt_id.isnot(None)) | (MotionSegment.status == 'submitting')).count())
+        if not has_submission and ((shot.width,shot.height) != dimensions(shot.request.quality,shot.request.orientation) or not reusable_scene(shot)):
             await update(job_id, status='blocked', message='Saved plan needs a generation-size correction',
-                         error='Reuse this shot to repair its canvas without another Claude call, review the Blender preview, then generate.', completed_at=runtime._now_utc())
+                         error='Reuse this shot to repair its scene/canvas, review the Blender preview, then generate.', completed_at=runtime._now_utc())
             return
         ensure_segments(job_id, shot)
         count = max(1, shot.request.duration // 5)
@@ -448,6 +454,8 @@ def create_router(runtime):
                         if recovery_only:
                             await update(job_id, status='interrupted', message='Accepted clips recovered. Continue the remaining clips when ready.', completed_at=runtime._now_utc())
                             return
+                        if (shot.width,shot.height) != dimensions(shot.request.quality,shot.request.orientation) or not reusable_scene(shot):
+                            raise HTTPException(409, 'Reuse the shot to repair its scene/canvas and review the Blender preview before continuing.')
                         ready = await capabilities(shot.request.quality)
                         if ready['h3'].get('can_recover_memory'):
                             await recover_memory()

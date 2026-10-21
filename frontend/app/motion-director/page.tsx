@@ -154,13 +154,9 @@ export default function MotionDirectorPage() {
     finally{setBusy('')}
   }
   const reuse = async (job: MotionJob) => {
-    let reused=job.shot
-    const expected=(job.shot.request.quality==='native'?[768,1344]:[384,672])
-    if(job.shot.request.orientation==='horizontal') expected.reverse()
-    if(job.shot.width!==expected[0] || job.shot.height!==expected[1]) {
-      setBusy(job.job_id)
-      try {reused=await motionApi.plan(job.shot.request)}catch(e){setError(String(e));return}finally{setBusy('')}
-    }
+    let reused: ShotSpec
+    setBusy(job.job_id);setError('')
+    try {reused=await motionApi.plan(job.shot.request)}catch(e){setError(String(e));return}finally{setBusy('')}
     const { reference_ids, ...request } = reused.request
     revision.current+=1
     setDraft({...initial,...request,quality:request.quality||'draft',pipeline:request.pipeline||'prompt',duration:[5,10,15,30].includes(request.duration)?request.duration:5,references:reference_ids.map((id,i)=>({id,name:`Picture ${i+1}`}))})
@@ -266,6 +262,7 @@ export default function MotionDirectorPage() {
         {job.elapsed_seconds != null && <p className="text-xs text-muted-foreground">{elapsed(job.elapsed_seconds)} elapsed{job.queue_position ? ` · Queue position ${job.queue_position}` : ''}{job.cancel_requested?' · Cancellation requested':''}</p>}
         {Boolean(job.total_segments) && <p className="text-xs text-muted-foreground">{job.completed_segments}/{job.total_segments} clips saved</p>}
         {job.error && <p className="break-words text-xs text-red-300">{job.error}</p>}
+        {job.recovery_hint && <p className="text-xs text-amber-200">{job.recovery_hint}</p>}
         <Usage shot={job.shot} rendering />
         {job.preview_url && <video className="max-h-[55vh] w-full rounded-lg bg-black" src={job.preview_url} controls playsInline preload="metadata" />}
         <div className="flex flex-wrap gap-2">{job.download_url && <a className="flex min-h-11 items-center rounded-md border border-white/15 px-3 text-sm" href={job.download_url}>Download video</a>}

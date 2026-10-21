@@ -133,3 +133,6 @@ def test_changed_story_cannot_silently_reuse_a_parent_camera_edit(studio,monkeyp
     changed=request|{'prompt':'The characters stop and talk','parent_plan_id':first['request']['plan_id'],'revision':'Make the camera smoother.'}
     second=client.post('/api/v1/motion-director/plan',json=changed)
     assert second.status_code==200 and calls==['Run and follow','The characters stop and talk']
+    native=client.post('/api/v1/motion-director/plan',json=changed|{'quality':'native'}).json()
+    cached=client.post('/api/v1/motion-director/plan',json=changed|{'quality':'native'}).json()
+    assert native['request']['plan_id']==cached['request']['plan_id'] and len(calls)==2

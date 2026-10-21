@@ -23,7 +23,8 @@ const folder='.motion-runtime/stabilization', key='neonforge-motion-director-v0.
   await page.getByRole('button',{name:/Needs attention/}).click()
   for(const job of jobs.filter(j=>j.status==='interrupted')){
    const take=page.getByRole('article',{name:`Take ${job.job_id}`})
-   await take.getByRole('button',{name:'Retry remaining clips'}).waitFor()
+   if(job.can_retry) await take.getByRole('button',{name:'Retry remaining clips'}).waitFor()
+   else {await take.getByRole('button',{name:'Reuse shot'}).waitFor();assert(job.recovery_hint)}
    assert.equal(await take.getByText('interrupted',{exact:true}).isVisible(),true)
   }
   assert.equal(await page.locator('.animate-pulse').count(),0)
@@ -41,7 +42,7 @@ const folder='.motion-runtime/stabilization', key='neonforge-motion-director-v0.
   assert.equal(await page.getByLabel('Cinematic prompt').inputValue(),sourcePlan.request.prompt)
   assert.equal(await page.locator('.animate-pulse').count(),0)
   await page.screenshot({path:folder+'/preview-mobile.png',fullPage:true})
-  let final=jobs.find(j=>j.status==='completed'&&j.blender_preview_url)
+  let final=jobs.find(j=>j.status==='completed'&&j.blender_preview_url&&j.shot.planning_usage?.source!=='local-camera')
   if(process.env.MOTION_REAL_DRAFT==='1'){
    assert(!fs.existsSync(folder+'/draft-accepted.json'),'A draft was already accepted. Reconcile that job instead of submitting another.')
    const generate=page.getByRole('button',{name:'Generate video',exact:true})
@@ -93,7 +94,7 @@ const folder='.motion-runtime/stabilization', key='neonforge-motion-director-v0.
   await page.screenshot({path:folder+'/after-desktop.png',fullPage:true})
   await take.getByRole('button',{name:'Reuse shot'}).click()
   assert.equal(await page.getByLabel('Cinematic prompt').inputValue(),final.shot.request.prompt)
-  await page.getByLabel('Blender 3D preview',{exact:true}).waitFor()
+  await page.getByLabel('Blender 3D preview',{exact:true}).waitFor({timeout:120000})
   // Read-only compatibility checks against every current creator route.
   for(const route of ['voiceover','video','character','avatar','lipsync','status']){
    const response=await page.goto(base+'/'+route);assert.equal(response.status(),200)

@@ -34,6 +34,7 @@ export type MotionJob = {
   generation_claude_invocations?: number
   queue_position?: number | null; elapsed_seconds?: number; started_at?: string | null
   can_retry?: boolean; can_cancel?: boolean; can_reconcile?: boolean; cancel_requested?: boolean
+  recovery_hint?: string | null
 }
 export type ScenePreview = { id: string; status: string; message?: string; error?: string; preview_url?: string; first_frame_url?: string; export_url?: string; prompt_url?: string; script_url?: string; preview_width?: number; preview_height?: number; cache_hit?: boolean; elapsed_seconds?: number }
 export type Capabilities = {

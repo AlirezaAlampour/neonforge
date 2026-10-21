@@ -248,3 +248,18 @@ def test_active_shared_lease_with_null_releasable_is_reported_as_blocked(studio,
     row=client.get('/api/v1/motion-director/capabilities').json()
     assert not row['h3']['render_ready'] and 'active' in row['h3']['reason']
     assert not fake.submissions
+
+
+def test_accepted_legacy_canvas_is_recovered_even_when_new_submission_would_be_refused(studio):
+    client,fake=studio
+    ref=upload(client)
+    shot=LocalDirector().plan(ShotRequest(prompt='Accepted legacy render',reference_ids=[ref],quality='native'))
+    shot.width,shot.height=384,672
+    job_id=str(uuid.uuid4())
+    with gateway.SessionLocal() as db:
+        db.add(gateway.MotionJob(id=job_id,shot_json=shot.model_dump_json(),status='running',message='Generating',prompt_id='test-prompt',claim_id=job_id,created_at=gateway._now_utc()))
+        db.add(gateway.MotionSegment(id=job_id+'-0',job_id=job_id,position=0,status='running',prompt_id='test-prompt'))
+        db.commit()
+    client.portal.call(routes.resume_motion_jobs,gateway)
+    row=wait_status(client,job_id,'completed')
+    assert row['preview_url'] and not fake.submissions and len(fake.releases)==1
