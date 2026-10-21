@@ -6,7 +6,7 @@ import { AnnotationCanvas } from '@/components/motion-annotations'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
-import { motionApi, downloadMotionJSON, type Annotation, type Capabilities, type MotionJob, type ShotRequest, type ShotSpec, type ScenePreview, type Tool } from '@/lib/motion-director'
+import { motionApi, annotationId, downloadMotionJSON, type Annotation, type Capabilities, type MotionJob, type ShotRequest, type ShotSpec, type ScenePreview, type Tool } from '@/lib/motion-director'
 
 type Reference = { id: string; name: string }
 type Draft = Omit<ShotRequest, 'reference_ids'> & { references: Reference[] }
@@ -16,7 +16,9 @@ const tools: Tool[] = ['arrow', 'path', 'orbit', 'waypoint', 'subject', 'entry',
 const toolNames: Record<Tool, string> = { arrow: 'Camera arrow', path: 'Camera path', orbit: 'Orbit around', waypoint: 'Camera stop', subject: 'Mark subject', entry: 'Enters here', exit: 'Exits here' }
 const toolHelp: Record<Tool, string> = { arrow: 'Drag from the camera’s starting point toward its destination.', path: 'Draw the path you want the camera to follow.', orbit: 'Drag from the subject outwards to draw an orbit.', waypoint: 'Tap each camera stop in order.', subject: 'Tap the person or object to keep in focus.', entry: 'Tap where the subject enters the scene.', exit: 'Tap where the subject leaves the scene.' }
 const selectClass = 'min-h-11 w-full rounded-md border border-white/15 bg-card px-3 text-sm'
-const terminal = (job: MotionJob) => ['completed', 'failed'].includes(job.status)
+const terminal = (job: MotionJob) => ['completed', 'failed', 'interrupted', 'blocked', 'needs_inspection', 'cancelled'].includes(job.status)
+const attention = (job: MotionJob) => terminal(job) && !['completed','cancelled'].includes(job.status)
+const elapsed = (seconds: number) => `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`
 const payload = ({ references, ...rest }: Draft): ShotRequest => ({ ...rest, reference_ids: references.map(r => r.id) })
 
 function Usage({shot, rendering=false}: {shot: ShotSpec; rendering?: boolean}) {
@@ -47,11 +49,13 @@ export default function MotionDirectorPage() {
   const [compare, setCompare] = useState<string[]>([])
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
+  const [takeFilter, setTakeFilter] = useState('all')
+  const pendingSubmission = useRef<{body: string; key: string} | null>(null)
   const videos = useRef<Record<string, HTMLVideoElement | null>>({})
   const revision = useRef(0)
   const qualityRef = useRef<'draft'|'native'>('native')
   qualityRef.current = draft.quality || 'native'
-  const patch = (change: Partial<Draft>) => { revision.current += 1; setDraft(prev => ({ ...prev, plan_id: undefined, ...change })); setPlan(null); setPreview(null) }
+  const patch = (change: Partial<Draft>) => { revision.current += 1; setDraft(prev => ({ ...prev, plan_id: undefined, ...('prompt' in change || 'references' in change ? {parent_plan_id:undefined,revision:''} : {}), ...change })); setPlan(null); setPreview(null) }
 
   useEffect(() => {
     try {
@@ -122,7 +126,15 @@ export default function MotionDirectorPage() {
   }
   const generate = async () => {
     setBusy('render'); setError('')
-    try { const job = await motionApi.submit(plan?.request || payload(draft)); setPlan(job.shot); setJobs(prev => [job, ...prev]) }
+    try {
+      const request = plan?.request || payload(draft), body = JSON.stringify(request)
+      try { pendingSubmission.current = JSON.parse(localStorage.getItem(KEY+'-submission') || 'null') } catch {}
+      if(pendingSubmission.current?.body !== body) pendingSubmission.current = {body, key:annotationId()}
+      try { localStorage.setItem(KEY+'-submission',JSON.stringify(pendingSubmission.current)) } catch {}
+      const job = await motionApi.submit(request, pendingSubmission.current!.key)
+      setPlan(job.shot); setJobs(prev => [job, ...prev.filter(j=>j.job_id!==job.job_id)])
+      pendingSubmission.current=null; try {localStorage.removeItem(KEY+'-submission')} catch {}
+    }
     catch (e) { setError(e instanceof Error ? e.message : 'Could not submit H3 shot') }
     finally { setBusy('') }
   }
@@ -134,6 +146,28 @@ export default function MotionDirectorPage() {
   }
   const completed = jobs.filter(j => j.status === 'completed' && j.preview_url)
   const comparison = completed.filter(j => compare.includes(j.job_id))
+  const visibleJobs = jobs.filter(j=>takeFilter==='all' || (takeFilter==='active' && !terminal(j)) || (takeFilter==='attention' && attention(j)) || (takeFilter==='ready' && j.status==='completed'))
+  const jobAction = async (job: MotionJob, action: 'retry'|'cancel'|'reconcile') => {
+    setBusy(job.job_id);setError('')
+    try {const updated=await motionApi[action](job.job_id);setJobs(prev=>prev.map(j=>j.job_id===updated.job_id?updated:j))}
+    catch(e){setError(e instanceof Error?e.message:'Could not update this take')}
+    finally{setBusy('')}
+  }
+  const reuse = async (job: MotionJob) => {
+    let reused=job.shot
+    const expected=(job.shot.request.quality==='native'?[768,1344]:[384,672])
+    if(job.shot.request.orientation==='horizontal') expected.reverse()
+    if(job.shot.width!==expected[0] || job.shot.height!==expected[1]) {
+      setBusy(job.job_id)
+      try {reused=await motionApi.plan(job.shot.request)}catch(e){setError(String(e));return}finally{setBusy('')}
+    }
+    const { reference_ids, ...request } = reused.request
+    revision.current+=1
+    setDraft({...initial,...request,quality:request.quality||'draft',pipeline:request.pipeline||'prompt',duration:[5,10,15,30].includes(request.duration)?request.duration:5,references:reference_ids.map((id,i)=>({id,name:`Picture ${i+1}`}))})
+    setSelected(reference_ids[0]);setPlan(reused);setPreview(null)
+    if(reused.scene && request.plan_id) {try{setPreview(await motionApi.buildPreview(request.plan_id))}catch(e){setError(String(e))}}
+    window.scrollTo({top:0,behavior:'smooth'})
+  }
   return <div className="space-y-6 pb-12">
     <div className="flex items-start gap-3"><Clapperboard className="mt-1 h-7 w-7 shrink-0 text-sky-300" /><div><h1 className="text-2xl font-semibold">Motion Director <span className="text-sm text-muted-foreground">v0.1</span></h1><p className="mt-1 text-sm text-muted-foreground">Set the scene. Preview the motion. Make the film.</p></div></div>
     <div className="flex flex-wrap gap-2 text-xs text-sky-200"><span className="rounded-full bg-sky-400/10 px-3 py-2">1 · Reference & direction</span><span className="rounded-full bg-sky-400/10 px-3 py-2">2 · 3D preview & corrections</span><span className="rounded-full bg-sky-400/10 px-3 py-2">3 · Final clip</span></div>
@@ -171,7 +205,7 @@ export default function MotionDirectorPage() {
       <p className="text-xs text-muted-foreground">{draft.pipeline === '3d' ? 'Claude Opus + Blender turn your reference into an editable approximation. Review the movement before making the AI clip.' : 'Classic prompt direction. Switch to 3D in Advanced for a Blender preview.'}</p>
       {draft.pipeline === '3d' && <Button className="min-h-12 w-full" disabled={Boolean(busy) || !draft.prompt.trim() || !draft.references.length || !capabilities?.blender?.available || ['queued','rendering'].includes(preview?.status || '')} onClick={() => void planShot()}>{busy === 'plan' ? 'Opus is directing your scene…' : plan?.scene ? 'Rebuild 3D preview' : 'Build 3D preview'}</Button>}
       {draft.pipeline === '3d' && !capabilities?.blender?.available && <p className="text-sm text-amber-200">{capabilities?.blender?.reason || 'Checking Blender availability…'}</p>}
-      {preview && <div className="space-y-3" aria-live="polite"><p className="text-sm text-sky-200">{preview.message}</p>{['queued','rendering'].includes(preview.status) && <div className="h-1 animate-pulse rounded bg-sky-400/40" />}
+      {preview && <div className="space-y-3" aria-live="polite"><p className="text-sm text-sky-200">Blender preview · {preview.status} · {preview.message}{preview.elapsed_seconds != null ? ` · ${elapsed(preview.elapsed_seconds)}` : ''}</p>
         {preview.preview_url && <><video aria-label="Blender 3D preview" className="max-h-[55vh] w-full rounded-lg bg-black" src={preview.preview_url} controls playsInline loop preload="metadata" />
           <p className="text-xs text-muted-foreground">Blender motion preview · approximate geometry and stylized animation. H3 may change poses, paths and object behavior.</p>
           {preview.preview_width && <p className="text-xs text-muted-foreground">Motion preview {preview.preview_width} × {preview.preview_height}{preview.cache_hit ? ' · cached' : ''}. Final generation {plan?.width} × {plan?.height}.</p>}
@@ -215,18 +249,21 @@ export default function MotionDirectorPage() {
     <section className="space-y-3 rounded-xl border border-sky-300/20 bg-sky-300/5 p-3 sm:p-5"><h2 className="font-semibold">3 · Make the final clip</h2><p className="text-sm text-muted-foreground">{draft.pipeline === '3d' ? 'Happy with the preview? Use its motion as a reference for H3, or export it for Grok.' : 'Generate a clip using your reference and direction.'}</p>
       <Button className="min-h-12 w-full" disabled={Boolean(busy) || !draft.prompt.trim() || !draft.references.length || (draft.pipeline === '3d' && preview?.status !== 'completed') || (!capabilities?.h3.render_ready && !capabilities?.h3.can_recover_memory)} onClick={() => void generate()}>{busy === 'render' ? 'Preparing your final clip…' : 'Generate video'}</Button>
       {capabilities?.resources && <p className="text-xs text-muted-foreground">{capabilities.resources.memory?.available_gb} GiB available · safe H3 generation needs {capabilities.h3.minimum_gb} GiB</p>}
+      {capabilities?.resources && <p className="text-xs text-muted-foreground">GPU {capabilities.resources.gpu.temperature_c ?? '—'}°C · {capabilities.resources.gpu.utilization_pct ?? '—'}% busy · {capabilities.resources.gpu.cap_active ? 'Safety cap active' : 'Safety coordination unverified'}</p>}
     </section>
     {!capabilities ? <p role="status" className="text-sm text-muted-foreground">Checking local H3 availability…</p> : !capabilities.h3.render_ready && <p role="status" className="rounded-lg border border-amber-400/20 p-3 text-sm text-amber-200">{capabilities.h3.reason || 'H3 is unavailable.'} Planning and drawings remain available.</p>}
     {capabilities?.h3.can_recover_memory && <Button variant="outline" className="min-h-11" disabled={Boolean(busy)} onClick={async () => { setBusy('memory'); try { await motionApi.recoverMemory(); setCapabilities(await motionApi.capabilities(qualityRef.current)) } catch(e) { setError(String(e)) } finally { setBusy('') } }}>Release idle H3 memory</Button>}
     <details className="rounded-xl border border-white/10 p-3"><summary className="min-h-11 cursor-pointer py-3">Grok · export, import & compare</summary><p className="my-3 text-sm text-muted-foreground">Export the Blender reference above, open Grok, and use its PNG and prompt to create your clip. If your Grok browser supports video references, use the MP4 too. Download the result and import it here.</p><p className="my-3 text-xs text-muted-foreground">{capabilities?.grok.reason}</p><a href="https://grok.com/imagine" target="_blank" rel="noreferrer" className="inline-flex min-h-11 items-center text-sky-300">Open Grok on your phone</a><label className="mt-3 flex min-h-12 cursor-pointer items-center justify-center rounded-lg border border-dashed p-3 text-sm">{busy === 'import' ? 'Preparing imported video…' : 'Import Grok MP4'}<input aria-label="Import Grok MP4" type="file" accept="video/mp4" className="sr-only" disabled={Boolean(busy)} onChange={async e => { const file=e.target.files?.[0]; e.target.value=''; if(!file) return; setBusy('import'); try { const reference=completed.find(j => j.service !== 'grok'); const job=await motionApi.importGrok(file,plan?.scene?undefined:reference?.job_id,plan?.scene?plan.request.plan_id||undefined:undefined); setJobs(prev=>[job,...prev]); if(job.blender_preview_url)setSceneCompare(job.job_id);else if(reference) setCompare([reference.job_id,job.job_id]) } catch(err) { setError(String(err)) } finally { setBusy('') } }} /></label><p className="mt-2 text-xs text-muted-foreground">Your original MP4 is preserved. Automatic Grok generation stays disabled.</p></details>
     <section className="space-y-4"><h2 className="font-semibold">Your takes</h2>
+      <div className="flex flex-wrap gap-2" role="group" aria-label="Filter takes">{[['all','All'],['active','Active'],['attention','Needs attention'],['ready','Ready']].map(([value,label])=><Button key={value} variant={takeFilter===value?'default':'outline'} className="min-h-11" aria-pressed={takeFilter===value} onClick={()=>setTakeFilter(value)}>{label} · {jobs.filter(j=>value==='all'||(value==='active'&&!terminal(j))||(value==='attention'&&attention(j))||(value==='ready'&&j.status==='completed')).length}</Button>)}</div>
       {!jobs.length && <p className="text-sm text-muted-foreground">Completed videos appear here for preview, download and comparison.</p>}
       {completed.filter(j=>j.job_id===sceneCompare && j.blender_preview_url).map(job=><div key={job.job_id} className="space-y-3 rounded-xl border border-sky-400/30 p-3"><div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-medium">Blender vs final clip</h3><Button variant="outline" className="min-h-11" onClick={()=>['blender-'+job.job_id,'final-'+job.job_id].forEach(id=>{const v=videos.current[id];if(v){v.currentTime=0;void v.play().catch(()=>{})}})}>Play reference & final</Button></div><div className="grid gap-3 md:grid-cols-2">{[{label:'Blender · planned motion',src:job.blender_preview_url!,key:'blender-'},{label:job.service==='grok'?'Grok · imported result':'H3 · generated result',src:job.preview_url!,key:'final-'}].map(v=><div key={v.key}><p className="mb-2 text-sm">{v.label}</p><video ref={node=>{videos.current[v.key+job.job_id]=node}} className="max-h-[55vh] w-full rounded-lg bg-black" src={v.src} controls playsInline preload="metadata" /></div>)}</div><p className="text-xs text-amber-200">Compare travel direction, camera distance, turns and stationary objects. Reference conditioning cannot guarantee exact movement or appearance.</p></div>)}
       {comparison.length === 2 && <div className="space-y-3 rounded-xl border border-sky-400/30 p-3"><div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-medium">Compare takes</h3><Button variant="outline" className="min-h-11" onClick={() => comparison.forEach(j => { const video = videos.current[j.job_id]; if (video) { video.currentTime = 0; void video.play().catch(() => {}) } })}>Play both from start</Button></div><div className="grid gap-3 md:grid-cols-2">{comparison.map((job, i) => <div key={job.job_id}><p className="mb-2 text-sm">Take {i + 1} · {job.shot.request.preset}</p><video ref={node => { videos.current[job.job_id] = node }} className="max-h-[60vh] w-full rounded-lg bg-black" src={job.preview_url!} playsInline controls preload="metadata" /></div>)}</div></div>}
-      <div className="grid gap-4 lg:grid-cols-2">{jobs.map(job => <article key={job.job_id} className="min-w-0 space-y-3 rounded-xl border border-white/10 p-3 sm:p-4">
+      {jobs.length>0 && !visibleJobs.length && <p className="text-sm text-muted-foreground">No takes in this view.</p>}
+      <div className="grid gap-4 lg:grid-cols-2">{visibleJobs.map(job => <article key={job.job_id} aria-label={`Take ${job.job_id}`} className="min-w-0 space-y-3 rounded-xl border border-white/10 p-3 sm:p-4">
         <div className="flex items-center justify-between gap-2"><span className="text-sm font-medium capitalize">{job.status}</span><span className="text-xs text-muted-foreground">{new Date(job.created_at).toLocaleString()}</span></div>
         <p className="line-clamp-2 text-sm">{job.shot.request.prompt}</p><p className="text-xs text-muted-foreground">{job.shot.width} × {job.shot.height} {job.shot.planner === 'manual-import' ? 'output' : 'native'} · {job.shot.fps} fps</p><p role="status" className="text-xs text-sky-200">{job.message}</p>
-        {!terminal(job) && <div className="h-1 overflow-hidden rounded bg-white/10"><div className="h-full w-1/3 animate-pulse rounded bg-sky-400" /></div>}
+        {job.elapsed_seconds != null && <p className="text-xs text-muted-foreground">{elapsed(job.elapsed_seconds)} elapsed{job.queue_position ? ` · Queue position ${job.queue_position}` : ''}{job.cancel_requested?' · Cancellation requested':''}</p>}
         {Boolean(job.total_segments) && <p className="text-xs text-muted-foreground">{job.completed_segments}/{job.total_segments} clips saved</p>}
         {job.error && <p className="break-words text-xs text-red-300">{job.error}</p>}
         <Usage shot={job.shot} rendering />
@@ -234,8 +271,10 @@ export default function MotionDirectorPage() {
         <div className="flex flex-wrap gap-2">{job.download_url && <a className="flex min-h-11 items-center rounded-md border border-white/15 px-3 text-sm" href={job.download_url}>Download video</a>}
           {job.blender_preview_url && job.status==='completed' && <Button variant="outline" className="min-h-11" onClick={()=>setSceneCompare(job.job_id)}>Compare with Blender</Button>}
           {job.status === 'completed' && <label className="flex min-h-11 cursor-pointer items-center gap-2 px-2 text-sm"><input type="checkbox" checked={compare.includes(job.job_id)} disabled={!compare.includes(job.job_id) && compare.length >= 2} onChange={e => setCompare(prev => e.target.checked ? [...prev, job.job_id] : prev.filter(id => id !== job.job_id))} />Compare take</label>}
-          {job.shot.planner !== 'manual-import' && <Button variant="ghost" className="min-h-11" onClick={() => { const { reference_ids, ...request } = job.shot.request; setDraft({ ...initial, ...request, quality: request.quality || 'draft', pipeline: request.pipeline || 'prompt', duration: [5,10,15,30].includes(request.duration) ? request.duration : 5, plan_id: undefined, references: reference_ids.map((id, i) => ({ id, name: `Picture ${i + 1}` })) }); setSelected(reference_ids[0]); setPlan(null); setPreview(null) }}>Reuse shot</Button>}
-          {job.status === 'failed' && job.prompt_id && <Button variant="ghost" className="min-h-11" onClick={() => void motionApi.reconcile(job.job_id).catch(e => setError(String(e)))}>Check accepted H3 shot</Button>}
+          {job.shot.planner !== 'manual-import' && <Button variant="ghost" className="min-h-11" disabled={Boolean(busy)} onClick={()=>void reuse(job)}>Reuse shot</Button>}
+          {job.can_retry && <Button variant="outline" className="min-h-11" disabled={Boolean(busy)} onClick={()=>void jobAction(job,'retry')}>Retry remaining clips</Button>}
+          {job.can_reconcile && <Button variant="outline" className="min-h-11" disabled={Boolean(busy)} onClick={()=>void jobAction(job,'reconcile')}>Check accepted H3 shot</Button>}
+          {job.can_cancel && <Button variant="ghost" className="min-h-11" disabled={Boolean(busy)} onClick={()=>void jobAction(job,'cancel')}>Cancel take</Button>}
         </div>
       </article>)}</div>
     </section>

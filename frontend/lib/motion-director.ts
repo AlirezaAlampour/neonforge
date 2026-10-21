@@ -32,6 +32,8 @@ export type MotionJob = {
   completed_segments?: number; total_segments?: number
   blender_preview_url?: string | null
   generation_claude_invocations?: number
+  queue_position?: number | null; elapsed_seconds?: number; started_at?: string | null
+  can_retry?: boolean; can_cancel?: boolean; can_reconcile?: boolean; cancel_requested?: boolean
 }
 export type ScenePreview = { id: string; status: string; message?: string; error?: string; preview_url?: string; first_frame_url?: string; export_url?: string; prompt_url?: string; script_url?: string; preview_width?: number; preview_height?: number; cache_hit?: boolean; elapsed_seconds?: number }
 export type Capabilities = {
@@ -47,13 +49,15 @@ export const motionApi = {
   buildPreview: (id: string) => request<ScenePreview>(`/api/v1/motion-director/plans/${id}/preview`, { method: 'POST' }),
   preview: (id: string) => request<ScenePreview>(`/api/v1/motion-director/plans/${id}/preview`),
   revise: (id: string, instruction: string) => request<ShotSpec>(`/api/v1/motion-director/plans/${id}/revise`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({instruction})}),
-  submit: (body: ShotRequest) => request<MotionJob>('/api/v1/motion-director/jobs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+  submit: (body: ShotRequest, key: string) => request<MotionJob>('/api/v1/motion-director/jobs', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify(body) }),
   jobs: () => request<{ items: MotionJob[] }>('/api/v1/motion-director/jobs'),
   upload: async (file: File) => {
     const form = new FormData(); form.append('file', file)
     return request<ComfyUIAsset>('/api/v1/motion-director/references', { method: 'POST', body: form })
   },
   reconcile: (jobId: string) => request<MotionJob>(`/api/v1/motion-director/jobs/${jobId}/reconcile`, { method: 'POST' }),
+  retry: (jobId: string) => request<MotionJob>(`/api/v1/motion-director/jobs/${jobId}/retry`, { method: 'POST' }),
+  cancel: (jobId: string) => request<MotionJob>(`/api/v1/motion-director/jobs/${jobId}/cancel`, { method: 'POST' }),
   recoverMemory: () => request('/api/v1/motion-director/memory/recover', { method: 'POST' }),
   importGrok: async (file: File, referenceJobId?: string, referencePlanId?: string) => {
     const body = new FormData(); body.append('file', file)
