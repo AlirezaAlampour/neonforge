@@ -6,9 +6,9 @@ import json
 import hashlib
 import uuid
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal
-from shared.motion_quality import PROFILES
+from shared.motion_quality import PROFILES, dimensions
 
 import httpx
 from fastapi import APIRouter, File, Form, Header, HTTPException, UploadFile
@@ -110,6 +110,19 @@ def create_router(runtime):
             data.pop('quality')  # pre-quality saved plans keep their fingerprint
         return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
+    def same_scene_request(a, b):
+        excluded = {'plan_id', 'parent_plan_id', 'revision', 'quality', 'seed'}
+        return a.model_dump(exclude=excluded) == b.model_dump(exclude=excluded)
+
+    def reusable_scene(shot):
+        # Earlier camera edits could retain a parent after the user changed the
+        # main prompt. Do not propagate that stale scene through the cache.
+        if shot.request.parent_plan_id and shot.planning_usage and shot.planning_usage.source in {'local-camera','scene-reuse'}:
+            with runtime.SessionLocal() as db:
+                parent = db.get(MotionPlan, shot.request.parent_plan_id)
+            return bool(parent and same_scene_request(shot.request, ShotSpec.model_validate_json(parent.shot_json).request))
+        return True
+
     async def planned_shot(request, reuse_cache=True):
         async with planning_lock:
             started=time.monotonic()
@@ -118,11 +131,12 @@ def create_router(runtime):
                 saved = db.execute(select(MotionPlan).where(MotionPlan.request_hash == key).order_by(desc(MotionPlan.created_at))).scalars().first()
             if saved and reuse_cache:
                 cached=ShotSpec.model_validate_json(saved.shot_json)
-                if cached.production_version==PRODUCTION_VERSION or not cached.scene:
+                if (cached.production_version==PRODUCTION_VERSION or not cached.scene) and (cached.width,cached.height)==dimensions(request.quality,request.orientation) and reusable_scene(cached):
                     cached.planning_usage=PlanningUsage(source='saved-plan',new_claude_invocations=0,
                         elapsed_seconds=round(time.monotonic()-started,3),original=cached.planning_usage.original if cached.planning_usage else None)
                     return cached
             shot = LocalDirector().plan(request)
+            canvas = (shot.width, shot.height)
             previous = None
             reused=False
             if request.parent_plan_id:
@@ -132,7 +146,7 @@ def create_router(runtime):
                     raise HTTPException(404, "The scene to revise is missing")
                 parent_shot=ShotSpec.model_validate_json(parent.shot_json)
                 previous = parent_shot.scene
-                edited=camera_revision(parent_shot,request.revision)
+                edited=camera_revision(parent_shot,request.revision) if same_scene_request(request,parent_shot.request) else None
                 if edited:
                     shot=edited;reused=True
             if not reused and request.pipeline=='3d' and reuse_cache:
@@ -142,8 +156,7 @@ def create_router(runtime):
                     recent=db.execute(select(MotionPlan).order_by(desc(MotionPlan.created_at)).limit(100)).scalars().all()
                 for row in recent:
                     candidate=ShotSpec.model_validate_json(row.shot_json)
-                    if candidate.scene and scene_key(candidate.request)==scene_key(request):
-                        canvas=(shot.width,shot.height)
+                    if candidate.scene and reusable_scene(candidate) and scene_key(candidate.request)==scene_key(request):
                         shot=candidate.model_copy(deep=True);shot.width,shot.height=canvas
                         shot.planning_usage=PlanningUsage(source='scene-reuse',new_claude_invocations=0,
                             elapsed_seconds=round(time.monotonic()-started,3),original=candidate.planning_usage.original if candidate.planning_usage else None)
@@ -170,6 +183,9 @@ def create_router(runtime):
                 except ValueError as exc:
                     raise HTTPException(422, "Invalid 3D geometry or timeline; no render was started") from exc
             plan_id = str(uuid.uuid4())
+            # Reusing/correcting a scene must retain the requested generation
+            # profile, even when its parent was planned at draft resolution.
+            shot.width, shot.height = canvas
             shot.request = request.model_copy(update={"plan_id": plan_id})
             shot.production_version=PRODUCTION_VERSION
             with runtime.SessionLocal() as db:
@@ -183,7 +199,10 @@ def create_router(runtime):
                 saved = db.get(MotionPlan, request.plan_id)
             if not saved or saved.request_hash != fingerprint(request):
                 raise HTTPException(409, "The shot changed or its plan is missing. Plan it again before rendering.")
-            return ShotSpec.model_validate_json(saved.shot_json)
+            shot = ShotSpec.model_validate_json(saved.shot_json)
+            if (shot.width,shot.height) != dimensions(request.quality,request.orientation):
+                raise HTTPException(409, 'This saved plan has inconsistent generation dimensions. Reuse the shot and rebuild its preview before generating.')
+            return shot
         if request.director == "opus":
             raise HTTPException(409, "Plan an Opus-directed shot first; rendering never calls the planner.")
         return LocalDirector().plan(request)
@@ -196,6 +215,8 @@ def create_router(runtime):
             return row
 
     def serialize(row):
+        def stamp(value):
+            return value.replace(tzinfo=timezone.utc).isoformat() if value else None
         with runtime.SessionLocal() as db:
             clips = db.execute(select(MotionSegment).where(MotionSegment.job_id == row.id).order_by(MotionSegment.position)).scalars().all()
             waiting = db.execute(select(MotionJob.id).where(MotionJob.status == 'queued', MotionJob.prompt_id.is_(None)).order_by(MotionJob.created_at, MotionJob.id)).scalars().all()
@@ -206,8 +227,8 @@ def create_router(runtime):
         return {"job_id": row.id, "service": json.loads(row.shot_json).get("request", {}).get("engine", "h3"), "status": row.status, "message": row.message,
                 "generation_claude_invocations":0,
                 "queue_position": waiting.index(row.id)+1 if row.id in waiting else row.queue_position,
-                "elapsed_seconds": round(elapsed), "started_at": row.started_at.isoformat() if row.started_at else None,
-                "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+                "elapsed_seconds": round(elapsed), "started_at": stamp(row.started_at),
+                "updated_at": stamp(row.updated_at),
                 "cancel_requested": row.cancel_requested,
                 "can_cancel": row.status not in TERMINAL and not row.cancel_requested,
                 "can_retry": row.status in {'failed','blocked','interrupted','cancelled'} and not uncertain and all(not c.prompt_id or c.status in {'completed','failed'} for c in clips),
@@ -215,7 +236,7 @@ def create_router(runtime):
                 "blender_preview_url": f"/api/v1/outputs/motion_director/scenes/{scene_plan}/preview.mp4" if scene_plan else None,
                 "segments": [{"index": c.position, "status": c.status, "prompt_id": c.prompt_id} for c in clips],
                 "completed_segments": sum(c.status == "completed" for c in clips), "total_segments": len(clips),
-                "error": row.error, "created_at": row.created_at.isoformat(), "prompt_id": row.prompt_id,
+                "error": row.error, "created_at": stamp(row.created_at), "prompt_id": row.prompt_id,
                 "result_path": row.output_path, "shot": json.loads(row.shot_json),
                 "preview_url": f"/api/v1/outputs/{row.output_path}" if row.output_path else None,
                 "download_url": f"/api/v1/history/{row.history_id}/download" if row.history_id else None}
@@ -286,19 +307,20 @@ def create_router(runtime):
                 status = await host_request(runtime, "claude/status")
                 planner.update(opus_available=status.get("available", False), subscription=status.get("subscription"), reason=status.get("reason"))
                 resources = await host_request(runtime, "resources")
-                resident_models = [item.get('name', 'another model') for item in resources.get('shared_gpu', {}).get('releasable', {}).get('items', [])
+                shared_gpu = resources.get('shared_gpu') or {}
+                resident_models = [item.get('name', 'another model') for item in (shared_gpu.get('releasable') or {}).get('items', [])
                                    if item.get('kind') in {'ollama_model', 'hunyuan_models'}]
                 if resident_models:
                     h3.update(render_ready=False, reason="Other models are resident (" + ", ".join(resident_models[:8]) + "). Unload them before H3; automatic unloading is disabled.")
                 blockers = [b for b in resources.get("blockers", []) if not b.startswith("H3 needs")]
-                if blockers or resources.get("exclusive_claims") or resources.get("shared_gpu", {}).get("exclusive"):
+                if blockers or resources.get("exclusive_claims") or shared_gpu.get("exclusive"):
                     h3["render_ready"] = False
                     h3["reason"] = " ".join(blockers) or "A GPU-exclusive generation is already active."
             except (RuntimeError, httpx.HTTPError, OSError):
                 h3.update(render_ready=False, reason="Authenticated host GPU safety/coordination is unavailable.")
         h3["can_recover_memory"] = bool(h3.get("available") and scheduler and available_gb < minimum and not h3.get("busy") and resources
                                         and not resident_models
-                                        and not resources.get("exclusive_claims") and not resources.get("shared_gpu", {}).get("exclusive")
+                                        and not resources.get("exclusive_claims") and not (resources.get("shared_gpu") or {}).get("exclusive")
                                         and not [b for b in resources.get("blockers", []) if not b.startswith("H3 needs")])
         blender = {"available": False, "reason": "The private Blender host connection is unavailable"}
         if getattr(runtime, "HOST_CONTROL_SOCKET", ""):
@@ -386,6 +408,10 @@ def create_router(runtime):
         row = load(job_id)
         shot = ShotSpec.model_validate_json(row.shot_json)
         renderer = get_renderer('h3', runtime)
+        if (shot.width,shot.height) != dimensions(shot.request.quality,shot.request.orientation):
+            await update(job_id, status='blocked', message='Saved plan needs a generation-size correction',
+                         error='Reuse this shot to repair its canvas without another Claude call, review the Blender preview, then generate.', completed_at=runtime._now_utc())
+            return
         ensure_segments(job_id, shot)
         count = max(1, shot.request.duration // 5)
         uncertain = False
@@ -771,7 +797,7 @@ def create_router(runtime):
                         attempts.append({'prompt_id':clip.prompt_id, 'status':clip.status, 'at':runtime._now_utc().isoformat()})
                     segment_update(clip.id, prompt_id=None, status='waiting', attempts_json=json.dumps(attempts))
             await update(job_id, status='queued', message='Explicit retry queued; saved clips will be reused', error=None,
-                         prompt_id=None, dispatch_version=1, cancel_requested=False, started_at=None, completed_at=None)
+                         prompt_id=None, dispatch_version=1, cancel_requested=False, completed_at=None)
             start(job_id)
             return serialize(load(job_id))
 

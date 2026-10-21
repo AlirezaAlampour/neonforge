@@ -23,7 +23,7 @@ jobs:
       - run: uv lock --check && uv sync --locked --dev
       - name: Run CPU-safe tests
         run: >-
-          uv run pytest
+          uv run --locked --no-sync pytest
           tests/test_chunker.py
           tests/test_voiceover_frontend_source.py
           tests/test_media_frontend_source.py
@@ -35,6 +35,13 @@ jobs:
           tests/test_breeze_tts_service.py
           tests/test_misotts_service.py
           tests/test_voxcpm2_service.py
+          tests/test_motion_director.py
+          tests/test_motion_sequence.py
+          tests/test_motion_recovery.py
+          tests/test_motion_host_control.py
+          tests/test_motion_quality.py
+          tests/test_motion_iteration.py
+          tests/test_motion_scene.py
           gateway/tests/test_comfyui_jobs.py
 
   frontend:

@@ -96,3 +96,40 @@ def test_heading_step_is_damped_and_world_path_does_not_overshoot_or_move_during
         p=sample(path,i/24,(0,0,0))
         assert 0<=p[0]<=5 and 0<=p[1]<=17
         if i>=144:assert p==(5,17,0)
+
+
+def test_camera_revision_keeps_requested_native_canvas_when_parent_is_draft(studio,monkeypatch):
+    client,_=studio;ref=upload(client);calls=[]
+    async def host(runtime,route,payload=None):
+        assert route=='claude/plan';calls.append(route)
+        shot=LocalDirector().plan(ShotRequest.model_validate(payload['shot']));shot.scene=blockout();shot.h3=direction();return shot.model_dump()
+    monkeypatch.setattr(routes,'host_request',host)
+    request={'prompt':'Run and follow','reference_ids':[ref],'duration':10,'pipeline':'3d','director':'opus'}
+    parent=client.post('/api/v1/motion-director/plan',json=request).json()
+    revision=request|{'quality':'native','parent_plan_id':parent['request']['plan_id'],'revision':'Make the camera smoother.'}
+    revised=client.post('/api/v1/motion-director/plan',json=revision).json()
+    assert (revised['width'],revised['height'])==(768,1344)
+    assert revised['request']['quality']=='native' and revised['scene']['entities']==parent['scene']['entities']
+    assert revised['planning_usage']['new_claude_invocations']==0 and len(calls)==1
+    # Repair an old bad cached record by reusing its scene, preserving its history.
+    from test_motion_director import gateway
+    with gateway.SessionLocal() as db:
+        row=db.get(gateway.MotionPlan,revised['request']['plan_id'])
+        bad=json.loads(row.shot_json);bad['width']=384;bad['height']=672;row.shot_json=json.dumps(bad);db.commit()
+    repaired=client.post('/api/v1/motion-director/plan',json=revision).json()
+    assert (repaired['width'],repaired['height'])==(768,1344)
+    assert repaired['request']['plan_id']!=revised['request']['plan_id']
+    assert len(calls)==1
+
+
+def test_changed_story_cannot_silently_reuse_a_parent_camera_edit(studio,monkeypatch):
+    client,_=studio;ref=upload(client);calls=[]
+    async def host(runtime,route,payload=None):
+        assert route=='claude/plan';calls.append(payload['shot']['prompt'])
+        shot=LocalDirector().plan(ShotRequest.model_validate(payload['shot']));shot.scene=blockout();shot.h3=direction();return shot.model_dump()
+    monkeypatch.setattr(routes,'host_request',host)
+    request={'prompt':'Run and follow','reference_ids':[ref],'duration':10,'pipeline':'3d','director':'opus'}
+    first=client.post('/api/v1/motion-director/plan',json=request).json()
+    changed=request|{'prompt':'The characters stop and talk','parent_plan_id':first['request']['plan_id'],'revision':'Make the camera smoother.'}
+    second=client.post('/api/v1/motion-director/plan',json=changed)
+    assert second.status_code==200 and calls==['Run and follow','The characters stop and talk']

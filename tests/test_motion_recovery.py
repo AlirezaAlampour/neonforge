@@ -233,3 +233,18 @@ def test_additive_migration_preserves_legacy_rows_and_is_repeatable(studio):
     gateway.run_sqlite_schema_migrations();gateway.run_sqlite_schema_migrations()
     assert client.get('/api/v1/motion-director/jobs/'+job_id).json()['status']=='queued'
     assert not fake.submissions
+
+
+def test_active_shared_lease_with_null_releasable_is_reported_as_blocked(studio,monkeypatch):
+    client,fake=studio
+    monkeypatch.setattr(gateway,'HOST_CONTROL_SOCKET','private-test-socket')
+    async def host(runtime,route,payload=None):
+        if route=='resources':return {'shared_gpu':{'exclusive':True,'releasable':None},'exclusive_claims':{'active':{}}}
+        if route=='claude/status':return {'available':False,'reason':'subscription check deferred'}
+        if route=='scene/capabilities':return {'available':True}
+        if route=='grok/status':return {'available':False}
+        raise AssertionError(route)
+    monkeypatch.setattr(routes,'host_request',host)
+    row=client.get('/api/v1/motion-director/capabilities').json()
+    assert not row['h3']['render_ready'] and 'active' in row['h3']['reason']
+    assert not fake.submissions

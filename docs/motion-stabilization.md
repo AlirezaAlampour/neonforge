@@ -54,3 +54,17 @@ with the root uv.lock verified and `uv run --locked --no-sync`.
 
 Deployment artifacts, online database backup, before/after jobs, browser captures
 and live draft evidence are retained under `.motion-runtime/stabilization/`.
+
+## Live acceptance follow-up
+
+`bc0a515` is the durable-queue milestone. The deployed outage test accepted new
+job `9082b4f7-3d86-4c14-974e-cde90a0a2acf` with HTTP 202 while Redis was stopped;
+its generic and Motion status endpoints remained readable. Redis was restarted
+in a finally-protected browser harness. A real null `releasable` value under an
+active GPU lease exposed a capabilities 500; that handling now has a regression.
+Explicit mobile continuation reused the completed first clip and finished the
+second. The original four jobs remain interrupted, zero accepted prompts each.
+Redis AOF was enabled against the live keyspace before container recreation,
+preserving the existing RDB-only keys. The release helper performs this migration
+before activation. Gateway/frontend only were redeployed; supervisor and external
+H3 were not replaced. Earlier service images and the feature branch are retained.

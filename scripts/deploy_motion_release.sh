@@ -22,6 +22,26 @@ cap=httpx.get('http://100.103.129.82:8080/api/v1/motion-director/capabilities',t
 if (cap.get('resources') or {}).get('exclusive_claims'):raise SystemExit('A GPU claim is active; preserve the current deployment')
 PY
 docker compose -f docker-compose.yml -f docker-compose.motion.yml -f "$override" config --quiet
+# Migrate the existing Redis keyspace to AOF before recreating its container.
+# Enabling appendonly only at next boot can skip an RDB-only keyspace.
+if docker inspect ai-redis >/dev/null 2>&1; then
+  if [[ "$(docker inspect ai-redis --format '{{.State.Running}}')" != true ]]; then
+    docker start ai-redis
+  fi
+  for attempt in {1..30}; do
+    if docker exec ai-redis redis-cli ping | rg -q PONG; then break; fi
+    sleep 1
+  done
+  docker exec ai-redis redis-cli SAVE
+  docker exec ai-redis redis-cli CONFIG SET appendonly yes
+  ready=false
+  for attempt in {1..30}; do
+    persistence="$(docker exec ai-redis redis-cli INFO persistence)"
+    if [[ "$persistence" == *"aof_rewrite_in_progress:0"* && "$persistence" == *"aof_last_bgrewrite_status:ok"* ]]; then ready=true; break; fi
+    sleep 1
+  done
+  [[ "$ready" == true ]]
+fi
 docker compose -f docker-compose.yml -f docker-compose.motion.yml -f "$override" up -d --no-deps --wait redis
 # Images are prepared by build_motion_images.sh using existing dependencies.
 docker compose -f docker-compose.yml -f docker-compose.motion.yml -f "$override" up -d --no-deps --wait gateway frontend
